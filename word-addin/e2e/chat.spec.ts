@@ -1648,10 +1648,10 @@ test("streams sealed edit cards into Word and resolves their exact revisions", a
 
   let calls = await addin.wordCalls();
   expect(calls.trackedChanges).toEqual([
-    { text: "The Supplier", location: "Replace", original: "The Suplier" },
+    { text: "The Supplier", location: "After", original: "The Suplier" },
     {
       text: "shall deliver the goods",
-      location: "Replace",
+      location: "After",
       original: "shall deliver goods",
     },
   ]);
@@ -1676,12 +1676,12 @@ test("streams sealed edit cards into Word and resolves their exact revisions", a
 
   calls = await addin.wordCalls();
   expect(calls.acceptedChanges).toEqual([
-    { text: "The Supplier", location: "Replace", original: "The Suplier" },
+    { text: "The Supplier", location: "After", original: "The Suplier" },
   ]);
   expect(calls.rejectedChanges).toEqual([
     {
       text: "shall deliver the goods",
-      location: "Replace",
+      location: "After",
       original: "shall deliver goods",
     },
   ]);
@@ -1772,7 +1772,7 @@ test("shows a provisional edit card but waits for a sealed boundary before mutat
   await expect
     .poll(async () => (await addin.wordCalls()).trackedChanges)
     .toEqual([
-      { text: "The Supplier", location: "Replace", original: "The Suplier" },
+      { text: "The Supplier", location: "After", original: "The Suplier" },
     ]);
   await expect(
     page.getByRole("button", { name: "Accept", exact: true }),
@@ -1804,7 +1804,7 @@ test("View scrolls Word to the passage an edit changed", async ({
   await expect
     .poll(async () => (await addin.wordCalls()).revealedChanges)
     .toEqual([
-      { text: "The Supplier", location: "Replace", original: "The Suplier" },
+      { text: "The Supplier", location: "After", original: "The Suplier" },
     ]);
   // Viewing is navigation only: the change stays pending.
   await expect(view).toBeVisible();
@@ -1836,7 +1836,7 @@ test("View falls back to a second anchor when Word invalidates the first", async
   await expect
     .poll(async () => (await addin.wordCalls()).revealedChanges)
     .toEqual([
-      { text: "The Supplier", location: "Replace", original: "The Suplier" },
+      { text: "The Supplier", location: "After", original: "The Suplier" },
     ]);
   await expect(page.locator("body")).not.toContainText("GeneralException");
 });
@@ -1982,10 +1982,10 @@ test("Accept all resolves every pending tracked-change handle", async ({
   await expect
     .poll(async () => (await addin.wordCalls()).acceptedChanges)
     .toEqual([
-      { text: "The Supplier", location: "Replace", original: "The Suplier" },
+      { text: "The Supplier", location: "After", original: "The Suplier" },
       {
         text: "shall deliver the goods",
-        location: "Replace",
+        location: "After",
         original: "shall deliver goods",
       },
     ]);
@@ -2056,14 +2056,14 @@ test("keeps an edit reviewable through its passage when Word withholds revision 
     page.getByText("Applied in Word — review it from Word’s Review tab."),
   ).toHaveCount(0);
   expect((await addin.wordCalls()).trackedChanges).toEqual([
-    { text: "The Supplier", location: "Replace", original: "The Suplier" },
+    { text: "The Supplier", location: "After", original: "The Suplier" },
   ]);
 
   await view.click();
   await expect
     .poll(async () => (await addin.wordCalls()).revealedChanges)
     .toEqual([
-      { text: "The Supplier", location: "Replace", original: "The Suplier" },
+      { text: "The Supplier", location: "After", original: "The Suplier" },
     ]);
 
   // Resolution re-reads the passage; its ranges report nothing here, so the
@@ -2074,7 +2074,7 @@ test("keeps an edit reviewable through its passage when Word withholds revision 
   await expect(page.getByText("Accepted.", { exact: true })).toBeVisible();
   const calls = await addin.wordCalls();
   expect(calls.acceptedChanges).toEqual([
-    { text: "The Supplier", location: "Replace", original: "The Suplier" },
+    { text: "The Supplier", location: "After", original: "The Suplier" },
   ]);
   expect(calls.rejectedChanges).toEqual([]);
 });
