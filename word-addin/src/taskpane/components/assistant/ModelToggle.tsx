@@ -1,5 +1,5 @@
 import React, { useEffect, useMemo, useState } from "react";
-import { AlertCircle, Check, ChevronDown } from "lucide-react";
+import { AlertCircle, Check, Settings2 } from "lucide-react";
 import { getOllamaModels, type ApiKeyStatus } from "../../api/mikeApi";
 import {
   isModelAvailable,
@@ -57,24 +57,18 @@ export function ModelToggle({
           aria-label="Choose model"
           title={
             selectedAvailable
-              ? "Choose model"
+              ? `Choose model — ${selected?.label ?? "Model"}`
               : "API key missing for selected model"
           }
-          className={`flex h-8 items-center gap-1.5 rounded-full px-2 text-sm text-gray-400 transition-colors hover:text-gray-700 ${
+          className={`flex h-8 w-8 shrink-0 items-center justify-center rounded-full text-gray-400 transition-colors hover:text-gray-700 ${
             open ? "text-gray-700" : ""
           }`}
         >
-          {!selectedAvailable && (
-            <AlertCircle className="h-3 w-3 shrink-0 text-red-500" />
+          {!selectedAvailable ? (
+            <AlertCircle className="h-4 w-4 shrink-0 text-red-500" />
+          ) : (
+            <Settings2 className="h-4 w-4 shrink-0" />
           )}
-          <span className="max-w-[140px] truncate">
-            {selected?.label ?? "Model"}
-          </span>
-          <ChevronDown
-            className={`h-3 w-3 shrink-0 transition-transform duration-200 ${
-              open ? "rotate-180" : ""
-            }`}
-          />
         </button>
       </DropdownTrigger>
       <DropdownContent
