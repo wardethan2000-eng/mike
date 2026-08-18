@@ -27,6 +27,8 @@ import {
 import { indexInBackground } from "../lib/passageIndex";
 import { checkProjectAccess } from "../lib/access";
 import { searchMatter } from "../lib/matterSearch";
+import { answerMatter } from "../lib/matterAnswer";
+import { getUserModelSettings } from "../lib/userSettings";
 import { singleFileUpload } from "../lib/upload";
 import { deleteUserProjects } from "../lib/userDataCleanup";
 import {
@@ -833,6 +835,63 @@ projectsRouter.get("/:projectId/documents", requireAuth, async (req, res) => {
   await attachActiveVersionPaths(db, docsTyped);
   res.json(docsTyped);
 });
+
+// POST /projects/:projectId/search/answer — one consolidated answer to a
+// question asked of the whole matter. It searches the matter's passages and
+// asks the model for a single answer that cites the document and page, using
+// only what the documents say. This is stage 7 of search across a matter: the
+// same passages the assistant cites, gathered into one answer without a
+// conversation.
+projectsRouter.post(
+  "/:projectId/search/answer",
+  requireAuth,
+  async (req, res) => {
+    const userId = res.locals.userId as string;
+    const userEmail = res.locals.userEmail as string | undefined;
+    const { projectId } = req.params;
+    const db = createServerSupabase();
+
+    const access = await checkProjectAccess(projectId, userId, userEmail, db);
+    if (!access.ok)
+      return void res.status(404).json({ detail: "Project not found" });
+
+    const question =
+      typeof req.body?.question === "string" ? req.body.question : "";
+    const model =
+      typeof req.body?.model === "string" ? req.body.model : null;
+    if (!question.trim())
+      return void res.status(400).json({ detail: "A question is required" });
+
+    try {
+      const settings = await getUserModelSettings(userId, db);
+      const result = await answerMatter(db, {
+        userId: access.project.user_id,
+        projectId,
+        question,
+        model,
+        apiKeys: settings.api_keys,
+        limit: 12,
+      });
+      res.json({
+        question: result.question,
+        answer: result.answer,
+        sources: result.sources.map((h) => ({
+          documentId: h.documentId,
+          filename: h.filename,
+          page: h.page,
+          matchedBy: h.matchedBy,
+          fromFilename: h.fromFilename,
+        })),
+      });
+    } catch (err) {
+      console.error("[projects/search/answer] failed", {
+        projectId,
+        error: safeErrorLog(err),
+      });
+      res.status(500).json({ detail: "Could not answer from the matter" });
+    }
+  },
+);
 
 // GET /projects/:projectId/search — search this matter's documents by word and
 // by meaning, returning the best passages with their document and page. This is
