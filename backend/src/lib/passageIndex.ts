@@ -108,6 +108,60 @@ export type IndexResult = {
   reason?: string;
 };
 
+/** A filename turned into plain words: no extension, separators to spaces. */
+function filenameToText(filename: string): string {
+  return filename
+    .replace(/\.[a-z0-9]{1,8}$/i, "")
+    .replace(/[_\-.]+/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+/**
+ * Stores a single passage made from the document's filename, for a document
+ * with no text of its own. Marked from_filename so a result can say the match
+ * was on the name rather than on anything inside the file.
+ */
+async function indexFilenameOnly(
+  db: Db,
+  params: {
+    version: IndexableVersion;
+    userId: string;
+    projectId: string | null;
+  },
+): Promise<IndexResult> {
+  const { version, userId, projectId } = params;
+
+  // Nothing was stored for this version before; clear any stale rows anyway.
+  await db.from("document_passages").delete().eq("version_id", version.id);
+
+  const { data: v } = await db
+    .from("document_versions")
+    .select("filename")
+    .eq("id", version.id)
+    .maybeSingle();
+  const label = filenameToText((v?.filename as string) ?? "");
+  if (!label) return { passages: 0, reason: "no text found" };
+
+  const [embedding] = await embedPassages([label]);
+  const { error } = await db.from("document_passages").insert({
+    document_id: version.document_id,
+    version_id: version.id,
+    user_id: userId,
+    project_id: projectId,
+    page: null,
+    ordinal: 0,
+    content: label,
+    from_ocr: false,
+    from_filename: true,
+    embedding: embedding ? toVectorLiteral(embedding) : null,
+  });
+  if (error) {
+    return { passages: 0, reason: `could not store the filename: ${error.message}` };
+  }
+  return { passages: 1 };
+}
+
 /**
  * Stores the passages for one version, replacing anything stored for it before.
  * Safe to re-run: re-indexing a document never touches the rest of the matter.
@@ -131,9 +185,11 @@ export async function indexVersion(
 
   const passages = toPassages(text);
   if (passages.length === 0) {
-    // Not an error. A picture of a wall has no text in it either.
-    await db.from("document_passages").delete().eq("version_id", version.id);
-    return { passages: 0, reason: "no text found" };
+    // No text of its own — a photograph, or a file that read as nothing. Store
+    // its name instead, so a document with a descriptive filename (an inspection
+    // photo, say) is still found by a search even though there is nothing to
+    // read inside it.
+    return indexFilenameOnly(db, { version, userId, projectId });
   }
 
   const fromOcr = isOcrDerived(version);
@@ -150,6 +206,7 @@ export async function indexVersion(
     ordinal: passage.ordinal,
     content: passage.content,
     from_ocr: fromOcr,
+    from_filename: false,
     embedding: embeddings[i] ? toVectorLiteral(embeddings[i]!) : null,
   }));
 

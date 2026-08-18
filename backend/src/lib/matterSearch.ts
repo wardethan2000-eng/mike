@@ -16,6 +16,8 @@ export type MatterSearchHit = {
   content: string;
   /** True when the passage's text came from character recognition. */
   fromOcr: boolean;
+  /** True when the passage is the document's filename, not text inside it. */
+  fromFilename: boolean;
   /** How the passage was found: exact words, meaning, or a fuzzy (typo-tolerant) match. */
   matchedBy: "words" | "meaning" | "similar";
   rank: number;
@@ -28,6 +30,7 @@ type RpcRow = {
   ordinal: number;
   content: string;
   from_ocr: boolean;
+  from_filename: boolean;
   rank: number;
   matched_by: "words" | "meaning" | "similar";
 };
@@ -99,6 +102,7 @@ export async function searchMatter(
     page: r.page,
     content: r.content,
     fromOcr: r.from_ocr,
+    fromFilename: r.from_filename,
     matchedBy: r.matched_by,
     rank: r.rank,
   }));
@@ -138,6 +142,9 @@ export function formatForAssistant(
       .map((hit) => {
         const where = hit.page !== null ? `page ${hit.page}` : "no page number";
         const flags = [
+          hit.fromFilename
+            ? "matched on the file's name — the file itself has no readable text"
+            : null,
           hit.fromOcr ? "from a scan — check figures against the original" : null,
           hit.matchedBy === "meaning" ? "matched on meaning, not the exact words" : null,
           hit.matchedBy === "similar" ? "approximate match" : null,
