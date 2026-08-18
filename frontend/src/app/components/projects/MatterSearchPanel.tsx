@@ -11,6 +11,7 @@ import {
 import { SearchBar } from "@/app/components/ui/search-bar";
 import { TabPillButton } from "@/app/components/ui/tab-pill-button";
 import { Button } from "@/app/components/ui/button";
+import { useSelectedModel } from "@/app/hooks/useSelectedModel";
 
 type Mode = "find" | "ask";
 
@@ -43,6 +44,9 @@ export function MatterSearchPanel({ projectId }: Props) {
     const [hits, setHits] = useState<MatterSearchHit[] | null>(null);
     const [answer, setAnswer] = useState<MatterAnswer | null>(null);
     const abortRef = useRef<AbortController | null>(null);
+    // Use whichever model the user has chosen in the app, so "Ask" works with the
+    // provider they actually have set up (the same model the assistant uses).
+    const [selectedModel] = useSelectedModel();
 
     async function run() {
         const q = query.trim();
@@ -63,6 +67,7 @@ export function MatterSearchPanel({ projectId }: Props) {
             } else {
                 setHits(null);
                 const res = await answerMatter(projectId, q, {
+                    model: selectedModel,
                     signal: controller.signal,
                 });
                 setAnswer(res);
