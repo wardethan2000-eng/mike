@@ -5,6 +5,7 @@
 // a document that could not be indexed is still a document you can open, so
 // nothing here is allowed to fail an upload.
 import { isOcrDerived } from "./documentRendition";
+import { embedPassages, toVectorLiteral } from "./embeddings";
 import {
   isPresentationDocumentType,
   isSpreadsheetDocumentType,
@@ -136,7 +137,11 @@ export async function indexVersion(
   }
 
   const fromOcr = isOcrDerived(version);
-  const rows = passages.map((passage) => ({
+  // The meaning fingerprint for each passage, computed locally. A null entry
+  // (an empty passage, or the model being unavailable) simply stores no
+  // fingerprint, and the passage stays findable by word search.
+  const embeddings = await embedPassages(passages.map((p) => p.content));
+  const rows = passages.map((passage, i) => ({
     document_id: version.document_id,
     version_id: version.id,
     user_id: userId,
@@ -145,6 +150,7 @@ export async function indexVersion(
     ordinal: passage.ordinal,
     content: passage.content,
     from_ocr: fromOcr,
+    embedding: embeddings[i] ? toVectorLiteral(embeddings[i]!) : null,
   }));
 
   // Replace rather than add to, so re-indexing cannot leave stale passages

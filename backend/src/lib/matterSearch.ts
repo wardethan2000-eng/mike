@@ -4,6 +4,7 @@
 // (see migration 20260818_02). The database does the searching and ranking;
 // this attaches each passage's filename and shapes the result for a caller —
 // the assistant, or a search box later.
+import { embedQuery, toVectorLiteral } from "./embeddings";
 import type { createServerSupabase } from "./supabase";
 
 type Db = ReturnType<typeof createServerSupabase>;
@@ -15,8 +16,8 @@ export type MatterSearchHit = {
   content: string;
   /** True when the passage's text came from character recognition. */
   fromOcr: boolean;
-  /** "words" for a full-text match, "similar" for a fuzzy (typo-tolerant) one. */
-  matchedBy: "words" | "similar";
+  /** How the passage was found: exact words, meaning, or a fuzzy (typo-tolerant) match. */
+  matchedBy: "words" | "meaning" | "similar";
   rank: number;
 };
 
@@ -28,7 +29,7 @@ type RpcRow = {
   content: string;
   from_ocr: boolean;
   rank: number;
-  matched_by: "words" | "similar";
+  matched_by: "words" | "meaning" | "similar";
 };
 
 export type MatterSearchParams = {
@@ -50,11 +51,16 @@ export async function searchMatter(
   const query = params.query.trim();
   if (!query) return [];
 
+  // The query's meaning fingerprint, computed locally. Null when the model is
+  // unavailable, in which case the search falls back to words and fuzzy only.
+  const embedding = await embedQuery(query);
+
   const { data, error } = await db.rpc("search_document_passages", {
     p_user_id: params.userId,
     p_project_id: params.projectId ?? null,
     p_query: query,
     p_limit: params.limit ?? 20,
+    p_query_embedding: embedding ? toVectorLiteral(embedding) : null,
   });
   if (error) {
     console.error("[matter-search] search failed:", error.message);
@@ -133,6 +139,7 @@ export function formatForAssistant(
         const where = hit.page !== null ? `page ${hit.page}` : "no page number";
         const flags = [
           hit.fromOcr ? "from a scan — check figures against the original" : null,
+          hit.matchedBy === "meaning" ? "matched on meaning, not the exact words" : null,
           hit.matchedBy === "similar" ? "approximate match" : null,
         ].filter(Boolean);
         const suffix = flags.length ? ` (${flags.join("; ")})` : "";

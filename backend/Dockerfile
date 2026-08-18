@@ -27,6 +27,12 @@ RUN npm ci
 COPY . .
 RUN npm run build
 
+# Meaning-based search reads a small embedding model locally. Bake it into the
+# image so nothing is fetched from the network at run time (see
+# src/lib/embeddings.ts). The build fails here if the model cannot be prepared.
+ENV TRANSFORMERS_CACHE=/app/.models
+RUN node scripts/warm-embeddings.mjs
+
 ENV NODE_ENV=production
 EXPOSE 3001
 CMD ["npm", "start"]
