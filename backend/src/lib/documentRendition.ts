@@ -24,6 +24,7 @@ import {
   shouldConvertToPdf,
 } from "./documentTypes";
 import { ocrPdf, pdfFromImage, pdfHasTextLayer } from "./ocr";
+import { indexInBackground } from "./passageIndex";
 import { downloadFile, uploadFile } from "./storage";
 import type { createServerSupabase } from "./supabase";
 
@@ -256,7 +257,12 @@ export function shouldReadFromRendition(
  */
 export function readInBackground(
   db: ReturnType<typeof createServerSupabase>,
-  params: { documentId: string; versionId: string; target: RenditionTarget },
+  params: {
+    documentId: string;
+    versionId: string;
+    target: RenditionTarget;
+    projectId?: string | null;
+  },
 ): void {
   const { documentId, versionId, target } = params;
   void (async () => {
@@ -283,6 +289,22 @@ export function readInBackground(
         .from("documents")
         .update({ status: "ready", updated_at: new Date().toISOString() })
         .eq("id", documentId);
+
+      // Only now does a scan have text worth storing for search.
+      if (result.pdfStoragePath) {
+        indexInBackground(db, {
+          version: {
+            id: versionId,
+            document_id: documentId,
+            storage_path: target.storagePath,
+            pdf_storage_path: result.pdfStoragePath,
+            file_type: target.suffix,
+          },
+          userId: target.userId,
+          projectId: params.projectId ?? null,
+          label: "index-after-ocr",
+        });
+      }
     } catch (err) {
       console.error(`[ocr] saving the result for ${documentId} failed:`, err);
     }

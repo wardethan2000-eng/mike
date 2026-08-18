@@ -24,6 +24,7 @@ import {
   prepareRendition,
   readInBackground,
 } from "../lib/documentRendition";
+import { indexInBackground } from "../lib/passageIndex";
 import { checkProjectAccess } from "../lib/access";
 import { singleFileUpload } from "../lib/upload";
 import { deleteUserProjects } from "../lib/userDataCleanup";
@@ -1511,6 +1512,22 @@ export async function handleDocumentUpload(
         documentId: docId,
         versionId: versionRow.id as string,
         target: renditionTarget,
+        projectId: projectId,
+      });
+    } else {
+      // Store the document's passages so it can be found by a search of the
+      // whole matter, not only when it is handed to the assistant by name.
+      indexInBackground(db, {
+        version: {
+          id: versionRow.id as string,
+          document_id: docId,
+          storage_path: key,
+          pdf_storage_path: pdfStoragePath,
+          file_type: suffix,
+        },
+        userId,
+        projectId: projectId,
+        label: "index-upload",
       });
     }
 

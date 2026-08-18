@@ -16,6 +16,7 @@ import {
   prepareRendition,
   readInBackground,
 } from "../lib/documentRendition";
+import { indexInBackground } from "../lib/passageIndex";
 import {
   extractTrackedChangeIds,
   resolveTrackedChange,
@@ -884,6 +885,20 @@ documentsRouter.put(
         documentId,
         versionId,
         target: versionRenditionTarget,
+        projectId: doc.project_id ?? null,
+      });
+    } else {
+      indexInBackground(db, {
+        version: {
+          id: versionId,
+          document_id: documentId,
+          storage_path: key,
+          pdf_storage_path: pdfStoragePath,
+          file_type: suffix,
+        },
+        userId,
+        projectId: doc.project_id ?? null,
+        label: "index-version-replace",
       });
     }
     const requestedFilename =
@@ -1440,6 +1455,22 @@ export async function handleDocumentUpload(
         documentId: docId,
         versionId: versionRow.id as string,
         target: renditionTarget,
+        projectId,
+      });
+    } else {
+      // Store the document's passages so it can be found by a search of the
+      // whole matter, not only when handed to the assistant by name.
+      indexInBackground(db, {
+        version: {
+          id: versionRow.id as string,
+          document_id: docId,
+          storage_path: key,
+          pdf_storage_path: pdfStoragePath,
+          file_type: suffix,
+        },
+        userId,
+        projectId,
+        label: "index-upload",
       });
     }
 
