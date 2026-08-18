@@ -1,0 +1,40 @@
+# Example only — copy to docker-compose.override.yml and fill in real values.
+# The real file is deliberately excluded from git: it carries this machine's
+# sign-in secret and storage keys.
+#
+# Two local fixes live here, both kept out of the tracked files so that
+# updates from the original project never conflict with them:
+#   1. the frontend is built from the repository root (upstream's build misses
+#      shared types and fails)
+#   2. the shipped public demo secrets are replaced with generated ones
+#
+services:
+  frontend:
+    build:
+      context: .
+      dockerfile: docker/frontend-monorepo.Dockerfile
+
+  # The project ships the well-known public Supabase demo secrets inline in
+  # docker-compose.yml. These replace them with values generated on this box.
+  db:
+    environment:
+      JWT_SECRET: ${MIKE_JWT_SECRET:?generate one and put it in docker-compose.override.yml}
+  auth:
+    environment:
+      GOTRUE_JWT_SECRET: ${MIKE_JWT_SECRET:?generate one and put it in docker-compose.override.yml}
+  rest:
+    environment:
+      PGRST_JWT_SECRET: ${MIKE_JWT_SECRET:?generate one and put it in docker-compose.override.yml}
+  storage:
+    environment:
+      RUSTFS_ACCESS_KEY: ${RUSTFS_ACCESS_KEY:?generate one and put it in docker-compose.override.yml}
+      RUSTFS_SECRET_KEY: ${RUSTFS_SECRET_KEY:?generate one and put it in docker-compose.override.yml}
+  createbucket:
+    environment:
+      RUSTFS_ACCESS_KEY: ${RUSTFS_ACCESS_KEY:?generate one and put it in docker-compose.override.yml}
+      RUSTFS_SECRET_KEY: ${RUSTFS_SECRET_KEY:?generate one and put it in docker-compose.override.yml}
+  backend:
+    environment:
+      - SUPABASE_SECRET_KEY=<generated on this machine>
+      - R2_ACCESS_KEY_ID=<generated on this machine>
+      - R2_SECRET_ACCESS_KEY=<generated on this machine>

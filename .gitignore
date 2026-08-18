@@ -10,6 +10,10 @@ build
 !.env.example
 !.env.local.example
 
+# Holds this machine's real sign-in secret and storage keys. Never commit it.
+# docker-compose.override.example.yml shows the shape without the values.
+docker-compose.override.yml
+
 *.log
 *.raw-llm-stream.json
 *.tsbuildinfo
