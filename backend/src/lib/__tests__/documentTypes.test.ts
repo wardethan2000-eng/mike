@@ -91,6 +91,21 @@ describe("contentTypeForDocumentType", () => {
             xls: "application/vnd.ms-excel",
             pptx: "application/vnd.openxmlformats-officedocument.presentationml.presentation",
             ppt: "application/vnd.ms-powerpoint",
+            jpg: "image/jpeg",
+            jpeg: "image/jpeg",
+            png: "image/png",
+            tif: "image/tiff",
+            tiff: "image/tiff",
+            bmp: "image/bmp",
+            gif: "image/gif",
+            heic: "image/heic",
+            heif: "image/heif",
+            webp: "image/webp",
+            txt: "text/plain",
+            md: "text/markdown",
+            csv: "text/csv",
+            rtf: "application/rtf",
+            odt: "application/vnd.oasis.opendocument.text",
         };
         for (const type of ALLOWED_DOCUMENT_TYPES) {
             expect(contentTypeForDocumentType(type)).toBe(expected[type]);

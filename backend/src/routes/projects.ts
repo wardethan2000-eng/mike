@@ -20,6 +20,10 @@ import {
   storageKey,
 } from "../lib/storage";
 import { docxToPdf, convertedPdfKey } from "../lib/convert";
+import {
+  prepareRendition,
+  readInBackground,
+} from "../lib/documentRendition";
 import { checkProjectAccess } from "../lib/access";
 import { singleFileUpload } from "../lib/upload";
 import { deleteUserProjects } from "../lib/userDataCleanup";
@@ -1449,29 +1453,21 @@ export async function handleDocumentUpload(
     const pageCount = suffix === "pdf" ? await countPdfPages(rawBuf) : null;
 
     // Convert Office files → PDF for display. PDFs are their own rendition.
-    let pdfStoragePath: string | null = null;
-    if (shouldConvertToPdf(suffix)) {
-      try {
-        const pdfBuf = await docxToPdf(content);
-        const pdfKey = convertedPdfKey(userId, docId);
-        await uploadFile(
-          pdfKey,
-          pdfBuf.buffer.slice(
-            pdfBuf.byteOffset,
-            pdfBuf.byteOffset + pdfBuf.byteLength,
-          ) as ArrayBuffer,
-          "application/pdf",
-        );
-        pdfStoragePath = pdfKey;
-      } catch (err) {
-        console.error(
-          `[upload] Office→PDF conversion failed for ${filename}:`,
-          err,
-        );
-      }
-    } else if (suffix === "pdf") {
-      pdfStoragePath = key;
-    }
+    // Office and text files are rendered to PDF for display; images and
+    // scanned PDFs are read by OCR so they carry a text layer. See
+    // lib/documentRendition.ts.
+    const renditionTarget = {
+      content,
+      suffix,
+      userId,
+      docId,
+      storagePath: key,
+      pageCount,
+      label: "project-upload",
+    };
+    const rendition = await prepareRendition(renditionTarget);
+    const pdfStoragePath = rendition.pdfStoragePath;
+    const effectivePageCount = pageCount ?? rendition.pageCount;
 
     // Storage paths live on document_versions — create the V1 row and
     // point documents.current_version_id at it.
@@ -1486,7 +1482,7 @@ export async function handleDocumentUpload(
         filename,
         file_type: suffix,
         size_bytes: content.byteLength,
-        page_count: pageCount,
+        page_count: effectivePageCount,
         content_sha256: contentSha256(content),
       })
       .select("id")
@@ -1501,10 +1497,22 @@ export async function handleDocumentUpload(
       .from("documents")
       .update({
         current_version_id: versionRow.id,
-        status: "ready",
+        // A scan is still being read; the assistant should not be told the
+        // document is ready until its text exists.
+        status: rendition.ocrPending ? "processing" : "ready",
         updated_at: new Date().toISOString(),
       })
       .eq("id", docId);
+
+    // Reading a scan takes about eight seconds a page, so it happens after
+    // this response rather than holding the upload open for minutes.
+    if (rendition.ocrPending) {
+      readInBackground(db, {
+        documentId: docId,
+        versionId: versionRow.id as string,
+        target: renditionTarget,
+      });
+    }
 
     const { data: updated } = await db
       .from("documents")

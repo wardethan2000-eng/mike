@@ -63,8 +63,8 @@ describe("POST /single-documents — upload validation", () => {
             .post("/single-documents")
             .set("Authorization", "Bearer test")
             .attach("file", Buffer.from("hello world"), {
-                filename: "notes.txt",
-                contentType: "text/plain",
+                filename: "archive.zip",
+                contentType: "application/zip",
             });
 
         expect(res.status).toBe(400);

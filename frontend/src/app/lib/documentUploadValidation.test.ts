@@ -27,10 +27,23 @@ describe("isSupportedDocumentFile", () => {
         expect(isSupportedDocumentFile(file("Deed.DocX"))).toBe(true);
     });
 
+    it("accepts scans, photos and plain text", () => {
+        for (const name of [
+            "scan.jpg",
+            "photo.png",
+            "phone-photo.heic",
+            "fax.tiff",
+            "notes.txt",
+            "table.csv",
+        ]) {
+            expect(isSupportedDocumentFile(file(name))).toBe(true);
+        }
+    });
+
     it("rejects unsupported types", () => {
-        expect(isSupportedDocumentFile(file("notes.txt"))).toBe(false);
-        expect(isSupportedDocumentFile(file("photo.png"))).toBe(false);
         expect(isSupportedDocumentFile(file("archive.zip"))).toBe(false);
+        expect(isSupportedDocumentFile(file("video.mp4"))).toBe(false);
+        expect(isSupportedDocumentFile(file("installer.exe"))).toBe(false);
     });
 
     it("uses only the last extension for multi-dot filenames", () => {
@@ -54,9 +67,9 @@ describe("isSupportedDocumentFile", () => {
 describe("partitionSupportedDocumentFiles", () => {
     it("splits a mixed list preserving order within each bucket", () => {
         const a = file("a.pdf");
-        const b = file("b.txt");
+        const b = file("b.zip");
         const c = file("c.docx");
-        const d = file("d.gif");
+        const d = file("d.mp4");
         const { supported, unsupported } = partitionSupportedDocumentFiles([
             a,
             b,

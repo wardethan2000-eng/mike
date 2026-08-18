@@ -29,6 +29,11 @@ import {
   isWordDocumentType,
   shouldConvertToPdf,
 } from "../../documentTypes";
+import {
+  isOcrDerived,
+  shouldReadFromRendition,
+} from "../../documentRendition";
+import { OCR_TEXT_NOTE } from "../../ocr";
 import { extractPresentationText } from "../../officeText";
 import { spreadsheetToLLMText } from "../../spreadsheet";
 
@@ -1524,7 +1529,27 @@ export async function readDocumentContent(
       );
     }
     let text: string;
-    const fileType = docInfo.file_type?.toLowerCase?.() ?? "";
+    let fileType = docInfo.file_type?.toLowerCase?.() ?? "";
+    // Scans, photographs and plain-text files are read from their PDF
+    // rendition: for a picture that is the copy OCR gave a text layer to, for
+    // a text file the rendered page, so page numbers in citations match what
+    // the reader sees on screen.
+    let fromOcr = false;
+    if (documentId && db) {
+      const activeVersion = await loadActiveVersion(documentId, db);
+      const renditionPath = activeVersion?.pdf_storage_path;
+      if (shouldReadFromRendition(activeVersion) && renditionPath) {
+        const renditionBytes = await downloadFile(renditionPath);
+        if (renditionBytes) {
+          raw = renditionBytes;
+          fromOcr = isOcrDerived(activeVersion);
+          fileType = "pdf";
+          devLog(
+            `[read_document] reading from PDF rendition path="${renditionPath}" ocr=${fromOcr}`,
+          );
+        }
+      }
+    }
     if (fileType === "pdf") {
       text = await extractPdfText(raw);
       devLog(
@@ -1592,6 +1617,9 @@ export async function readDocumentContent(
         `[read_document] mammoth length=${text.length} for filename="${docInfo.filename}"`,
       );
     }
+    // Text that came from character recognition is flagged so the model
+    // quotes it with care rather than treating it as a clean original.
+    if (fromOcr && text.trim()) text = `${OCR_TEXT_NOTE}\n\n${text}`;
     devLog(
       `[read_document] DONE filename="${docInfo.filename}" finalTextLength=${text.length} firstChars=${JSON.stringify(text.slice(0, 120))}`,
     );

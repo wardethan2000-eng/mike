@@ -1,18 +1,14 @@
 export const SUPPORTED_DOCUMENT_ACCEPT =
-    ".pdf,.docx,.doc,.xlsx,.xlsm,.xls,.pptx,.ppt";
+    ".pdf,.docx,.doc,.xlsx,.xlsm,.xls,.pptx,.ppt,.jpg,.jpeg,.png,.tif,.tiff,.bmp,.gif,.heic,.heif,.webp,.txt,.md,.csv,.rtf,.odt";
 export const UNSUPPORTED_DOCUMENT_WARNING_MESSAGE =
-    "Unsupported file type. Only PDF, Word, Excel, and PowerPoint files can be uploaded.";
+    "Unsupported file type. PDFs, Word, Excel and PowerPoint files, images and scans (jpg, png, heic, tiff and more) and plain text can be uploaded.";
 
-const SUPPORTED_DOCUMENT_EXTENSIONS = new Set([
-    "pdf",
-    "docx",
-    "doc",
-    "xlsx",
-    "xlsm",
-    "xls",
-    "pptx",
-    "ppt",
-]);
+// Derived from the accept string so the two can never drift apart.
+const SUPPORTED_DOCUMENT_EXTENSIONS = new Set(
+    SUPPORTED_DOCUMENT_ACCEPT.split(",").map((entry) =>
+        entry.trim().replace(/^\./, "").toLowerCase(),
+    ),
+);
 
 export function isSupportedDocumentFile(file: File): boolean {
     const extension = file.name.split(".").pop()?.toLowerCase();

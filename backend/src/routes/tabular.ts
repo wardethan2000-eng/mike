@@ -48,6 +48,7 @@ import {
 import { parsePaginationQuery } from "../lib/pagination";
 import { normalizeSearchTerm } from "../lib/search";
 import { parseTabularReviewSort } from "../lib/sort";
+import { shouldReadFromRendition } from "../lib/documentRendition";
 
 function formatPromptSuffix(format?: string, tags?: string[]): string {
     switch (format) {
@@ -438,14 +439,25 @@ async function loadRowDocumentText(
     const docs = await fetchSourceDocuments(db, sourceIds);
     const sections: string[] = [];
     for (const doc of docs) {
-        const storagePath = (doc as SourceDocument & { storage_path?: string })
-            .storage_path;
+        const paths = doc as SourceDocument & {
+            storage_path?: string;
+            pdf_storage_path?: string;
+        };
+        // Scans, photos and text files are read from their PDF rendition,
+        // which is where OCR put the text.
+        const useRendition = shouldReadFromRendition(paths);
+        const storagePath = useRendition
+            ? paths.pdf_storage_path
+            : paths.storage_path;
         let markdown = "";
         if (storagePath) {
             const buf = await downloadFile(storagePath);
             if (buf) {
                 try {
-          markdown = await extractDocumentMarkdown(buf, doc.file_type);
+          markdown = await extractDocumentMarkdown(
+              buf,
+              useRendition ? "pdf" : doc.file_type,
+          );
                 } catch (error) {
                     console.error(
                         `[tabular] extraction error doc=${doc.id}`,

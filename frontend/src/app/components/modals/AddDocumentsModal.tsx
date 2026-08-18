@@ -222,6 +222,26 @@ export function AddDocumentsModal({
                         : uploadStandaloneDocument(f),
                 ),
             );
+            // A scan or photo that read poorly says so here, so the warning
+            // arrives while the file can still be rescanned.
+            const readingWarnings = [
+                ...new Set(
+                    uploaded
+                        .map(
+                            (document) =>
+                                (document as { ocr_warning?: string | null })
+                                    .ocr_warning,
+                        )
+                        .filter((warning): warning is string =>
+                            Boolean(warning),
+                        ),
+                ),
+            ];
+            if (readingWarnings.length > 0) {
+                setUploadWarning((existing) =>
+                    [existing, ...readingWarnings].filter(Boolean).join(" "),
+                );
+            }
             setExtraUploadedDocs((prev) => [...uploaded, ...prev]);
             setSelectedDocuments((prev) => [
                 ...prev,

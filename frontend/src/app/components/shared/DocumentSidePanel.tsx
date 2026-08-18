@@ -219,7 +219,7 @@ export function DocumentSidePanel({
 
     const activeDoc = doc;
     const documentId = activeDoc.id;
-    const newVersionAccept = ".pdf,.docx,.doc,.xlsx,.xlsm,.xls,.pptx,.ppt";
+    const newVersionAccept = ".pdf,.docx,.doc,.xlsx,.xlsm,.xls,.pptx,.ppt,.jpg,.jpeg,.png,.tif,.tiff,.bmp,.gif,.heic,.heif,.webp,.txt,.md,.csv,.rtf,.odt";
     const orderedVersions = [...versions].reverse();
     const activeVersionCount = versions.filter(
         (version) => version.deleted_at == null,

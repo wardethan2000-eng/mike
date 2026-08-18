@@ -13,6 +13,10 @@ import {
 } from "../lib/storage";
 import { docxToPdf, convertedPdfKey } from "../lib/convert";
 import {
+  prepareRendition,
+  readInBackground,
+} from "../lib/documentRendition";
+import {
   extractTrackedChangeIds,
   resolveTrackedChange,
 } from "../lib/docxTrackedChanges";
@@ -139,25 +143,24 @@ documentsRouter.get("/:documentId/display", requireAuth, async (req, res) => {
     return void res.status(404).json({ detail: "No file available" });
 
   const fileType = active.file_type ?? "";
-  const isConvertibleOffice = shouldConvertToPdf(fileType);
   const displayFilename = downloadFilenameForVersion(
     active.filename,
     active.version_number,
     active.source === "assistant_edit",
   );
 
-  // For Office files, prefer the per-version PDF rendition if one exists.
-  const servePath =
-    isConvertibleOffice && active.pdf_storage_path
-      ? active.pdf_storage_path
-      : active.storage_path;
+  // Prefer the per-version PDF rendition whenever one exists. For Office and
+  // text files that is the rendered copy; for scans and photos it is the
+  // searchable copy produced by OCR; for a PDF with its own text it is the
+  // file itself.
+  const servePath = active.pdf_storage_path ?? active.storage_path;
   const raw = await downloadFile(servePath);
   if (!raw)
     return void res
       .status(404)
       .json({ detail: "Document not found in storage" });
 
-  if (fileType === "pdf" || (isConvertibleOffice && active.pdf_storage_path)) {
+  if (active.pdf_storage_path) {
     res.setHeader("Content-Type", "application/pdf");
     res.setHeader(
       "Content-Disposition",
@@ -165,7 +168,8 @@ documentsRouter.get("/:documentId/display", requireAuth, async (req, res) => {
     );
     res.send(Buffer.from(raw));
   } else {
-    // Fallback: serve raw Office bytes when PDF conversion was unavailable.
+    // Fallback: raw bytes when no PDF rendition exists — spreadsheets, which
+    // the frontend draws as a grid, and anything whose conversion failed.
     res.setHeader("Content-Type", contentTypeForDocumentType(fileType));
     res.setHeader(
       "Content-Disposition",
@@ -857,35 +861,31 @@ documentsRouter.put(
         .json({ detail: "Failed to upload replacement version." });
     }
 
-    let pdfStoragePath: string | null = null;
-    if (shouldConvertToPdf(suffix)) {
-      try {
-        const pdfBuf = await docxToPdf(file.buffer);
-        const pdfKey = `converted-pdfs/${userId}/${documentId}/${versionSlug}.pdf`;
-        await uploadFile(
-          pdfKey,
-          pdfBuf.buffer.slice(
-            pdfBuf.byteOffset,
-            pdfBuf.byteOffset + pdfBuf.byteLength,
-          ) as ArrayBuffer,
-          "application/pdf",
-        );
-        pdfStoragePath = pdfKey;
-      } catch (err) {
-        console.error(
-          `[versions/replace] Office→PDF conversion failed for ${file.originalname}:`,
-          err,
-        );
-      }
-    } else if (suffix === "pdf") {
-      pdfStoragePath = key;
-    }
-
     const rawBuf = file.buffer.buffer.slice(
       file.buffer.byteOffset,
       file.buffer.byteOffset + file.buffer.byteLength,
     ) as ArrayBuffer;
-    const pageCount = suffix === "pdf" ? await countPdfPages(rawBuf) : null;
+    const rawPageCount = suffix === "pdf" ? await countPdfPages(rawBuf) : null;
+    const versionRenditionTarget = {
+      content: file.buffer,
+      suffix,
+      userId,
+      docId: documentId,
+      storagePath: key,
+      pdfKey: `converted-pdfs/${userId}/${documentId}/${versionSlug}.pdf`,
+      pageCount: rawPageCount,
+      label: "versions/replace",
+    };
+    const rendition = await prepareRendition(versionRenditionTarget);
+    const pdfStoragePath = rendition.pdfStoragePath;
+    const pageCount = rawPageCount ?? rendition.pageCount;
+    if (rendition.ocrPending) {
+      readInBackground(db, {
+        documentId,
+        versionId,
+        target: versionRenditionTarget,
+      });
+    }
     const requestedFilename =
       typeof req.body?.filename === "string" && req.body.filename.trim()
         ? req.body.filename.trim().slice(0, 200)
@@ -1381,30 +1381,21 @@ export async function handleDocumentUpload(
     ) as ArrayBuffer;
     const pageCount = suffix === "pdf" ? await countPdfPages(rawBuf) : null;
 
-    // Convert Office files → PDF for display. PDFs are their own rendition.
-    let pdfStoragePath: string | null = null;
-    if (shouldConvertToPdf(suffix)) {
-      try {
-        const pdfBuf = await docxToPdf(content);
-        const pdfKey = convertedPdfKey(userId, docId);
-        await uploadFile(
-          pdfKey,
-          pdfBuf.buffer.slice(
-            pdfBuf.byteOffset,
-            pdfBuf.byteOffset + pdfBuf.byteLength,
-          ) as ArrayBuffer,
-          "application/pdf",
-        );
-        pdfStoragePath = pdfKey;
-      } catch (err) {
-        console.error(
-          `[upload] Office→PDF conversion failed for ${filename}:`,
-          err,
-        );
-      }
-    } else if (suffix === "pdf") {
-      pdfStoragePath = key;
-    }
+    // Office and text files are rendered to PDF for display; images and
+    // scanned PDFs are read by OCR so they carry a text layer. See
+    // lib/documentRendition.ts.
+    const renditionTarget = {
+      content,
+      suffix,
+      userId,
+      docId,
+      storagePath: key,
+      pageCount,
+      label: "upload",
+    };
+    const rendition = await prepareRendition(renditionTarget);
+    const pdfStoragePath = rendition.pdfStoragePath;
+    const effectivePageCount = pageCount ?? rendition.pageCount;
 
     // storage_path / pdf_storage_path live on document_versions now —
     // create the V1 "upload" row and point documents.current_version_id
@@ -1420,7 +1411,7 @@ export async function handleDocumentUpload(
         filename: filename,
         file_type: suffix,
         size_bytes: content.byteLength,
-        page_count: pageCount,
+        page_count: effectivePageCount,
         content_sha256: contentSha256(content),
       })
       .select("id")
@@ -1435,10 +1426,22 @@ export async function handleDocumentUpload(
       .from("documents")
       .update({
         current_version_id: versionRow.id,
-        status: "ready",
+        // A scan is still being read; the assistant should not be told the
+        // document is ready until its text exists.
+        status: rendition.ocrPending ? "processing" : "ready",
         updated_at: new Date().toISOString(),
       })
       .eq("id", docId);
+
+    // Reading a scan takes about eight seconds a page, so it happens after
+    // this response rather than holding the upload open for minutes.
+    if (rendition.ocrPending) {
+      readInBackground(db, {
+        documentId: docId,
+        versionId: versionRow.id as string,
+        target: renditionTarget,
+      });
+    }
 
     const { data: updated } = await db
       .from("documents")
@@ -1456,8 +1459,9 @@ export async function handleDocumentUpload(
             (updated.library_folder_id as string | null | undefined) ?? null,
           file_type: suffix,
           size_bytes: content.byteLength,
-          page_count: pageCount,
+          page_count: effectivePageCount,
           active_version_number: 1,
+          ocr_warning: rendition.warning,
         }
       : updated;
     void recordAudit(db, {
