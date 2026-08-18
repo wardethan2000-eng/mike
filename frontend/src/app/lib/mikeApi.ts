@@ -301,6 +301,59 @@ export interface ProjectFilterOptions {
     owners: { value: string; label: string }[];
 }
 
+export type MatterSearchHit = {
+    documentId: string;
+    filename: string;
+    page: number | null;
+    content: string;
+    fromOcr: boolean;
+    fromFilename: boolean;
+    matchedBy: "words" | "meaning" | "similar";
+};
+
+// Search a matter's documents by word and by meaning. Returns the best
+// passages with their document and page (the search box's counterpart to the
+// assistant's search_matter tool).
+export async function searchMatter(
+    projectId: string,
+    query: string,
+    options?: { limit?: number; signal?: AbortSignal },
+): Promise<{ query: string; results: MatterSearchHit[] }> {
+    const params = new URLSearchParams({ q: query });
+    if (options?.limit != null) params.set("limit", String(options.limit));
+    return apiRequest<{ query: string; results: MatterSearchHit[] }>(
+        `/projects/${projectId}/search?${params.toString()}`,
+        { signal: options?.signal },
+    );
+}
+
+export type MatterAnswer = {
+    question: string;
+    answer: string;
+    sources: {
+        documentId: string;
+        filename: string;
+        page: number | null;
+        matchedBy: "words" | "meaning" | "similar";
+        fromFilename: boolean;
+    }[];
+};
+
+// Ask a whole matter a question and get one consolidated answer that cites the
+// document and page, drawn only from the matter's own documents.
+export async function answerMatter(
+    projectId: string,
+    question: string,
+    options?: { model?: string; signal?: AbortSignal },
+): Promise<MatterAnswer> {
+    return apiRequest<MatterAnswer>(`/projects/${projectId}/search/answer`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ question, model: options?.model }),
+        signal: options?.signal,
+    });
+}
+
 export async function getProjectFilterOptions(
     signal?: AbortSignal,
 ): Promise<ProjectFilterOptions> {

@@ -31,6 +31,7 @@ import {
 } from "@/app/components/documents/DocTable";
 import { TabPillButton } from "@/app/components/ui/tab-pill-button";
 import { ProjectSectionToolbar, useProjectWorkspace } from "./ProjectWorkspace";
+import { MatterSearchPanel } from "./MatterSearchPanel";
 import { APP_SURFACE_HOVER_CLASS } from "@/app/components/ui/liquid-surface";
 
 interface Props {
@@ -311,6 +312,7 @@ export function ProjectDocumentsView({ projectId, folderId = null }: Props) {
     return (
         <>
             <ProjectSectionToolbar actions={toolbarActions} />
+            <MatterSearchPanel projectId={projectId} />
             <DocTable
                 scopeKey={projectId}
                 documents={documents}
