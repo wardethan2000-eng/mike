@@ -332,6 +332,7 @@ create table if not exists public.document_edits (
   change_id text not null,
   del_w_id text,
   ins_w_id text,
+  mark_w_ids text[] not null default '{}'::text[],
   deleted_text text not null default '',
   inserted_text text not null default '',
   context_before text,

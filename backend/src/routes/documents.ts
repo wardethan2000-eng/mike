@@ -18,8 +18,13 @@ import {
 } from "../lib/documentRendition";
 import { indexInBackground } from "../lib/passageIndex";
 import {
+  applyFormattedEdits,
+  applyUserParagraphEdits,
+  extractDocxBodyParagraphs,
   extractTrackedChangeIds,
   resolveTrackedChange,
+  StaleDocumentError,
+  type EditParagraph,
 } from "../lib/docxTrackedChanges";
 import { buildDownloadUrl } from "../lib/downloadTokens";
 import {
@@ -581,6 +586,498 @@ documentsRouter.post(
   },
 );
 
+// POST /single-documents/:documentId/save-docx
+// Autosave target for the in-browser Word editor. Accepts the full edited
+// .docx (multipart field `file`) and stores it. To avoid a new version on
+// every keystroke pause, edits to a user working copy overwrite it in place;
+// the first edit after an upload or an assistant edit starts a fresh user
+// version so that history — and the assistant's own edits — are never lost.
+documentsRouter.post(
+  "/:documentId/save-docx",
+  requireAuth,
+  singleFileUpload("file"),
+  async (req, res) => {
+    const userId = res.locals.userId as string;
+    const userEmail = res.locals.userEmail as string | undefined;
+    const { documentId } = req.params;
+    const db = createServerSupabase();
+
+    const file = req.file;
+    if (!file)
+      return void res.status(400).json({ detail: "file is required" });
+    const suffix = file.originalname.includes(".")
+      ? file.originalname.split(".").pop()!.toLowerCase()
+      : "docx";
+    if (suffix !== "docx") {
+      return void res
+        .status(400)
+        .json({ detail: "Only .docx autosave is supported." });
+    }
+
+    const { data: doc } = await db
+      .from("documents")
+      .select("id, user_id, project_id, current_version_id")
+      .eq("id", documentId)
+      .single();
+    if (!doc)
+      return void res.status(404).json({ detail: "Document not found" });
+    const access = await ensureDocAccess(doc, userId, userEmail, db);
+    if (!access.ok)
+      return void res.status(404).json({ detail: "Document not found" });
+
+    const active = await loadActiveVersion(documentId, db);
+    const buf = file.buffer;
+    const ab = buf.buffer.slice(
+      buf.byteOffset,
+      buf.byteOffset + buf.byteLength,
+    ) as ArrayBuffer;
+    const contentType = contentTypeForDocumentType("docx");
+    const filename = active?.filename ?? file.originalname ?? "Document.docx";
+
+    const makePdf = async (slug: string): Promise<string | null> => {
+      try {
+        const pdfBuf = await docxToPdf(buf);
+        const pdfKey = `converted-pdfs/${userId}/${documentId}/${slug}.pdf`;
+        await uploadFile(
+          pdfKey,
+          pdfBuf.buffer.slice(
+            pdfBuf.byteOffset,
+            pdfBuf.byteOffset + pdfBuf.byteLength,
+          ) as ArrayBuffer,
+          "application/pdf",
+        );
+        return pdfKey;
+      } catch (err) {
+        console.error("[save-docx] Office→PDF conversion failed:", err);
+        return null;
+      }
+    };
+
+    // Overwrite the current working copy in place.
+    if (active && active.source === "user_upload" && active.storage_path) {
+      try {
+        await uploadFile(active.storage_path, ab, contentType);
+      } catch (e) {
+        console.error("[save-docx] storage overwrite failed", e);
+        return void res.status(500).json({ detail: "Could not save." });
+      }
+      const slug =
+        active.storage_path.split("/").pop()?.replace(/\..*$/, "") ||
+        crypto.randomUUID().replace(/-/g, "");
+      const pdfStoragePath =
+        (await makePdf(slug)) ?? active.pdf_storage_path ?? null;
+      const { error: updErr } = await db
+        .from("document_versions")
+        .update({
+          content_sha256: contentSha256(buf),
+          size_bytes: buf.byteLength,
+          pdf_storage_path: pdfStoragePath,
+        })
+        .eq("id", active.id);
+      if (updErr) {
+        console.error("[save-docx] version update failed", updErr);
+        return void res.status(500).json({ detail: "Could not save." });
+      }
+      return void res.status(200).json({
+        id: active.id,
+        version_number: active.version_number,
+        source: "user_upload",
+        overwritten: true,
+      });
+    }
+
+    // Otherwise start a fresh user version on top of whatever is current.
+    const versionSlug = crypto.randomUUID().replace(/-/g, "");
+    const key = versionStorageKey(userId, documentId, versionSlug, filename);
+    try {
+      await uploadFile(key, ab, contentType);
+    } catch (e) {
+      console.error("[save-docx] storage write failed", e);
+      return void res.status(500).json({ detail: "Could not save." });
+    }
+    const pdfStoragePath = await makePdf(versionSlug);
+
+    const { data: maxRow } = await db
+      .from("document_versions")
+      .select("version_number")
+      .eq("document_id", documentId)
+      .in("source", ["upload", "user_upload", "assistant_edit"])
+      .order("version_number", { ascending: false, nullsFirst: false })
+      .limit(1)
+      .maybeSingle();
+    const nextVersionNumber =
+      ((maxRow?.version_number as number | null) ?? 1) + 1;
+
+    const { data: versionRow, error: verErr } = await db
+      .from("document_versions")
+      .insert({
+        document_id: documentId,
+        storage_path: key,
+        pdf_storage_path: pdfStoragePath,
+        source: "user_upload",
+        version_number: nextVersionNumber,
+        filename,
+        file_type: "docx",
+        size_bytes: buf.byteLength,
+        content_sha256: contentSha256(buf),
+      })
+      .select("id, version_number, source")
+      .single();
+    if (verErr || !versionRow) {
+      console.error("[save-docx] insert failed", verErr);
+      return void res
+        .status(500)
+        .json({ detail: "Failed to record the edited version." });
+    }
+    await db
+      .from("documents")
+      .update({ current_version_id: versionRow.id })
+      .eq("id", documentId);
+
+    res.status(201).json({ ...versionRow, overwritten: false });
+  },
+);
+
+// POST /single-documents/:documentId/formatted-edit
+// Save edits from the in-app formatting editor. The client sends the body it
+// started from (`baseline`, plain text per paragraph) and the edited body
+// (`paragraphs`, each with runs + formatting). We reconcile against the
+// current .docx and write a new user version. Like save-docx, edits to a user
+// working copy overwrite it in place; the first edit after an upload or an
+// assistant edit starts a fresh version so nothing is lost.
+documentsRouter.post(
+  "/:documentId/formatted-edit",
+  requireAuth,
+  async (req, res) => {
+    const userId = res.locals.userId as string;
+    const userEmail = res.locals.userEmail as string | undefined;
+    const { documentId } = req.params;
+    const db = createServerSupabase();
+
+    const baseline = req.body?.baseline;
+    const paragraphs = req.body?.paragraphs;
+    if (
+      !Array.isArray(baseline) ||
+      !Array.isArray(paragraphs) ||
+      baseline.some((t) => typeof t !== "string")
+    ) {
+      return void res
+        .status(400)
+        .json({ detail: "baseline (strings) and paragraphs are required" });
+    }
+
+    const { data: doc } = await db
+      .from("documents")
+      .select("id, user_id, project_id, current_version_id")
+      .eq("id", documentId)
+      .single();
+    if (!doc)
+      return void res.status(404).json({ detail: "Document not found" });
+    const access = await ensureDocAccess(doc, userId, userEmail, db);
+    if (!access.ok)
+      return void res.status(404).json({ detail: "Document not found" });
+
+    const active = await loadActiveVersion(documentId, db);
+    if (!active || !active.storage_path)
+      return void res.status(404).json({ detail: "No document to edit" });
+    if ((active.file_type ?? "").toLowerCase() !== "docx") {
+      return void res
+        .status(400)
+        .json({ detail: "Editing is only available for Word documents." });
+    }
+
+    const raw = await downloadFile(active.storage_path);
+    if (!raw)
+      return void res.status(404).json({ detail: "Document bytes not available" });
+
+    let edited;
+    try {
+      edited = await applyFormattedEdits(
+        Buffer.from(raw),
+        baseline as string[],
+        paragraphs as EditParagraph[],
+      );
+    } catch (e) {
+      if (e instanceof StaleDocumentError) {
+        return void res.status(409).json({ detail: e.message });
+      }
+      console.error("[formatted-edit] apply failed", e);
+      return void res.status(500).json({ detail: "Could not save your edits." });
+    }
+
+    const buf = edited.bytes;
+    const ab = buf.buffer.slice(
+      buf.byteOffset,
+      buf.byteOffset + buf.byteLength,
+    ) as ArrayBuffer;
+    const contentType = contentTypeForDocumentType("docx");
+    const filename = active.filename ?? "Document.docx";
+
+    const makePdf = async (slug: string): Promise<string | null> => {
+      try {
+        const pdfBuf = await docxToPdf(buf);
+        const pdfKey = `converted-pdfs/${userId}/${documentId}/${slug}.pdf`;
+        await uploadFile(
+          pdfKey,
+          pdfBuf.buffer.slice(
+            pdfBuf.byteOffset,
+            pdfBuf.byteOffset + pdfBuf.byteLength,
+          ) as ArrayBuffer,
+          "application/pdf",
+        );
+        return pdfKey;
+      } catch (err) {
+        console.error("[formatted-edit] Office→PDF conversion failed:", err);
+        return null;
+      }
+    };
+
+    if (active.source === "user_upload" && active.storage_path) {
+      try {
+        await uploadFile(active.storage_path, ab, contentType);
+      } catch (e) {
+        console.error("[formatted-edit] storage overwrite failed", e);
+        return void res.status(500).json({ detail: "Could not save." });
+      }
+      const slug =
+        active.storage_path.split("/").pop()?.replace(/\..*$/, "") ||
+        crypto.randomUUID().replace(/-/g, "");
+      const pdfStoragePath =
+        (await makePdf(slug)) ?? active.pdf_storage_path ?? null;
+      const { error: updErr } = await db
+        .from("document_versions")
+        .update({
+          content_sha256: contentSha256(buf),
+          size_bytes: buf.byteLength,
+          pdf_storage_path: pdfStoragePath,
+        })
+        .eq("id", active.id);
+      if (updErr) {
+        console.error("[formatted-edit] version update failed", updErr);
+        return void res.status(500).json({ detail: "Could not save." });
+      }
+      return void res.status(200).json({
+        id: active.id,
+        version_number: active.version_number,
+        source: "user_upload",
+        overwritten: true,
+      });
+    }
+
+    const versionSlug = crypto.randomUUID().replace(/-/g, "");
+    const key = versionStorageKey(userId, documentId, versionSlug, filename);
+    try {
+      await uploadFile(key, ab, contentType);
+    } catch (e) {
+      console.error("[formatted-edit] storage write failed", e);
+      return void res.status(500).json({ detail: "Could not save." });
+    }
+    const pdfStoragePath = await makePdf(versionSlug);
+
+    const { data: maxRow } = await db
+      .from("document_versions")
+      .select("version_number")
+      .eq("document_id", documentId)
+      .in("source", ["upload", "user_upload", "assistant_edit"])
+      .order("version_number", { ascending: false, nullsFirst: false })
+      .limit(1)
+      .maybeSingle();
+    const nextVersionNumber =
+      ((maxRow?.version_number as number | null) ?? 1) + 1;
+
+    const { data: versionRow, error: verErr } = await db
+      .from("document_versions")
+      .insert({
+        document_id: documentId,
+        storage_path: key,
+        pdf_storage_path: pdfStoragePath,
+        source: "user_upload",
+        version_number: nextVersionNumber,
+        filename,
+        file_type: "docx",
+        size_bytes: buf.byteLength,
+        content_sha256: contentSha256(buf),
+      })
+      .select("id, version_number, source")
+      .single();
+    if (verErr || !versionRow) {
+      console.error("[formatted-edit] insert failed", verErr);
+      return void res
+        .status(500)
+        .json({ detail: "Failed to record the edited version." });
+    }
+    await db
+      .from("documents")
+      .update({ current_version_id: versionRow.id })
+      .eq("id", documentId);
+
+    res.status(201).json({ ...versionRow, overwritten: false });
+  },
+);
+
+// POST /single-documents/:documentId/inline-edit
+// Save inline edits the user typed in the viewer. The client sends the body
+// paragraph text it started from (`baseline`) and the paragraph text after
+// editing (`paragraphs`). We reconcile the two against the current .docx and
+// write the result as a new user version, so the letterhead, fonts, images
+// and signature are preserved and the assistant's later edits build on top.
+documentsRouter.post(
+  "/:documentId/inline-edit",
+  requireAuth,
+  async (req, res) => {
+    const userId = res.locals.userId as string;
+    const userEmail = res.locals.userEmail as string | undefined;
+    const { documentId } = req.params;
+    const db = createServerSupabase();
+
+    const baseline = req.body?.baseline;
+    const paragraphs = req.body?.paragraphs;
+    if (
+      !Array.isArray(baseline) ||
+      !Array.isArray(paragraphs) ||
+      baseline.some((t) => typeof t !== "string") ||
+      paragraphs.some((t) => typeof t !== "string")
+    ) {
+      return void res
+        .status(400)
+        .json({ detail: "baseline and paragraphs must be arrays of strings" });
+    }
+
+    const { data: doc } = await db
+      .from("documents")
+      .select("id, user_id, project_id, current_version_id")
+      .eq("id", documentId)
+      .single();
+    if (!doc)
+      return void res.status(404).json({ detail: "Document not found" });
+    const access = await ensureDocAccess(doc, userId, userEmail, db);
+    if (!access.ok)
+      return void res.status(404).json({ detail: "Document not found" });
+
+    const active = await loadActiveVersion(documentId, db);
+    if (!active || !active.storage_path)
+      return void res.status(404).json({ detail: "No document to edit" });
+    if ((active.file_type ?? "").toLowerCase() !== "docx") {
+      return void res
+        .status(400)
+        .json({ detail: "Inline editing is only available for Word documents." });
+    }
+
+    const raw = await downloadFile(active.storage_path);
+    if (!raw)
+      return void res.status(404).json({ detail: "Document bytes not available" });
+
+    let edited;
+    try {
+      edited = await applyUserParagraphEdits(
+        Buffer.from(raw),
+        baseline as string[],
+        paragraphs as string[],
+        { author: "You" },
+      );
+    } catch (e) {
+      if (e instanceof StaleDocumentError) {
+        return void res.status(409).json({ detail: e.message });
+      }
+      console.error("[inline-edit] apply failed", e);
+      return void res.status(500).json({ detail: "Could not save your edits." });
+    }
+
+    if (!edited.changed) {
+      // Nothing to do — report the current version so the UI can reconcile.
+      return void res.status(200).json({
+        id: active.id,
+        version_number: active.version_number,
+        source: active.source,
+        filename: active.filename,
+        changed: false,
+      });
+    }
+
+    const filename = active.filename ?? "Document.docx";
+    const versionSlug = crypto.randomUUID().replace(/-/g, "");
+    const key = versionStorageKey(userId, documentId, versionSlug, filename);
+    const outBuf = edited.bytes;
+    try {
+      await uploadFile(
+        key,
+        outBuf.buffer.slice(
+          outBuf.byteOffset,
+          outBuf.byteOffset + outBuf.byteLength,
+        ) as ArrayBuffer,
+        contentTypeForDocumentType("docx"),
+      );
+    } catch (e) {
+      console.error("[inline-edit] storage write failed", e);
+      return void res.status(500).json({ detail: "Could not save your edits." });
+    }
+
+    let pdfStoragePath: string | null = null;
+    try {
+      const pdfBuf = await docxToPdf(outBuf);
+      const pdfKey = `converted-pdfs/${userId}/${documentId}/${versionSlug}.pdf`;
+      await uploadFile(
+        pdfKey,
+        pdfBuf.buffer.slice(
+          pdfBuf.byteOffset,
+          pdfBuf.byteOffset + pdfBuf.byteLength,
+        ) as ArrayBuffer,
+        "application/pdf",
+      );
+      pdfStoragePath = pdfKey;
+    } catch (err) {
+      console.error("[inline-edit] Office→PDF conversion failed:", err);
+    }
+
+    const { data: maxRow } = await db
+      .from("document_versions")
+      .select("version_number")
+      .eq("document_id", documentId)
+      .in("source", ["upload", "user_upload", "assistant_edit"])
+      .order("version_number", { ascending: false, nullsFirst: false })
+      .limit(1)
+      .maybeSingle();
+    const nextVersionNumber =
+      ((maxRow?.version_number as number | null) ?? 1) + 1;
+
+    const { data: versionRow, error: verErr } = await db
+      .from("document_versions")
+      .insert({
+        document_id: documentId,
+        storage_path: key,
+        pdf_storage_path: pdfStoragePath,
+        source: "user_upload",
+        version_number: nextVersionNumber,
+        filename,
+        file_type: "docx",
+        size_bytes: outBuf.byteLength,
+        page_count: null,
+        content_sha256: contentSha256(outBuf),
+      })
+      .select("id, version_number, source, created_at, filename")
+      .single();
+    if (verErr || !versionRow) {
+      console.error("[inline-edit] insert failed", verErr);
+      return void res
+        .status(500)
+        .json({ detail: "Failed to record the edited version." });
+    }
+
+    const { error: updateDocErr } = await db
+      .from("documents")
+      .update({ current_version_id: versionRow.id })
+      .eq("id", documentId);
+    if (updateDocErr) {
+      console.error("[inline-edit] current version update failed", updateDocErr);
+      return void res
+        .status(500)
+        .json({ detail: "Failed to update the current version." });
+    }
+
+    res.status(201).json({ ...versionRow, changed: true });
+  },
+);
+
 // POST /single-documents/:documentId/versions
 // Upload a brand-new version of an existing document. The uploaded file
 // becomes the new current_version_id. filename defaults to the
@@ -1098,6 +1595,50 @@ documentsRouter.get(
   },
 );
 
+// GET /single-documents/:documentId/paragraphs
+// Returns the body text one string per paragraph, in document order. The
+// viewer uses this as the authoritative baseline for inline editing so a
+// save is reconciled against exactly what the server holds.
+documentsRouter.get(
+  "/:documentId/paragraphs",
+  requireAuth,
+  async (req, res) => {
+    const userId = res.locals.userId as string;
+    const userEmail = res.locals.userEmail as string | undefined;
+    const { documentId } = req.params;
+    const versionIdParam =
+      typeof req.query.version_id === "string" ? req.query.version_id : null;
+    const db = createServerSupabase();
+
+    const { data: doc } = await db
+      .from("documents")
+      .select("id, user_id, project_id")
+      .eq("id", documentId)
+      .single();
+    if (!doc)
+      return void res.status(404).json({ detail: "Document not found" });
+    const access = await ensureDocAccess(doc, userId, userEmail, db);
+    if (!access.ok)
+      return void res.status(404).json({ detail: "Document not found" });
+
+    const active = await loadActiveVersion(documentId, db, versionIdParam);
+    if (!active)
+      return void res.status(404).json({ detail: "No file available" });
+    if ((active.file_type ?? "").toLowerCase() !== "docx") {
+      return void res.json({ paragraphs: [], editable: false });
+    }
+
+    const raw = await downloadFile(active.storage_path);
+    if (!raw)
+      return void res
+        .status(404)
+        .json({ detail: "Document bytes not available" });
+
+    const paragraphs = await extractDocxBodyParagraphs(Buffer.from(raw));
+    res.json({ paragraphs, editable: true, version_id: active.id });
+  },
+);
+
 // POST /single-documents/:documentId/edits/:editId/accept
 // POST /single-documents/:documentId/edits/:editId/reject
 async function handleEditResolution(
@@ -1118,7 +1659,7 @@ async function handleEditResolution(
 
   const { data: edit, error: editErr } = await db
     .from("document_edits")
-    .select("id, document_id, change_id, del_w_id, ins_w_id, status")
+    .select("id, document_id, change_id, del_w_id, ins_w_id, mark_w_ids, status")
     .eq("id", editId)
     .eq("document_id", documentId)
     .single();
@@ -1199,9 +1740,11 @@ async function handleEditResolution(
   if (!raw)
     return void res.status(404).json({ detail: "Document bytes not available" });
 
-  const wIds = [edit.del_w_id, edit.ins_w_id].filter(
-    (v): v is string => typeof v === "string" && v.length > 0,
-  );
+  const wIds = [
+    edit.del_w_id,
+    edit.ins_w_id,
+    ...(Array.isArray(edit.mark_w_ids) ? edit.mark_w_ids : []),
+  ].filter((v): v is string => typeof v === "string" && v.length > 0);
   const { bytes: resolvedBytes, found } = await resolveTrackedChange(
     Buffer.from(raw),
     wIds,

@@ -447,7 +447,7 @@ export const TOOLS = [
     function: {
       name: "edit_document",
       description:
-        "Propose edits to a user-attached .docx as tracked changes. Each edit is a precise, minimal substitution of specific words/characters, NOT a whole-line or paragraph replacement. Use read_document first unless this same document/version has already been read in the current response. Anchor each edit with short before/after context so it can be located unambiguously. Returns per-edit annotations the UI will render as Accept/Reject cards and a download link to the edited document.",
+        "Propose edits to a user-attached .docx as tracked changes. Use read_document first unless this same document/version has already been read in the current response. Anchor each edit with short before/after context so it can be located unambiguously. When revising existing wording, keep each edit a precise, minimal substitution of specific words/characters rather than a whole-line rewrite. You can also write new body text: a blank line in `replace` starts a new paragraph, so one edit can turn a placeholder into several paragraphs, and an edit with an empty `find` inserts new paragraphs at the anchor. To remove a paragraph completely, set `find` to its full text and `replace` to an empty string — the blank line goes too. New paragraphs inherit the formatting of the paragraph they grow out of. Returns per-edit annotations the UI will render as Accept/Reject cards and a download link to the edited document.",
       parameters: {
         type: "object",
         properties: {
@@ -464,12 +464,12 @@ export const TOOLS = [
                 find: {
                   type: "string",
                   description:
-                    "Exact substring to replace (keep it as short as possible — ideally just the words/chars being changed).",
+                    "Exact substring to replace. When revising existing wording, keep it as short as possible — ideally just the words/chars being changed. Use the paragraph's full text to replace or remove the whole paragraph, or an empty string to insert new text at the anchor.",
                 },
                 replace: {
                   type: "string",
                   description:
-                    "Replacement text. Empty string = pure deletion.",
+                    "Replacement text. Empty string = pure deletion. A blank line (\\n\\n) starts a new paragraph; a single newline is a line break within the same paragraph.",
                 },
                 context_before: {
                   type: "string",

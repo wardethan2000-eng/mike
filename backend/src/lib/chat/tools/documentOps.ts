@@ -1283,6 +1283,10 @@ export async function runEditDocument(params: {
     change_id: c.id,
     del_w_id: c.delId ?? null,
     ins_w_id: c.insId ?? null,
+    // Paragraph marks this change created or removed. Kept apart from
+    // del_w_id / ins_w_id because the frontend matches those against the
+    // rendered <ins>/<del> elements, which paragraph marks do not produce.
+    mark_w_ids: [...(c.extraInsIds ?? []), ...(c.extraDelIds ?? [])],
     deleted_text: c.deletedText,
     inserted_text: c.insertedText,
     context_before: c.contextBefore ?? "",

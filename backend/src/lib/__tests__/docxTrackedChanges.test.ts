@@ -2,6 +2,9 @@ import { describe, expect, it } from "vitest";
 import JSZip from "jszip";
 import {
     applyTrackedEdits,
+    applyUserParagraphEdits,
+    applyFormattedEdits,
+    StaleDocumentError,
     extractDocxBodyText,
     extractTrackedChangeIds,
     resolveTrackedChange,
@@ -304,5 +307,479 @@ describe("extractTrackedChangeIds", () => {
         zip.file("other.txt", "not a docx");
         const bytes = await zip.generateAsync({ type: "nodebuffer" });
         await expect(extractTrackedChangeIds(bytes)).resolves.toEqual([]);
+    });
+});
+
+describe("applyTrackedEdits — whole paragraphs", () => {
+    /** Every w:id belonging to one logical change, marks included. */
+    function allIds(change: {
+        delId?: string;
+        insId?: string;
+        extraInsIds?: string[];
+        extraDelIds?: string[];
+    }): string[] {
+        return [
+            change.delId,
+            change.insId,
+            ...(change.extraInsIds ?? []),
+            ...(change.extraDelIds ?? []),
+        ].filter((v): v is string => !!v);
+    }
+
+    it("turns a blank line in `replace` into a real new paragraph", async () => {
+        const bytes = await makeDocx(
+            para("Dear Ms. Smith:") + para("[BODY]") + para("Sincerely,"),
+        );
+        const result = await applyTrackedEdits(bytes, [
+            {
+                find: "[BODY]",
+                replace: "First paragraph.\n\nSecond paragraph.",
+                context_before: "Dear Ms. Smith:",
+                context_after: "Sincerely,",
+            },
+        ]);
+
+        expect(result.errors).toEqual([]);
+        expect(result.changes).toHaveLength(1);
+        // One new paragraph mark for the one new paragraph boundary.
+        expect(result.changes[0].extraInsIds).toHaveLength(1);
+
+        const xml = await readDocumentXml(result.bytes);
+        // The new paragraph mark is tracked inside the paragraph properties.
+        expect(xml).toMatch(/<w:pPr><w:rPr><w:ins[^>]*>(<\/w:ins>)?<\/w:rPr><\/w:pPr>/);
+        expect((xml.match(/<w:p[ >]/g) ?? []).length).toBe(4);
+
+        await expect(extractDocxBodyText(result.bytes)).resolves.toBe(
+            "Dear Ms. Smith:\nFirst paragraph.\nSecond paragraph.\nSincerely,",
+        );
+    });
+
+    it("accepting keeps the new paragraphs and drops the tracked marks", async () => {
+        const bytes = await makeDocx(para("[BODY]") + para("Sincerely,"));
+        const edited = await applyTrackedEdits(bytes, [
+            {
+                find: "[BODY]",
+                replace: "One.\n\nTwo.\n\nThree.",
+                context_before: "",
+                context_after: "Sincerely,",
+            },
+        ]);
+        expect(edited.changes[0].extraInsIds).toHaveLength(2);
+
+        const { bytes: accepted, found } = await resolveTrackedChange(
+            edited.bytes,
+            allIds(edited.changes[0]),
+            "accept",
+        );
+        expect(found).toBe(true);
+
+        const xml = await readDocumentXml(accepted);
+        expect(xml).not.toContain("<w:ins");
+        expect(xml).not.toContain("<w:del");
+        await expect(extractDocxBodyText(accepted)).resolves.toBe(
+            "One.\nTwo.\nThree.\nSincerely,",
+        );
+    });
+
+    it("rejecting merges the new paragraphs back into the original one", async () => {
+        const bytes = await makeDocx(para("[BODY]") + para("Sincerely,"));
+        const edited = await applyTrackedEdits(bytes, [
+            {
+                find: "[BODY]",
+                replace: "One.\n\nTwo.\n\nThree.",
+                context_before: "",
+                context_after: "Sincerely,",
+            },
+        ]);
+
+        const { bytes: rejected } = await resolveTrackedChange(
+            edited.bytes,
+            allIds(edited.changes[0]),
+            "reject",
+        );
+
+        await expect(extractDocxBodyText(rejected)).resolves.toBe(
+            "[BODY]\nSincerely,",
+        );
+        const xml = await readDocumentXml(rejected);
+        expect((xml.match(/<w:p[ >]/g) ?? []).length).toBe(2);
+    });
+
+    it("deletes a whole paragraph, blank line included, when accepted", async () => {
+        const bytes = await makeDocx(
+            para("Keep this.") + para("Drop this.") + para("Keep this too."),
+        );
+        const edited = await applyTrackedEdits(bytes, [
+            {
+                find: "Drop this.",
+                replace: "",
+                context_before: "Keep this.",
+                context_after: "Keep this too.",
+            },
+        ]);
+        expect(edited.changes[0].extraDelIds).toHaveLength(1);
+
+        const xml = await readDocumentXml(edited.bytes);
+        expect(xml).toMatch(/<w:pPr><w:rPr><w:del[^>]*>(<\/w:del>)?<\/w:rPr><\/w:pPr>/);
+
+        const { bytes: accepted } = await resolveTrackedChange(
+            edited.bytes,
+            allIds(edited.changes[0]),
+            "accept",
+        );
+        await expect(extractDocxBodyText(accepted)).resolves.toBe(
+            "Keep this.\nKeep this too.",
+        );
+
+        const { bytes: restored } = await resolveTrackedChange(
+            edited.bytes,
+            allIds(edited.changes[0]),
+            "reject",
+        );
+        await expect(extractDocxBodyText(restored)).resolves.toBe(
+            "Keep this.\nDrop this.\nKeep this too.",
+        );
+    });
+
+    it("never removes the final paragraph mark of the document", async () => {
+        const bytes = await makeDocx(para("First.") + para("Last."));
+        const edited = await applyTrackedEdits(bytes, [
+            {
+                find: "Last.",
+                replace: "",
+                context_before: "First.",
+                context_after: "",
+            },
+        ]);
+        expect(edited.changes[0].extraDelIds).toBeUndefined();
+    });
+
+    it("inserts new paragraphs from an empty `find`", async () => {
+        const bytes = await makeDocx(para("Dear Ms. Smith:") + para("Sincerely,"));
+        const edited = await applyTrackedEdits(bytes, [
+            {
+                find: "",
+                replace: "\n\nNew opening paragraph.",
+                context_before: "Dear Ms. Smith:",
+                context_after: "",
+            },
+        ]);
+        expect(edited.errors).toEqual([]);
+
+        const { bytes: accepted } = await resolveTrackedChange(
+            edited.bytes,
+            allIds(edited.changes[0]),
+            "accept",
+        );
+        await expect(extractDocxBodyText(accepted)).resolves.toBe(
+            "Dear Ms. Smith:\nNew opening paragraph.\nSincerely,",
+        );
+    });
+
+    it("keeps the paragraph's own formatting on the paragraphs it grows", async () => {
+        const bytes = await makeDocx(
+            `<w:p><w:pPr><w:pStyle w:val="Body"/></w:pPr>` +
+                `<w:r><w:rPr><w:b/></w:rPr><w:t>[BODY]</w:t></w:r></w:p>` +
+                para("End."),
+        );
+        const edited = await applyTrackedEdits(bytes, [
+            {
+                find: "[BODY]",
+                replace: "One.\n\nTwo.",
+                context_before: "",
+                context_after: "End.",
+            },
+        ]);
+        const xml = await readDocumentXml(edited.bytes);
+        // Both resulting paragraphs carry the source paragraph's style.
+        expect((xml.match(/w:val="Body"/g) ?? []).length).toBe(2);
+        // Inserted runs inherit the bold run properties.
+        expect(xml).toMatch(/<w:ins[^>]*><w:r><w:rPr><w:b\/?>/);
+    });
+
+    it("leaves paragraph marks out of the rendered change-id list", async () => {
+        const bytes = await makeDocx(para("[BODY]") + para("End."));
+        const edited = await applyTrackedEdits(bytes, [
+            {
+                find: "[BODY]",
+                replace: "One.\n\nTwo.",
+                context_before: "",
+                context_after: "End.",
+            },
+        ]);
+        const ids = await extractTrackedChangeIds(edited.bytes);
+        const markIds = new Set(edited.changes[0].extraInsIds ?? []);
+        expect(ids.some((i) => markIds.has(i.w_id))).toBe(false);
+    });
+});
+
+describe("applyUserParagraphEdits — inline viewer editing", () => {
+    async function bodyLines(bytes: Buffer): Promise<string[]> {
+        return (await extractDocxBodyText(bytes)).split("\n");
+    }
+
+    it("edits a paragraph's wording in place and returns a clean doc", async () => {
+        const bytes = await makeDocx(
+            para("Dear Ms. Smith:") + para("The fee is ten dollars.") + para("Sincerely,"),
+        );
+        const baseline = ["Dear Ms. Smith:", "The fee is ten dollars.", "Sincerely,"];
+        const next = ["Dear Ms. Smith:", "The fee is five dollars.", "Sincerely,"];
+        const { bytes: out, changed } = await applyUserParagraphEdits(bytes, baseline, next);
+        expect(changed).toBe(true);
+        const xml = await readDocumentXml(out);
+        expect(xml).not.toContain("<w:ins");
+        expect(xml).not.toContain("<w:del");
+        expect(await bodyLines(out)).toEqual(next);
+    });
+
+    it("adds a new paragraph in the middle", async () => {
+        const bytes = await makeDocx(para("One.") + para("Three.") + para("End."));
+        const baseline = ["One.", "Three.", "End."];
+        const next = ["One.", "Two.", "Three.", "End."];
+        const { bytes: out } = await applyUserParagraphEdits(bytes, baseline, next);
+        expect(await bodyLines(out)).toEqual(next);
+    });
+
+    it("adds several paragraphs at the end of the body", async () => {
+        const bytes = await makeDocx(para("Intro.") + para("Closing."));
+        const baseline = ["Intro.", "Closing."];
+        const next = ["Intro.", "Closing.", "PS one.", "PS two."];
+        const { bytes: out } = await applyUserParagraphEdits(bytes, baseline, next);
+        expect(await bodyLines(out)).toEqual(next);
+    });
+
+    it("deletes a paragraph", async () => {
+        const bytes = await makeDocx(para("Keep.") + para("Drop.") + para("Keep too."));
+        const baseline = ["Keep.", "Drop.", "Keep too."];
+        const next = ["Keep.", "Keep too."];
+        const { bytes: out } = await applyUserParagraphEdits(bytes, baseline, next);
+        expect(await bodyLines(out)).toEqual(next);
+    });
+
+    it("splits one paragraph into two", async () => {
+        const bytes = await makeDocx(para("First half. Second half.") + para("End."));
+        const baseline = ["First half. Second half.", "End."];
+        const next = ["First half.", "Second half.", "End."];
+        const { bytes: out } = await applyUserParagraphEdits(bytes, baseline, next);
+        expect(await bodyLines(out)).toEqual(next);
+    });
+
+    it("merges two paragraphs into one", async () => {
+        const bytes = await makeDocx(para("Alpha.") + para("Beta.") + para("End."));
+        const baseline = ["Alpha.", "Beta.", "End."];
+        const next = ["Alpha. Beta.", "End."];
+        const { bytes: out } = await applyUserParagraphEdits(bytes, baseline, next);
+        expect(await bodyLines(out)).toEqual(next);
+    });
+
+    it("does a combined edit: modify, delete and add together", async () => {
+        const bytes = await makeDocx(
+            para("Salutation") + para("Body A") + para("Body B") + para("Body C") + para("Sign"),
+        );
+        const baseline = ["Salutation", "Body A", "Body B", "Body C", "Sign"];
+        // Change A, drop B, keep C, add two paragraphs after C.
+        const next = ["Salutation", "Body A edited", "Body C", "New D", "New E", "Sign"];
+        const { bytes: out } = await applyUserParagraphEdits(bytes, baseline, next);
+        expect(await bodyLines(out)).toEqual(next);
+    });
+
+    it("preserves an inline image while its paragraph's text is edited", async () => {
+        // A run holding a drawing sits beside the text run in the same paragraph.
+        const drawing = `<w:r><w:drawing><wp:inline><a:blip/></wp:inline></w:drawing></w:r>`;
+        const bytes = await makeDocx(
+            `<w:p><w:r><w:t xml:space="preserve">Sincerely,</w:t></w:r>${drawing}</w:p>` +
+                para("Ethan J. Ward, Esq."),
+        );
+        const baseline = ["Sincerely,", "Ethan J. Ward, Esq."];
+        const next = ["Sincerely,", "Ethan J. Ward"];
+        const { bytes: out } = await applyUserParagraphEdits(bytes, baseline, next);
+        const xml = await readDocumentXml(out);
+        expect(xml).toContain("<w:drawing>");
+        expect(await bodyLines(out)).toEqual(next);
+    });
+
+    it("refuses to save when the baseline no longer matches the document", async () => {
+        const bytes = await makeDocx(para("One.") + para("Two."));
+        await expect(
+            applyUserParagraphEdits(bytes, ["One.", "DIFFERENT."], ["One.", "Changed."]),
+        ).rejects.toThrow(StaleDocumentError);
+    });
+
+    it("is a no-op when nothing changed", async () => {
+        const bytes = await makeDocx(para("One.") + para("Two."));
+        const { changed, opsApplied } = await applyUserParagraphEdits(
+            bytes,
+            ["One.", "Two."],
+            ["One.", "Two."],
+        );
+        expect(changed).toBe(false);
+        expect(opsApplied).toBe(0);
+    });
+
+    it("never deletes the final paragraph, clearing its text instead", async () => {
+        const bytes = await makeDocx(para("First.") + para("Last."));
+        const { bytes: out } = await applyUserParagraphEdits(
+            bytes,
+            ["First.", "Last."],
+            ["First."],
+        );
+        // Final paragraph survives (empty) rather than removing the section mark.
+        const lines = await bodyLines(out);
+        expect(lines[0]).toBe("First.");
+    });
+});
+
+describe("applyFormattedEdits — in-app formatting editor", () => {
+    async function lines(bytes: Buffer): Promise<string[]> {
+        return (await extractDocxBodyText(bytes)).split("\n");
+    }
+
+    it("applies bold to a paragraph and keeps the text", async () => {
+        const bytes = await makeDocx(
+            para("Dear Ms. Smith:") + para("The fee is ten dollars.") + para("End."),
+        );
+        const baseline = ["Dear Ms. Smith:", "The fee is ten dollars.", "End."];
+        const next = [
+            { text: "Dear Ms. Smith:", runs: [{ text: "Dear Ms. Smith:" }] },
+            {
+                text: "The fee is ten dollars.",
+                runs: [
+                    { text: "The fee is " },
+                    { text: "ten", bold: true },
+                    { text: " dollars." },
+                ],
+            },
+            { text: "End.", runs: [{ text: "End." }] },
+        ];
+        const { bytes: out, changed } = await applyFormattedEdits(bytes, baseline, next);
+        expect(changed).toBe(true);
+        expect(await lines(out)).toEqual(baseline);
+        const xml = await readDocumentXml(out);
+        // A bold run wrapping exactly "ten".
+        expect(xml).toMatch(/<w:rPr>(<[^>]*>)*<w:b\/?>(<\/w:b>)?/);
+        expect(xml).toContain(">ten<");
+    });
+
+    it("inherits the paragraph font when rebuilding a run", async () => {
+        const bytes = await makeDocx(
+            `<w:p><w:r><w:rPr><w:rFonts w:ascii="Garamond" w:hAnsi="Garamond"/><w:sz w:val="24"/></w:rPr>` +
+                `<w:t xml:space="preserve">Hello world.</w:t></w:r></w:p>` +
+                para("End."),
+        );
+        const next = [
+            {
+                text: "Hello world.",
+                runs: [
+                    { text: "Hello " },
+                    { text: "world", italic: true },
+                    { text: "." },
+                ],
+            },
+            { text: "End.", runs: [{ text: "End." }] },
+        ];
+        const { bytes: out } = await applyFormattedEdits(
+            bytes,
+            ["Hello world.", "End."],
+            next,
+        );
+        const xml = await readDocumentXml(out);
+        // Every rebuilt run keeps Garamond + the base size.
+        expect((xml.match(/w:ascii="Garamond"/g) ?? []).length).toBeGreaterThanOrEqual(3);
+        expect(xml).toMatch(/<w:i\/?>/);
+    });
+
+    it("sets paragraph alignment", async () => {
+        const bytes = await makeDocx(para("Centered me.") + para("End."));
+        const next = [
+            { text: "Centered me.", align: "center" as const, runs: [{ text: "Centered me." }] },
+            { text: "End.", runs: [{ text: "End." }] },
+        ];
+        const { bytes: out } = await applyFormattedEdits(
+            bytes,
+            ["Centered me.", "End."],
+            next,
+        );
+        const xml = await readDocumentXml(out);
+        expect(xml).toMatch(/<w:jc w:val="center"\/?>/);
+    });
+
+    it("adds a new formatted paragraph and inherits the neighbour's font", async () => {
+        const bytes = await makeDocx(
+            `<w:p><w:r><w:rPr><w:rFonts w:ascii="Garamond" w:hAnsi="Garamond"/></w:rPr>` +
+                `<w:t xml:space="preserve">First.</w:t></w:r></w:p>` +
+                para("End."),
+        );
+        const next = [
+            { text: "First.", runs: [{ text: "First." }] },
+            { text: "Brand new.", runs: [{ text: "Brand new.", bold: true }] },
+            { text: "End.", runs: [{ text: "End." }] },
+        ];
+        const { bytes: out } = await applyFormattedEdits(bytes, ["First.", "End."], next);
+        expect(await lines(out)).toEqual(["First.", "Brand new.", "End."]);
+        const xml = await readDocumentXml(out);
+        // The new "Brand new." paragraph carries Garamond AND bold.
+        const newPara = xml.slice(xml.indexOf("Brand new") - 400, xml.indexOf("Brand new"));
+        expect(newPara).toContain('w:ascii="Garamond"');
+        expect(newPara).toMatch(/<w:b\/?>/);
+    });
+
+    it("deletes a paragraph", async () => {
+        const bytes = await makeDocx(para("Keep.") + para("Drop.") + para("End."));
+        const next = [
+            { text: "Keep.", runs: [{ text: "Keep." }] },
+            { text: "End.", runs: [{ text: "End." }] },
+        ];
+        const { bytes: out } = await applyFormattedEdits(
+            bytes,
+            ["Keep.", "Drop.", "End."],
+            next,
+        );
+        expect(await lines(out)).toEqual(["Keep.", "End."]);
+    });
+
+    it("leaves untouched paragraphs byte-identical", async () => {
+        const bytes = await makeDocx(
+            para("Alpha.") + para("Beta.") + para("Gamma."),
+        );
+        const before = await readDocumentXml(bytes);
+        const next = [
+            { text: "Alpha.", runs: [{ text: "Alpha." }] },
+            { text: "Beta.", runs: [{ text: "Beta.", bold: true }] },
+            { text: "Gamma.", runs: [{ text: "Gamma." }] },
+        ];
+        const { bytes: out } = await applyFormattedEdits(
+            bytes,
+            ["Alpha.", "Beta.", "Gamma."],
+            next,
+        );
+        const after = await readDocumentXml(out);
+        // Alpha and Gamma paragraphs are unchanged verbatim.
+        expect(after).toContain("<w:t xml:space=\"preserve\">Alpha.</w:t>");
+        expect(after).toContain("<w:t xml:space=\"preserve\">Gamma.</w:t>");
+        expect(before).not.toEqual(after); // Beta changed
+    });
+
+    it("refuses a stale baseline", async () => {
+        const bytes = await makeDocx(para("One.") + para("Two."));
+        await expect(
+            applyFormattedEdits(bytes, ["One.", "WRONG."], [
+                { text: "One.", runs: [{ text: "One." }] },
+            ]),
+        ).rejects.toThrow(StaleDocumentError);
+    });
+
+    it("applies colour and size", async () => {
+        const bytes = await makeDocx(para("Big red.") + para("End."));
+        const next = [
+            {
+                text: "Big red.",
+                runs: [{ text: "Big red.", color: "FF0000", size: 18 }],
+            },
+            { text: "End.", runs: [{ text: "End." }] },
+        ];
+        const { bytes: out } = await applyFormattedEdits(bytes, ["Big red.", "End."], next);
+        const xml = await readDocumentXml(out);
+        expect(xml).toMatch(/<w:color w:val="FF0000"\/?>/);
+        expect(xml).toMatch(/<w:sz w:val="36"\/?>/); // 18pt -> 36 half-points
     });
 });

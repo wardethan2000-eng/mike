@@ -66,6 +66,14 @@ export interface AppliedChange {
     id: string;
     delId?: string;
     insId?: string;
+    /**
+     * w:id values for paragraph-mark changes that belong to this same logical
+     * change (a new paragraph created by this edit, or the paragraph mark of a
+     * paragraph this edit deleted outright). Accepting or rejecting the change
+     * must resolve these alongside delId/insId.
+     */
+    extraInsIds?: string[];
+    extraDelIds?: string[];
     deletedText: string;
     insertedText: string;
     contextBefore: string;
@@ -145,6 +153,119 @@ function makeEl(
 
 function makeText(s: string): XNode {
     return { [TEXT_KEY]: s };
+}
+
+// ---------------------------------------------------------------------------
+// Paragraph-level tracked changes
+// ---------------------------------------------------------------------------
+//
+// A replacement may span more than one paragraph: a blank line in an edit's
+// `replace` string means "start a new paragraph here". Word models that as a
+// new paragraph whose *paragraph mark* is itself an insertion, recorded as
+// <w:pPr><w:rPr><w:ins .../></w:rPr></w:pPr>. Rejecting such a change removes
+// the mark, which merges the text back into the following paragraph, so the
+// document returns to exactly its previous shape. Deleting a whole paragraph
+// is the mirror image: the runs are wrapped in <w:del> and the paragraph mark
+// carries <w:del>, so accepting removes the blank line as well as the text.
+//
+// PBREAK_KEY marks a paragraph split inside the flat run stream that
+// `reconstructParagraph` builds. It never reaches the XML: the stream is cut
+// into separate <w:p> nodes on these markers before the tree is rebuilt.
+
+const PBREAK_KEY = "mike:pbreak";
+
+function makeParagraphBreakMarker(): XNode {
+    return { [PBREAK_KEY]: [] };
+}
+
+function isParagraphBreakMarker(n: unknown): boolean {
+    return elName(n) === PBREAK_KEY;
+}
+
+/** Split inserted text on blank lines into per-paragraph pieces. */
+function splitIntoParagraphs(text: string): string[] {
+    return text.split(/\r?\n[ \t]*\r?\n/);
+}
+
+function findChildByName(children: XNode[], name: string): XNode | null {
+    for (const c of children) if (elName(c) === name) return c;
+    return null;
+}
+
+/**
+ * Return a copy of `pPr` whose paragraph mark is flagged as inserted or
+ * deleted. Inside w:pPr the run properties element sits near the end (but
+ * before w:sectPr / w:pPrChange), and inside w:rPr the w:ins / w:del element
+ * must come first — both required by the OOXML schema, and Word rejects the
+ * file otherwise.
+ */
+function withParagraphMarkChange(
+    pPr: XNode | null,
+    kind: "w:ins" | "w:del",
+    wId: string,
+    author: string,
+    now: string,
+): XNode {
+    const base = pPr ? cloneNode(pPr) : makeEl("w:pPr", []);
+    const kids = elChildren(base);
+    const mark = makeEl(kind, [], {
+        "w:id": wId,
+        "w:author": author,
+        "w:date": now,
+    });
+    const existingRPr = findChildByName(kids, "w:rPr");
+    if (existingRPr) {
+        setChildren(existingRPr, [mark, ...elChildren(existingRPr)]);
+        return base;
+    }
+    const rPr = makeEl("w:rPr", [mark]);
+    const tailIdx = kids.findIndex(
+        (k) => elName(k) === "w:sectPr" || elName(k) === "w:pPrChange",
+    );
+    if (tailIdx >= 0) kids.splice(tailIdx, 0, rPr);
+    else kids.push(rPr);
+    setChildren(base, kids);
+    return base;
+}
+
+/**
+ * Inspect a paragraph's mark for a tracked change with one of `ids`.
+ * "merge" means the paragraph mark goes away, so this paragraph's remaining
+ * content joins the paragraph that follows it.
+ */
+function resolveParagraphMark(
+    paraNode: XNode,
+    ids: Set<string>,
+    mode: "accept" | "reject",
+): { touched: boolean; merge: boolean } {
+    const pPr = findChildByName(elChildren(paraNode), "w:pPr");
+    if (!pPr) return { touched: false, merge: false };
+    const rPr = findChildByName(elChildren(pPr), "w:rPr");
+    if (!rPr) return { touched: false, merge: false };
+
+    let touched = false;
+    let merge = false;
+    const kept: XNode[] = [];
+    for (const c of elChildren(rPr)) {
+        const name = elName(c);
+        if (name !== "w:ins" && name !== "w:del") {
+            kept.push(c);
+            continue;
+        }
+        const wId = String(elAttrs(c)["@_w:id"] ?? "");
+        if (!ids.has(wId)) {
+            kept.push(c);
+            continue;
+        }
+        touched = true;
+        const keepsMark =
+            (name === "w:ins" && mode === "accept") ||
+            (name === "w:del" && mode === "reject");
+        if (!keepsMark) merge = true;
+        // Either way the tracked marker itself is consumed.
+    }
+    if (touched) setChildren(rPr, kept);
+    return { touched, merge };
 }
 
 function getTextContent(wtEl: XNode): string {
@@ -289,6 +410,8 @@ interface PlannedChange {
     changeId: string;             // logical id (not the w:id)
     delWId?: string;              // w:id of w:del wrapper (if deletedText non-empty)
     insWId?: string;              // w:id of w:ins wrapper (if insertedText non-empty)
+    markInsWIds: string[];        // w:ids of paragraph marks this edit created
+    markDelWIds: string[];        // w:ids of paragraph marks this edit deleted
 }
 
 /**
@@ -325,13 +448,16 @@ function collapseDiff(find: string, replace: string): { deleted: string; inserte
  * tracked changes inserted.
  */
 function reconstructParagraph(
+    paraNode: XNode,
     paraChildren: XNode[],
     flat: Flattened,
     plan: PlannedChange[],
     now: string,
     author: string,
+    allocWId: () => string,
+    allowParagraphDelete: boolean,
 ): XNode[] {
-    if (plan.length === 0) return paraChildren;
+    if (plan.length === 0) return [paraNode];
 
     // Determine the run-index span that edits touch.
     let firstRunIdx = flat.runs.length;
@@ -356,7 +482,7 @@ function reconstructParagraph(
     }
     if (firstRunIdx > lastRunIdx) {
         // No runs touched (edits against empty paragraph?) — nothing to do.
-        return paraChildren;
+        return [paraNode];
     }
 
     // Child-index range in paragraph.children we are going to replace.
@@ -440,18 +566,23 @@ function reconstructParagraph(
         );
     };
 
-    // Emit a w:ins at position `pos` inheriting rPr from there.
+    // Emit a w:ins at position `pos` inheriting rPr from there. A blank line
+    // in the text starts a new paragraph, marked here and cut apart below.
     const emitIns = (pos: number, text: string, wId: string) => {
         if (!text) return;
         const rPr = rPrForPos(pos === spanEnd ? pos - 1 : pos);
-        const run = buildRun(rPr, text, "w:t");
-        newRunGroup.push(
-            makeEl("w:ins", [run], {
-                "w:id": wId,
-                "w:author": author,
-                "w:date": now,
-            }),
-        );
+        const pieces = splitIntoParagraphs(text);
+        for (let i = 0; i < pieces.length; i++) {
+            if (i > 0) newRunGroup.push(makeParagraphBreakMarker());
+            if (!pieces[i]) continue;
+            newRunGroup.push(
+                makeEl("w:ins", [buildRun(rPr, pieces[i], "w:t")], {
+                    "w:id": wId,
+                    "w:author": author,
+                    "w:date": now,
+                }),
+            );
+        }
     };
 
     let cursor = spanStart;
@@ -490,7 +621,77 @@ function reconstructParagraph(
         if (droppedChildIdx.has(i)) continue;
         out.push(paraChildren[i]);
     }
-    return out;
+
+    // Cut the child stream apart on paragraph-break markers. The last piece
+    // keeps the paragraph's original mark and properties; every earlier piece
+    // ends with a newly inserted mark, so rejecting the change stitches them
+    // back into the single paragraph we started from.
+    const originalPPr = findChildByName(out, "w:pPr");
+    const pieces: XNode[][] = [[]];
+    for (const n of out) {
+        if (isParagraphBreakMarker(n)) {
+            pieces.push([]);
+            continue;
+        }
+        if (elName(n) === "w:pPr") continue;
+        pieces[pieces.length - 1].push(n);
+    }
+
+    // A paragraph whose entire text is deleted with nothing put back also
+    // loses its paragraph mark, so accepting removes the empty line it would
+    // otherwise leave behind.
+    const wholeParagraphDeleted =
+        allowParagraphDelete &&
+        pieces.length === 1 &&
+        flat.paraText.length > 0 &&
+        plan.length === 1 &&
+        plan[0].deleteStart === 0 &&
+        plan[0].deleteEnd === flat.paraText.length &&
+        !plan[0].insertedText;
+
+    if (wholeParagraphDeleted) {
+        const wId = allocWId();
+        plan[0].markDelWIds.push(wId);
+        const pPr = withParagraphMarkChange(
+            originalPPr,
+            "w:del",
+            wId,
+            author,
+            now,
+        );
+        setChildren(paraNode, [pPr, ...pieces[0]]);
+        return [paraNode];
+    }
+
+    // Attribute each new paragraph mark to the edit whose text created it.
+    const insertingPlans = plan.filter((p) => p.insertedText);
+    const paraNodes: XNode[] = [];
+    for (let i = 0; i < pieces.length; i++) {
+        const isLast = i === pieces.length - 1;
+        let pPr: XNode | null;
+        if (isLast) {
+            pPr = originalPPr;
+        } else {
+            const wId = allocWId();
+            const owner = insertingPlans[Math.min(i, insertingPlans.length - 1)];
+            if (owner) owner.markInsWIds.push(wId);
+            pPr = withParagraphMarkChange(
+                originalPPr,
+                "w:ins",
+                wId,
+                author,
+                now,
+            );
+        }
+        const kids = pPr ? [pPr, ...pieces[i]] : pieces[i];
+        if (i === 0) {
+            setChildren(paraNode, kids);
+            paraNodes.push(paraNode);
+        } else {
+            paraNodes.push(makeEl("w:p", kids));
+        }
+    }
+    return paraNodes;
 }
 
 // ---------------------------------------------------------------------------
@@ -717,14 +918,25 @@ function maxTrackedId(doc: XNode[]): number {
  * anchor matcher operates against.
  */
 export async function extractDocxBodyText(bytes: Buffer): Promise<string> {
+    return (await extractDocxBodyParagraphs(bytes)).join("\n");
+}
+
+/**
+ * Return the body text one string per paragraph, in document order — the same
+ * paragraph list `applyUserParagraphEdits` reconciles against. Used as the
+ * authoritative baseline when the viewer saves inline edits.
+ */
+export async function extractDocxBodyParagraphs(
+    bytes: Buffer,
+): Promise<string[]> {
     const zip = await JSZip.loadAsync(bytes);
     const docXmlFile = getZipEntry(zip, "word/document.xml");
-    if (!docXmlFile) return "";
+    if (!docXmlFile) return [];
     const docXmlRaw = await docXmlFile.async("string");
     const parser = createParser();
     const tree = parser.parse(docXmlRaw) as XNode[];
     const bodyChildren = findBody(tree);
-    if (!bodyChildren) return "";
+    if (!bodyChildren) return [];
 
     const lines: string[] = [];
     const collect = (nodes: XNode[]) => {
@@ -746,7 +958,7 @@ export async function extractDocxBodyText(bytes: Buffer): Promise<string> {
         }
     };
     collect(bodyChildren);
-    return lines.join("\n");
+    return lines;
 }
 
 /**
@@ -768,6 +980,10 @@ export async function extractTrackedChangeIds(
     const visit = (n: unknown) => {
         const name = elName(n);
         if (!name) return;
+        // Paragraph-mark changes live in w:pPr and are not rendered as
+        // <ins>/<del> elements, so including them would shift the index
+        // mapping the frontend relies on.
+        if (name === "w:pPr") return;
         if (name === "w:ins" || name === "w:del") {
             const a = elAttrs(n);
             const raw = a["@_w:id"];
@@ -977,6 +1193,8 @@ export async function applyTrackedEdits(
             changeId,
             delWId: deleted ? String(nextWId++) : undefined,
             insWId: inserted ? String(nextWId++) : undefined,
+            markInsWIds: [],
+            markDelWIds: [],
         };
 
         // Check for overlap with earlier plans in the same paragraph.
@@ -1008,17 +1226,68 @@ export async function applyTrackedEdits(
         });
     }
 
-    // Apply plans per paragraph.
+    // Apply plans per paragraph. A plan can turn one paragraph into several
+    // (or mark it for removal), so the results are spliced back into the tree.
+    const replacements = new Map<XNode, XNode[]>();
+    const lastParaNode =
+        paragraphs.length > 0
+            ? paragraphs[paragraphs.length - 1].paraNode
+            : null;
     for (const [paraIdx, plan] of plansPerParagraph) {
         const p = paragraphs[paraIdx];
-        const newKids = reconstructParagraph(
+        // Never remove the final paragraph mark or one carrying section
+        // properties — Word treats those as structural.
+        const pPr = findChildByName(p.paraChildren, "w:pPr");
+        const allowParagraphDelete =
+            p.paraNode !== lastParaNode &&
+            !(pPr && findChildByName(elChildren(pPr), "w:sectPr"));
+        const newParas = reconstructParagraph(
+            p.paraNode,
             p.paraChildren,
             p.flat,
             plan,
             now,
             author,
+            () => String(nextWId++),
+            allowParagraphDelete,
         );
-        setChildren(p.paraNode, newKids);
+        if (newParas.length !== 1 || newParas[0] !== p.paraNode) {
+            replacements.set(p.paraNode, newParas);
+        }
+        for (const pc of plan) {
+            if (!pc.markInsWIds.length && !pc.markDelWIds.length) continue;
+            const target = appliedChanges.find((c) => c.id === pc.changeId);
+            if (!target) continue;
+            if (pc.markInsWIds.length) target.extraInsIds = pc.markInsWIds;
+            if (pc.markDelWIds.length) target.extraDelIds = pc.markDelWIds;
+        }
+    }
+
+    if (replacements.size > 0) {
+        const splice = (nodes: XNode[]): XNode[] => {
+            const out: XNode[] = [];
+            for (const n of nodes) {
+                const name = elName(n);
+                if (name === "w:p") {
+                    const rep = replacements.get(n);
+                    if (rep) {
+                        for (const r of rep) out.push(r);
+                        continue;
+                    }
+                } else if (
+                    name === "w:tbl" ||
+                    name === "w:tr" ||
+                    name === "w:tc" ||
+                    name === "w:sdt" ||
+                    name === "w:sdtContent"
+                ) {
+                    setChildren(n, splice(elChildren(n)));
+                }
+                out.push(n);
+            }
+            return out;
+        };
+        replaceBody(tree, splice(bodyChildren));
     }
 
     const builder = createBuilder();
@@ -1031,6 +1300,694 @@ export async function applyTrackedEdits(
         compression: "DEFLATE",
     });
     return { bytes: outBuf, changes: appliedChanges, errors };
+}
+
+// ---------------------------------------------------------------------------
+// Inline editing: reconcile user-edited paragraph text with the document
+// ---------------------------------------------------------------------------
+//
+// The viewer lets the user retype the body of a .docx. On save the frontend
+// sends the paragraph texts it started from (`baseline`) and the paragraph
+// texts after editing (`next`). We align the two by longest-common-subsequence
+// and turn the difference into the same per-paragraph operations the tracked
+// engine already knows how to apply — edit a paragraph's words, delete a whole
+// paragraph, or grow new ones — then bake them in as the user's own change so
+// the result is a clean document, not a redline. Only text runs are touched,
+// so headers, footers, images and the signature block are preserved exactly.
+//
+// `baseline` must match the document's current body paragraphs exactly; if it
+// does not, the save is refused rather than risk writing to the wrong place.
+
+export interface UserParagraphEditResult {
+    bytes: Buffer;
+    changed: boolean;
+    opsApplied: number;
+}
+
+export class StaleDocumentError extends Error {
+    constructor(message: string) {
+        super(message);
+        this.name = "StaleDocumentError";
+    }
+}
+
+/** Longest-common-subsequence alignment of two string arrays (exact match). */
+function lcsPairs(a: string[], b: string[]): Array<[number, number]> {
+    const n = a.length;
+    const m = b.length;
+    const dp: Int32Array[] = [];
+    for (let i = 0; i <= n; i++) dp.push(new Int32Array(m + 1));
+    for (let i = n - 1; i >= 0; i--) {
+        for (let j = m - 1; j >= 0; j--) {
+            dp[i][j] =
+                a[i] === b[j]
+                    ? dp[i + 1][j + 1] + 1
+                    : Math.max(dp[i + 1][j], dp[i][j + 1]);
+        }
+    }
+    const pairs: Array<[number, number]> = [];
+    let i = 0;
+    let j = 0;
+    while (i < n && j < m) {
+        if (a[i] === b[j]) {
+            pairs.push([i, j]);
+            i++;
+            j++;
+        } else if (dp[i + 1][j] >= dp[i][j + 1]) {
+            i++;
+        } else {
+            j++;
+        }
+    }
+    return pairs;
+}
+
+interface ParaOps {
+    replaceWith?: string;      // modify this paragraph's whole text
+    del?: boolean;             // delete this whole paragraph
+    after: string[];          // new paragraphs to add after this one
+}
+
+/**
+ * Diff baseline vs next paragraph text and describe the change per original
+ * paragraph index, plus any paragraphs to add before the first one.
+ */
+function diffParagraphs(
+    baseline: string[],
+    next: string[],
+): { perIndex: Map<number, ParaOps>; atStart: string[] } {
+    const perIndex = new Map<number, ParaOps>();
+    const atStart: string[] = [];
+    const ops = (idx: number): ParaOps => {
+        let o = perIndex.get(idx);
+        if (!o) {
+            o = { after: [] };
+            perIndex.set(idx, o);
+        }
+        return o;
+    };
+
+    const pairs = lcsPairs(baseline, next);
+    const sentinel: Array<[number, number]> = [
+        ...pairs,
+        [baseline.length, next.length],
+    ];
+    let prevOld = -1;
+    let prevNew = -1;
+    let anchor = -1; // last original index that survives (kept or modified)
+    for (const [oi, nj] of sentinel) {
+        const removed: number[] = [];
+        for (let k = prevOld + 1; k < oi; k++) removed.push(k);
+        const added: number[] = [];
+        for (let k = prevNew + 1; k < nj; k++) added.push(k);
+        const paired = Math.min(removed.length, added.length);
+        for (let t = 0; t < paired; t++) {
+            ops(removed[t]).replaceWith = next[added[t]];
+            anchor = removed[t];
+        }
+        for (let t = paired; t < removed.length; t++) {
+            ops(removed[t]).del = true;
+        }
+        const leftover = added.slice(paired).map((k) => next[k]);
+        if (leftover.length) {
+            if (anchor >= 0) ops(anchor).after.push(...leftover);
+            else atStart.push(...leftover);
+        }
+        if (oi < baseline.length) anchor = oi; // the matched pair survives
+        prevOld = oi;
+        prevNew = nj;
+    }
+    return { perIndex, atStart };
+}
+
+/**
+ * Apply inline paragraph edits to a .docx and return clean bytes (no tracked
+ * markup). `author` labels the change internally; it never shows because the
+ * change is accepted immediately.
+ */
+export async function applyUserParagraphEdits(
+    bytes: Buffer,
+    baseline: string[],
+    next: string[],
+    opts?: { author?: string },
+): Promise<UserParagraphEditResult> {
+    const author = opts?.author ?? "You";
+    const now = new Date().toISOString();
+
+    const zip = await JSZip.loadAsync(bytes);
+    const docXmlFile = getZipEntry(zip, "word/document.xml");
+    if (!docXmlFile) throw new Error("document.xml missing from docx");
+    const docXmlRaw = await docXmlFile.async("string");
+    const parser = createParser();
+    const tree = parser.parse(docXmlRaw) as XNode[];
+    const bodyChildren = findBody(tree);
+    if (!bodyChildren) throw new Error("w:body missing from document.xml");
+
+    const paragraphs: ParagraphRef[] = [];
+    const collectParagraphs = (nodes: XNode[]) => {
+        for (const n of nodes) {
+            const name = elName(n);
+            if (!name) continue;
+            if (name === "w:p") {
+                const kids = elChildren(n);
+                paragraphs.push({
+                    paraNode: n,
+                    paraChildren: kids,
+                    flat: flattenParagraph(kids),
+                    globalStart: 0,
+                });
+            } else if (
+                name === "w:tbl" ||
+                name === "w:tr" ||
+                name === "w:tc" ||
+                name === "w:sdt" ||
+                name === "w:sdtContent"
+            ) {
+                collectParagraphs(elChildren(n));
+            }
+        }
+    };
+    collectParagraphs(bodyChildren);
+
+    const current = paragraphs.map((p) => p.flat.paraText);
+    if (
+        baseline.length !== current.length ||
+        baseline.some((t, i) => t !== current[i])
+    ) {
+        throw new StaleDocumentError(
+            "The document changed since editing began. Reopen it and try again.",
+        );
+    }
+
+    const { perIndex, atStart } = diffParagraphs(baseline, next);
+    if (perIndex.size === 0 && atStart.length === 0) {
+        return { bytes, changed: false, opsApplied: 0 };
+    }
+
+    // Non-empty paragraphs can anchor an insertion (they have a run whose
+    // formatting new text inherits); empty ones cannot, so redirect.
+    const firstNonEmpty = current.findIndex((t) => t.length > 0);
+    const nearestNonEmptyAtOrBefore = (idx: number): number => {
+        for (let i = idx; i >= 0; i--) if (current[i].length > 0) return i;
+        return -1;
+    };
+
+    let nextWId = maxTrackedId(tree) + 1;
+    const plansPerParagraph = new Map<number, PlannedChange[]>();
+    let editIndex = 0;
+    const addPlan = (paraIdx: number, plan: PlannedChange) => {
+        const list = plansPerParagraph.get(paraIdx) ?? [];
+        list.push(plan);
+        list.sort((a, b) => a.deleteStart - b.deleteStart);
+        plansPerParagraph.set(paraIdx, list);
+    };
+    const makePlan = (
+        paraIdx: number,
+        deleteStart: number,
+        deleteEnd: number,
+        insertedText: string,
+    ): PlannedChange => {
+        const deletedText = current[paraIdx].slice(deleteStart, deleteEnd);
+        return {
+            editIndex: editIndex++,
+            deleteStart,
+            deleteEnd,
+            deletedText,
+            insertedText,
+            contextBefore: "",
+            contextAfter: "",
+            changeId: `user-${editIndex}`,
+            delWId: deletedText ? String(nextWId++) : undefined,
+            insWId: insertedText ? String(nextWId++) : undefined,
+            markInsWIds: [],
+            markDelWIds: [],
+        };
+    };
+    const redirectInsert = (anchorIdx: number, texts: string[]) => {
+        if (!texts.length) return;
+        const target = nearestNonEmptyAtOrBefore(anchorIdx);
+        if (target < 0) {
+            // No non-empty paragraph before the anchor — prepend instead.
+            prependAtStart(texts);
+            return;
+        }
+        const len = current[target].length;
+        addPlan(target, makePlan(target, len, len, "\n\n" + texts.join("\n\n")));
+    };
+    const prependAtStart = (texts: string[]) => {
+        if (!texts.length || firstNonEmpty < 0) return;
+        addPlan(
+            firstNonEmpty,
+            makePlan(firstNonEmpty, 0, 0, texts.join("\n\n") + "\n\n"),
+        );
+    };
+
+    for (const [idx, op] of perIndex) {
+        if (op.del) {
+            addPlan(idx, makePlan(idx, 0, current[idx].length, ""));
+        } else if (op.replaceWith !== undefined && op.replaceWith !== current[idx]) {
+            addPlan(idx, makePlan(idx, 0, current[idx].length, op.replaceWith));
+        }
+        if (op.after.length) redirectInsert(idx, op.after);
+    }
+    prependAtStart(atStart);
+
+    // Build the tracked document, then splice new/removed paragraphs in.
+    const appliedChanges: AppliedChange[] = [];
+    for (const list of plansPerParagraph.values()) {
+        for (const pc of list) {
+            appliedChanges.push({
+                id: pc.changeId,
+                delId: pc.delWId,
+                insId: pc.insWId,
+                deletedText: pc.deletedText,
+                insertedText: pc.insertedText,
+                contextBefore: "",
+                contextAfter: "",
+            });
+        }
+    }
+
+    const replacements = new Map<XNode, XNode[]>();
+    const lastParaNode =
+        paragraphs.length > 0
+            ? paragraphs[paragraphs.length - 1].paraNode
+            : null;
+    for (const [paraIdx, plan] of plansPerParagraph) {
+        const p = paragraphs[paraIdx];
+        const pPr = findChildByName(p.paraChildren, "w:pPr");
+        const allowParagraphDelete =
+            p.paraNode !== lastParaNode &&
+            !(pPr && findChildByName(elChildren(pPr), "w:sectPr"));
+        const newParas = reconstructParagraph(
+            p.paraNode,
+            p.paraChildren,
+            p.flat,
+            plan,
+            now,
+            author,
+            () => String(nextWId++),
+            allowParagraphDelete,
+        );
+        if (newParas.length !== 1 || newParas[0] !== p.paraNode) {
+            replacements.set(p.paraNode, newParas);
+        }
+        for (const pc of plan) {
+            if (!pc.markInsWIds.length && !pc.markDelWIds.length) continue;
+            const target = appliedChanges.find((c) => c.id === pc.changeId);
+            if (!target) continue;
+            if (pc.markInsWIds.length) target.extraInsIds = pc.markInsWIds;
+            if (pc.markDelWIds.length) target.extraDelIds = pc.markDelWIds;
+        }
+    }
+
+    if (replacements.size > 0) {
+        const splice = (nodes: XNode[]): XNode[] => {
+            const out: XNode[] = [];
+            for (const n of nodes) {
+                const name = elName(n);
+                if (name === "w:p") {
+                    const rep = replacements.get(n);
+                    if (rep) {
+                        for (const r of rep) out.push(r);
+                        continue;
+                    }
+                } else if (
+                    name === "w:tbl" ||
+                    name === "w:tr" ||
+                    name === "w:tc" ||
+                    name === "w:sdt" ||
+                    name === "w:sdtContent"
+                ) {
+                    setChildren(n, splice(elChildren(n)));
+                }
+                out.push(n);
+            }
+            return out;
+        };
+        replaceBody(tree, splice(bodyChildren));
+    }
+
+    const builder = createBuilder();
+    setZipEntry(
+        zip,
+        "word/document.xml",
+        ensureXmlDeclaration(builder.build(tree)),
+    );
+    const trackedBytes = await zip.generateAsync({
+        type: "nodebuffer",
+        compression: "DEFLATE",
+    });
+
+    // Accept every change so the saved file is clean, not a redline.
+    const allIds = appliedChanges.flatMap((c) => [
+        c.delId,
+        c.insId,
+        ...(c.extraInsIds ?? []),
+        ...(c.extraDelIds ?? []),
+    ]).filter((v): v is string => !!v);
+    if (allIds.length === 0) {
+        return { bytes, changed: false, opsApplied: 0 };
+    }
+    const { bytes: cleanBytes } = await resolveTrackedChange(
+        trackedBytes,
+        allIds,
+        "accept",
+    );
+    return { bytes: cleanBytes, changed: true, opsApplied: appliedChanges.length };
+}
+
+// ---------------------------------------------------------------------------
+// Formatted inline editing (custom in-app editor)
+// ---------------------------------------------------------------------------
+//
+// The in-app editor sends the body back as a list of paragraphs, each carrying
+// its plain text plus the inline formatting the user applied (bold / italic /
+// underline / colour / size) and an optional alignment. We diff this against
+// the document's current body (by text, via LCS) and rebuild ONLY the
+// paragraphs that changed, brand-new paragraphs inherit the run formatting of
+// the paragraph they grew from so the document's font and size carry over.
+// Untouched paragraphs — and the whole header / footer / section setup — are
+// left exactly as they were.
+
+export interface EditRun {
+    text: string;
+    bold?: boolean;
+    italic?: boolean;
+    underline?: boolean;
+    color?: string; // 6-hex, no leading '#'
+    size?: number; // points
+}
+
+export interface EditParagraph {
+    text: string;
+    align?: "left" | "center" | "right" | "justify" | null;
+    runs: EditRun[];
+}
+
+export interface FormattedEditResult {
+    bytes: Buffer;
+    changed: boolean;
+}
+
+const RPR_TOGGLE_NAMES = new Set([
+    "w:b",
+    "w:bCs",
+    "w:i",
+    "w:iCs",
+    "w:u",
+    "w:color",
+    "w:sz",
+    "w:szCs",
+]);
+
+/**
+ * Build a run-properties element for one run: start from the paragraph's
+ * original run properties (so font family, language, etc. are kept), drop the
+ * properties the toolbar owns, then re-add them from the run's flags. Keeping
+ * w:rFonts first satisfies the schema's ordering expectations.
+ */
+function buildRunProps(baseRPr: XNode | null, run: EditRun): XNode | null {
+    const baseKids = baseRPr ? elChildren(baseRPr) : [];
+    const kept: XNode[] = [];
+    for (const c of baseKids) {
+        const name = elName(c);
+        if (name && RPR_TOGGLE_NAMES.has(name)) continue;
+        kept.push(cloneNode(c));
+    }
+    const toggles: XNode[] = [];
+    if (run.bold) {
+        toggles.push(makeEl("w:b", []));
+        toggles.push(makeEl("w:bCs", []));
+    }
+    if (run.italic) {
+        toggles.push(makeEl("w:i", []));
+        toggles.push(makeEl("w:iCs", []));
+    }
+    if (run.underline) {
+        toggles.push(makeEl("w:u", [], { "w:val": "single" }));
+    }
+    if (run.color && /^[0-9a-fA-F]{6}$/.test(run.color)) {
+        toggles.push(makeEl("w:color", [], { "w:val": run.color.toUpperCase() }));
+    }
+    if (typeof run.size === "number" && run.size > 0 && run.size < 400) {
+        // OOXML sizes are half-points.
+        const half = String(Math.round(run.size * 2));
+        toggles.push(makeEl("w:sz", [], { "w:val": half }));
+        toggles.push(makeEl("w:szCs", [], { "w:val": half }));
+    }
+    if (kept.length === 0 && toggles.length === 0) return null;
+    // Insert toggles right after w:rFonts if present, else at the front.
+    const rFontsIdx = kept.findIndex((c) => elName(c) === "w:rFonts");
+    const at = rFontsIdx >= 0 ? rFontsIdx + 1 : 0;
+    const children = [...kept.slice(0, at), ...toggles, ...kept.slice(at)];
+    return makeEl("w:rPr", children);
+}
+
+/** Set/replace/remove the alignment on a cloned paragraph-properties element. */
+function applyAlignment(
+    basePPr: XNode | null,
+    align: EditParagraph["align"],
+): XNode | null {
+    const base = basePPr ? cloneNode(basePPr) : null;
+    if (!align || align === "left") {
+        // Remove any explicit alignment so it falls back to the style default.
+        if (!base) return null;
+        const kids = elChildren(base).filter((c) => elName(c) !== "w:jc");
+        setChildren(base, kids);
+        return elChildren(base).length ? base : base; // keep pPr even if empty
+    }
+    const pPr = base ?? makeEl("w:pPr", []);
+    const kids = elChildren(pPr).filter((c) => elName(c) !== "w:jc");
+    const jc = makeEl("w:jc", [], { "w:val": align });
+    // w:jc sits after w:pStyle/numbering but before run props; front-insert
+    // after any w:pStyle is close enough and Word accepts it.
+    const styleIdx = kids.findIndex((c) => elName(c) === "w:pStyle");
+    const at = styleIdx >= 0 ? styleIdx + 1 : 0;
+    setChildren(pPr, [...kids.slice(0, at), jc, ...kids.slice(at)]);
+    return pPr;
+}
+
+/** Build a fresh <w:p> from a formatted paragraph, inheriting base props. */
+function buildFormattedParagraph(
+    para: EditParagraph,
+    baseRPr: XNode | null,
+    basePPr: XNode | null,
+): XNode {
+    const children: XNode[] = [];
+    const pPr = applyAlignment(basePPr, para.align ?? null);
+    if (pPr) children.push(pPr);
+    const runs = para.runs && para.runs.length ? para.runs : [{ text: para.text }];
+    for (const run of runs) {
+        if (!run.text) continue;
+        const rPr = buildRunProps(baseRPr, run);
+        children.push(buildRun(rPr, run.text, "w:t"));
+    }
+    // A paragraph with no runs still needs to exist (empty line).
+    return makeEl("w:p", children);
+}
+
+/** The first run's rPr in a paragraph, if any (used as the formatting base). */
+function firstRunRPr(paraChildren: XNode[]): XNode | null {
+    for (const c of paraChildren) {
+        if (elName(c) !== "w:r") continue;
+        const rPr = findChildByName(elChildren(c), "w:rPr");
+        if (rPr) return rPr;
+    }
+    return null;
+}
+
+/**
+ * Apply the in-app editor's formatted body back to the document and return
+ * clean bytes. `baseline` is the plain text of every body paragraph as the
+ * editor received it; if it no longer matches the document, the save is
+ * refused rather than risk writing to the wrong place.
+ */
+export async function applyFormattedEdits(
+    bytes: Buffer,
+    baseline: string[],
+    next: EditParagraph[],
+): Promise<FormattedEditResult> {
+    const zip = await JSZip.loadAsync(bytes);
+    const docXmlFile = getZipEntry(zip, "word/document.xml");
+    if (!docXmlFile) throw new Error("document.xml missing from docx");
+    const docXmlRaw = await docXmlFile.async("string");
+    const parser = createParser();
+    const tree = parser.parse(docXmlRaw) as XNode[];
+    const bodyChildren = findBody(tree);
+    if (!bodyChildren) throw new Error("w:body missing from document.xml");
+
+    interface Para {
+        node: XNode;
+        text: string;
+        baseRPr: XNode | null;
+        basePPr: XNode | null;
+        hasSectPr: boolean;
+    }
+    const paras: Para[] = [];
+    const collect = (nodes: XNode[]) => {
+        for (const n of nodes) {
+            const name = elName(n);
+            if (!name) continue;
+            if (name === "w:p") {
+                const kids = elChildren(n);
+                const pPr = findChildByName(kids, "w:pPr");
+                paras.push({
+                    node: n,
+                    text: flattenParagraph(kids).paraText,
+                    baseRPr: firstRunRPr(kids),
+                    basePPr: pPr,
+                    hasSectPr: !!(pPr && findChildByName(elChildren(pPr), "w:sectPr")),
+                });
+            } else if (
+                name === "w:tbl" ||
+                name === "w:tr" ||
+                name === "w:tc" ||
+                name === "w:sdt" ||
+                name === "w:sdtContent"
+            ) {
+                collect(elChildren(n));
+            }
+        }
+    };
+    collect(bodyChildren);
+
+    const current = paras.map((p) => p.text);
+    if (
+        baseline.length !== current.length ||
+        baseline.some((t, i) => t !== current[i])
+    ) {
+        throw new StaleDocumentError(
+            "The document changed since editing began. Reopen it and try again.",
+        );
+    }
+
+    const nextText = next.map((p) => p.text);
+    // Fast path: nothing changed.
+    if (
+        nextText.length === current.length &&
+        nextText.every((t, i) => t === current[i])
+    ) {
+        // Text identical, but formatting/alignment may still have changed. Fall
+        // through and rebuild; if the rebuild is byte-identical it's harmless.
+    }
+
+    // Align current paragraphs to the edited ones.
+    const pairs = lcsPairs(current, nextText);
+    const matchedOld = new Set(pairs.map((p) => p[0]));
+    const matchedNew = new Map(pairs.map((p) => [p[1], p[0]]));
+
+    // Build the replacement node for each ORIGINAL paragraph position, plus any
+    // brand-new paragraphs inserted before it.
+    // Walk both sequences together.
+    const newBodyParas: XNode[] = [];
+    let oi = 0;
+    let nj = 0;
+    const nearestBaseRPr = (): XNode | null => {
+        // Prefer the previous emitted original paragraph's base, else the next.
+        for (let k = oi - 1; k >= 0; k--) if (paras[k].baseRPr) return paras[k].baseRPr;
+        for (let k = oi; k < paras.length; k++) if (paras[k].baseRPr) return paras[k].baseRPr;
+        return null;
+    };
+    const nearestBasePPr = (): XNode | null => {
+        for (let k = oi - 1; k >= 0; k--)
+            if (paras[k].basePPr && !paras[k].hasSectPr) return paras[k].basePPr;
+        return null;
+    };
+
+    const pairSet = new Set(pairs.map((p) => `${p[0]}:${p[1]}`));
+    while (oi < paras.length || nj < next.length) {
+        const isPair =
+            oi < paras.length &&
+            nj < next.length &&
+            matchedOld.has(oi) &&
+            matchedNew.get(nj) === oi &&
+            pairSet.has(`${oi}:${nj}`);
+        if (isPair) {
+            // Same text. Rebuild only if formatting/alignment differ from a
+            // plain single-run paragraph; simplest correct choice is to keep
+            // the ORIGINAL node so untouched paragraphs are byte-identical,
+            // unless the editor sent explicit formatting/alignment.
+            const ep = next[nj];
+            const hasFormatting =
+                (ep.align && ep.align !== "left") ||
+                (ep.runs || []).some(
+                    (r) => r.bold || r.italic || r.underline || r.color || r.size,
+                );
+            if (hasFormatting || (ep.runs && ep.runs.length > 1)) {
+                newBodyParas.push(
+                    buildFormattedParagraph(ep, paras[oi].baseRPr, paras[oi].basePPr),
+                );
+            } else {
+                newBodyParas.push(paras[oi].node);
+            }
+            oi++;
+            nj++;
+            continue;
+        }
+        // Unmatched original paragraph -> deleted (unless it holds sectPr or is
+        // the final paragraph, which we must keep for document structure).
+        if (oi < paras.length && !matchedOld.has(oi)) {
+            const isLast = oi === paras.length - 1;
+            if (paras[oi].hasSectPr || isLast) {
+                // Keep the structural paragraph; if there's a matching edited
+                // paragraph we could rebuild, but safest is to keep it as-is.
+                newBodyParas.push(paras[oi].node);
+            }
+            oi++;
+            continue;
+        }
+        // Unmatched edited paragraph -> newly inserted.
+        if (nj < next.length && !matchedNew.has(nj)) {
+            newBodyParas.push(
+                buildFormattedParagraph(
+                    next[nj],
+                    nearestBaseRPr(),
+                    nearestBasePPr(),
+                ),
+            );
+            nj++;
+            continue;
+        }
+        // Fallback to avoid an infinite loop.
+        if (oi < paras.length) {
+            newBodyParas.push(paras[oi].node);
+            oi++;
+        } else {
+            nj++;
+        }
+    }
+
+    // Rebuild the body: replace the run of top-level w:p nodes with the new
+    // list, preserving any non-paragraph body children (tables, sdt, the final
+    // sectPr element that sits directly under body) in place.
+    const paraNodeSet = new Set(paras.map((p) => p.node));
+    const newBody: XNode[] = [];
+    let injected = false;
+    for (const n of bodyChildren) {
+        if (elName(n) === "w:p" && paraNodeSet.has(n)) {
+            if (!injected) {
+                for (const p of newBodyParas) newBody.push(p);
+                injected = true;
+            }
+            continue; // drop original paragraph (already re-emitted)
+        }
+        newBody.push(n);
+    }
+    if (!injected) for (const p of newBodyParas) newBody.push(p);
+    replaceBody(tree, newBody);
+
+    const builder = createBuilder();
+    setZipEntry(
+        zip,
+        "word/document.xml",
+        ensureXmlDeclaration(builder.build(tree)),
+    );
+    const out = await zip.generateAsync({
+        type: "nodebuffer",
+        compression: "DEFLATE",
+    });
+    return { bytes: out, changed: true };
 }
 
 // ---------------------------------------------------------------------------
@@ -1051,9 +2008,47 @@ function resolveInTree(
 
     const rewrite = (parentKids: XNode[]): XNode[] => {
         const out: XNode[] = [];
+        // Content carried over from a paragraph whose paragraph mark was
+        // resolved away; it joins the front of the next paragraph.
+        let carried: XNode[] = [];
+
+        // Push a node, handling paragraph marks and pending merges.
+        const push = (n: XNode) => {
+            if (elName(n) !== "w:p") {
+                out.push(n);
+                return;
+            }
+            if (carried.length) {
+                const kids = elChildren(n);
+                const pPrIdx = kids.findIndex((k) => elName(k) === "w:pPr");
+                const at = pPrIdx >= 0 ? pPrIdx + 1 : 0;
+                setChildren(n, [
+                    ...kids.slice(0, at),
+                    ...carried,
+                    ...kids.slice(at),
+                ]);
+                carried = [];
+            }
+            const mark = resolveParagraphMark(n, ids, mode);
+            if (mark.touched) touched = true;
+            if (mark.merge) {
+                carried = elChildren(n).filter((k) => elName(k) !== "w:pPr");
+                return;
+            }
+            out.push(n);
+        };
+
         for (const n of parentKids) {
             const name = elName(n);
             if (!name) {
+                out.push(n);
+                continue;
+            }
+
+            // Paragraph properties are handled by resolveParagraphMark, not by
+            // the generic wrapper logic below — a w:ins there marks a
+            // paragraph mark, not a run of inserted text.
+            if (name === "w:pPr") {
                 out.push(n);
                 continue;
             }
@@ -1091,7 +2086,25 @@ function resolveInTree(
                 }
             }
 
-            out.push(n);
+            push(n);
+        }
+
+        // Nothing followed the merged paragraph — keep its content by
+        // appending it to the previous paragraph, or as its own.
+        if (carried.length) {
+            let lastPara: XNode | null = null;
+            for (let i = out.length - 1; i >= 0; i--) {
+                if (elName(out[i]) === "w:p") {
+                    lastPara = out[i];
+                    break;
+                }
+            }
+            if (lastPara) {
+                setChildren(lastPara, [...elChildren(lastPara), ...carried]);
+            } else {
+                out.push(makeEl("w:p", carried));
+            }
+            carried = [];
         }
         return out;
     };

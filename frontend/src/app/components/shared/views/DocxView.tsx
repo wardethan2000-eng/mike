@@ -1,7 +1,7 @@
 "use client";
 
-import { useEffect, useMemo, useRef } from "react";
-import { Loader2 } from "lucide-react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { Loader2, Pencil } from "lucide-react";
 import { useFetchDocxBytes } from "@/app/hooks/useFetchDocxBytes";
 import { supabase } from "@/app/lib/supabase";
 import {
@@ -73,6 +73,13 @@ interface Props {
      */
     onScrollChange?: (scrollTop: number) => void;
     rounded?: boolean;
+    /** Show an Edit button that opens the inline paragraph editor. */
+    editable?: boolean;
+    /**
+     * Called after a successful inline save with the new version id, so the
+     * parent can refresh the version badge / metadata.
+     */
+    onSaved?: (versionId: string) => void;
 }
 
 function findEditElement(
@@ -208,6 +215,8 @@ export function DocxView({
     initialScrollTop,
     onScrollChange,
     rounded = true,
+    editable = false,
+    onSaved,
 }: Props) {
     const scrollRef = useRef<HTMLDivElement>(null);
     const containerRef = useRef<HTMLDivElement>(null);
@@ -228,6 +237,211 @@ export function DocxView({
     const onScrollChangeRef = useRef(onScrollChange);
     onScrollChangeRef.current = onScrollChange;
 
+    // Inline editing state. After a save we pin the new version id so the
+    // viewer re-renders the saved content even though the parent may still
+    // hold the version it opened with.
+    const [editing, setEditing] = useState(false);
+    const [savedVersionId, setSavedVersionId] = useState<string | null>(null);
+    const [baseline, setBaseline] = useState<string[] | null>(null);
+    const [editLoading, setEditLoading] = useState(false);
+    const [saving, setSaving] = useState(false);
+    const [editError, setEditError] = useState<string | null>(null);
+    const [localRefetch, setLocalRefetch] = useState(0);
+    const effectiveVersionId = savedVersionId ?? versionId;
+
+    const authHeaders = useCallback(async (): Promise<HeadersInit> => {
+        const {
+            data: { session },
+        } = await supabase.auth.getSession();
+        const token = session?.access_token;
+        return token ? { Authorization: `Bearer ${token}` } : {};
+    }, []);
+
+    const apiBase =
+        process.env.NEXT_PUBLIC_API_BASE_URL ?? "http://localhost:3001";
+
+    // --- In-place editing on the rendered document -----------------------
+    //
+    // docx-preview renders the body paragraphs as <p> inside
+    // `section.docx > article`, with the letterhead header/footer as sibling
+    // <header>/<footer> elements. Making each <article> contentEditable lets
+    // the user click and type straight in the letter while the header, footer
+    // and formatting stay put. On save we read the paragraph text back and let
+    // the server reconcile it against the real document.
+
+    const getArticles = useCallback((): HTMLElement[] => {
+        const root = containerRef.current;
+        if (!root) return [];
+        const arts = Array.from(root.querySelectorAll<HTMLElement>("article"));
+        return arts.length
+            ? arts
+            : Array.from(root.querySelectorAll<HTMLElement>("section.docx"));
+    }, []);
+
+    const readParagraphs = useCallback((): string[] => {
+        const out: string[] = [];
+        for (const article of getArticles()) {
+            for (const pEl of Array.from(
+                article.querySelectorAll<HTMLElement>("p"),
+            )) {
+                // Never treat letterhead header/footer text as body.
+                if (pEl.closest("header, footer")) continue;
+                // Turn soft line breaks into \n, drop tab glyphs, so the text
+                // matches how the server flattens a paragraph.
+                const clone = pEl.cloneNode(true) as HTMLElement;
+                clone.querySelectorAll("br").forEach((br) =>
+                    br.replaceWith(document.createTextNode("\n")),
+                );
+                out.push((clone.textContent ?? "").replace(/\t/g, ""));
+            }
+        }
+        return out;
+    }, [getArticles]);
+
+    const setDomEditable = useCallback(
+        (on: boolean) => {
+            if (on) {
+                try {
+                    document.execCommand(
+                        "defaultParagraphSeparator",
+                        false,
+                        "p",
+                    );
+                } catch {
+                    /* not supported — Enter still creates a block */
+                }
+            }
+            for (const article of getArticles()) {
+                article.contentEditable = on ? "true" : "false";
+                if (on) {
+                    article.spellcheck = true;
+                    article.style.outline = "none";
+                    article
+                        .querySelectorAll<HTMLElement>("header, footer")
+                        .forEach((hf) => {
+                            hf.contentEditable = "false";
+                        });
+                } else {
+                    article.removeAttribute("contenteditable");
+                }
+            }
+        },
+        [getArticles],
+    );
+
+    const startEditing = useCallback(async () => {
+        setEditError(null);
+        setEditLoading(true);
+        try {
+            const headers = await authHeaders();
+            const qs = effectiveVersionId
+                ? `?version_id=${encodeURIComponent(effectiveVersionId)}`
+                : "";
+            const resp = await fetch(
+                `${apiBase}/single-documents/${documentId}/paragraphs${qs}`,
+                { headers },
+            );
+            if (!resp.ok) throw new Error(`load failed (${resp.status})`);
+            const data = (await resp.json()) as {
+                paragraphs?: string[];
+                editable?: boolean;
+            };
+            if (!data.editable || !Array.isArray(data.paragraphs)) {
+                throw new Error("This document can't be edited inline.");
+            }
+            // The rendered text must match the server's body exactly before we
+            // let anyone type, so a save can never write to the wrong place or
+            // silently rewrite content the renderer shows differently (e.g.
+            // links or field codes). If it doesn't line up, fall back to the
+            // download / re-upload route rather than risk the document.
+            const dom = readParagraphs();
+            const server = data.paragraphs;
+            const matches =
+                dom.length === server.length &&
+                dom.every((t, i) => t === server[i]);
+            if (!matches) {
+                throw new Error(
+                    "This document can't be edited inline. You can download it, edit in Word and re-upload as a new version.",
+                );
+            }
+            setBaseline(data.paragraphs);
+            setDomEditable(true);
+            setEditing(true);
+        } catch (e) {
+            setEditError(
+                e instanceof Error ? e.message : "Could not start editing.",
+            );
+        } finally {
+            setEditLoading(false);
+        }
+    }, [
+        apiBase,
+        authHeaders,
+        documentId,
+        effectiveVersionId,
+        readParagraphs,
+        setDomEditable,
+    ]);
+
+    const saveEdits = useCallback(async () => {
+        if (!baseline) return;
+        setSaving(true);
+        setEditError(null);
+        try {
+            const paragraphs = readParagraphs();
+            const headers = await authHeaders();
+            const resp = await fetch(
+                `${apiBase}/single-documents/${documentId}/inline-edit`,
+                {
+                    method: "POST",
+                    headers: { ...headers, "Content-Type": "application/json" },
+                    body: JSON.stringify({ baseline, paragraphs }),
+                },
+            );
+            if (resp.status === 409) {
+                setEditError(
+                    "The document changed since you started editing. Cancel and reopen it.",
+                );
+                return;
+            }
+            if (!resp.ok) throw new Error(`save failed (${resp.status})`);
+            const data = (await resp.json()) as {
+                id?: string;
+                changed?: boolean;
+            };
+            setDomEditable(false);
+            if (data.id) {
+                setSavedVersionId(data.id);
+                onSaved?.(data.id);
+            }
+            setLocalRefetch((n) => n + 1); // re-render the saved (clean) bytes
+            setEditing(false);
+            setBaseline(null);
+        } catch (e) {
+            setEditError(
+                e instanceof Error ? e.message : "Could not save your edits.",
+            );
+        } finally {
+            setSaving(false);
+        }
+    }, [
+        apiBase,
+        authHeaders,
+        baseline,
+        documentId,
+        onSaved,
+        readParagraphs,
+        setDomEditable,
+    ]);
+
+    const cancelEditing = useCallback(() => {
+        setDomEditable(false);
+        setEditing(false);
+        setBaseline(null);
+        setEditError(null);
+        setLocalRefetch((n) => n + 1); // discard DOM edits by re-rendering
+    }, [setDomEditable]);
+
     // Stable key for the quote list so the re-highlight effect re-fires
     // only when the actual text/order of quotes changes.
     const quoteKey = useMemo(
@@ -237,8 +451,8 @@ export function DocxView({
 
     const { bytes, loading, error } = useFetchDocxBytes(
         documentId,
-        versionId,
-        refetchKey,
+        effectiveVersionId,
+        (refetchKey ?? 0) + localRefetch,
     );
 
     /**
@@ -368,7 +582,7 @@ export function DocxView({
                 await tagWIdsOnRenderedDom(
                     containerEl,
                     documentId,
-                    versionId ?? null,
+                    effectiveVersionId ?? null,
                 );
                 if (cancelled) return;
                 // Scale to fit before scrolling so offsets are computed
@@ -467,6 +681,67 @@ export function DocxView({
         <div
             className={`relative flex flex-col flex-1 overflow-hidden bg-gray-100 ${rounded ? "rounded-lg" : ""}`}
         >
+            {editing ? (
+                <div className="flex items-center justify-between border-b border-gray-200 bg-white px-3 py-2">
+                    <span className="min-w-0 truncate text-xs text-gray-500">
+                        Click anywhere in the document to edit. Enter starts a
+                        new paragraph, Shift+Enter a line break. Formatting,
+                        letterhead and signature are kept.
+                    </span>
+                    <div className="flex shrink-0 items-center gap-2">
+                        <button
+                            type="button"
+                            onClick={cancelEditing}
+                            disabled={saving}
+                            className="rounded-md border border-gray-200 bg-white px-3 py-1 text-xs font-medium text-gray-600 hover:bg-gray-50 disabled:opacity-50"
+                        >
+                            Cancel
+                        </button>
+                        <button
+                            type="button"
+                            onClick={saveEdits}
+                            disabled={saving}
+                            className="inline-flex items-center gap-1 rounded-md bg-blue-600 px-3 py-1 text-xs font-medium text-white hover:bg-blue-700 disabled:opacity-50"
+                        >
+                            {saving && (
+                                <Loader2 className="h-3 w-3 animate-spin" />
+                            )}
+                            Save changes
+                        </button>
+                    </div>
+                </div>
+            ) : (
+                editable && (
+                    <div className="absolute top-2 right-2 z-10">
+                        <button
+                            type="button"
+                            onClick={startEditing}
+                            disabled={editLoading}
+                            className="inline-flex items-center gap-1 rounded-md border border-gray-200 bg-white/90 px-2 py-1 text-xs font-medium text-gray-700 shadow-sm backdrop-blur hover:bg-white disabled:opacity-50"
+                        >
+                            {editLoading ? (
+                                <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                            ) : (
+                                <Pencil className="h-3.5 w-3.5" />
+                            )}
+                            Edit
+                        </button>
+                    </div>
+                )
+            )}
+            {editError && (
+                <div className="absolute top-12 left-2 z-10 flex items-center gap-2 rounded-md border border-amber-200 bg-amber-50 px-2 py-1 text-xs text-amber-800 shadow-sm">
+                    <span>{editError}</span>
+                    <button
+                        type="button"
+                        onClick={() => setEditError(null)}
+                        className="text-amber-600 hover:text-amber-900"
+                        aria-label="Dismiss"
+                    >
+                        ×
+                    </button>
+                </div>
+            )}
             {warning && (
                 <div className="absolute top-2 left-2 z-10 flex items-center gap-2 rounded-md border border-amber-200 bg-amber-50 px-2 py-1 text-xs text-amber-800 shadow-sm">
                     <span>{warning}</span>

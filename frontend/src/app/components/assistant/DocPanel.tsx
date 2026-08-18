@@ -7,6 +7,7 @@ import { supabase } from "@/app/lib/supabase";
 import { PillButton } from "@/app/components/ui/pill-button";
 import { PdfView } from "../shared/views/PdfView";
 import { DocxView } from "../shared/views/DocxView";
+import { RichDocxEditor } from "./RichDocxEditor";
 import { SpreadsheetView } from "../shared/views/SpreadsheetView";
 import {
     CitationQuotesSection,
@@ -225,6 +226,12 @@ export function DocPanel({
                         onRetry={retryDocument}
                         onClearQuote={() => setActiveCitationQuoteId(null)}
                     />
+                ) : isDocx && mode.kind === "document" ? (
+                    <RichDocxEditor
+                        documentId={documentId}
+                        versionId={versionId ?? undefined}
+                        onSaved={() => retryDocument()}
+                    />
                 ) : isDocx ? (
                     <DocxView
                         documentId={documentId}
@@ -237,6 +244,8 @@ export function DocPanel({
                         onWarningDismiss={onWarningDismiss}
                         initialScrollTop={initialScrollTop ?? null}
                         onScrollChange={onScrollChange}
+                        editable={false}
+                        onSaved={() => retryDocument()}
                     />
                 ) : isSpreadsheet ? (
                     <SpreadsheetView
