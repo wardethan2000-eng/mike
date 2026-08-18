@@ -26,6 +26,7 @@ import {
 } from "../lib/documentRendition";
 import { indexInBackground } from "../lib/passageIndex";
 import { checkProjectAccess } from "../lib/access";
+import { searchMatter } from "../lib/matterSearch";
 import { singleFileUpload } from "../lib/upload";
 import { deleteUserProjects } from "../lib/userDataCleanup";
 import {
@@ -831,6 +832,53 @@ projectsRouter.get("/:projectId/documents", requireAuth, async (req, res) => {
   }[];
   await attachActiveVersionPaths(db, docsTyped);
   res.json(docsTyped);
+});
+
+// GET /projects/:projectId/search — search this matter's documents by word and
+// by meaning, returning the best passages with their document and page. This is
+// the search box's counterpart to the assistant's search_matter tool: the same
+// engine, without going through a conversation. Anyone with access to the
+// project may search it; results are scoped to the project's own documents, so a
+// matter you are not on never surfaces.
+projectsRouter.get("/:projectId/search", requireAuth, async (req, res) => {
+  const userId = res.locals.userId as string;
+  const userEmail = res.locals.userEmail as string | undefined;
+  const { projectId } = req.params;
+  const db = createServerSupabase();
+
+  const access = await checkProjectAccess(projectId, userId, userEmail, db);
+  if (!access.ok)
+    return void res.status(404).json({ detail: "Project not found" });
+
+  const query = typeof req.query.q === "string" ? req.query.q : "";
+  const limitRaw = Number.parseInt(String(req.query.limit ?? ""), 10);
+  const limit = Number.isFinite(limitRaw)
+    ? Math.min(Math.max(limitRaw, 1), 50)
+    : 20;
+
+  // Scope to the project's documents (owned by the project owner), the access
+  // check above having decided the caller may see them. When accounts and
+  // sharing land on the roadmap, a passage owned by a collaborator can be folded
+  // in; today a matter is its owner's, so this covers it.
+  const hits = await searchMatter(db, {
+    userId: access.project.user_id,
+    projectId,
+    query,
+    limit,
+  });
+
+  res.json({
+    query: query.trim(),
+    results: hits.map((h) => ({
+      documentId: h.documentId,
+      filename: h.filename,
+      page: h.page,
+      content: h.content,
+      fromOcr: h.fromOcr,
+      fromFilename: h.fromFilename,
+      matchedBy: h.matchedBy,
+    })),
+  });
 });
 
 // GET /projects/:projectId/export — tamper-evident manifest of the project's
