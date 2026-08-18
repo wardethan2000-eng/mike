@@ -783,3 +783,137 @@ describe("applyFormattedEdits — in-app formatting editor", () => {
         expect(xml).toMatch(/<w:sz w:val="36"\/?>/); // 18pt -> 36 half-points
     });
 });
+
+describe("applyFormattedEdits — headings (v2)", () => {
+    async function lines(bytes: Buffer): Promise<string[]> {
+        return (await extractDocxBodyText(bytes)).split("\n");
+    }
+
+    it("turns a paragraph into a Heading 1 and defines the style", async () => {
+        const bytes = await makeDocx(para("Section title") + para("Body text."));
+        const next = [
+            { text: "Section title", heading: 1, runs: [{ text: "Section title" }] },
+            { text: "Body text.", runs: [{ text: "Body text." }] },
+        ];
+        const { bytes: out } = await applyFormattedEdits(
+            bytes,
+            ["Section title", "Body text."],
+            next,
+        );
+        expect(await lines(out)).toEqual(["Section title", "Body text."]);
+        const xml = await readDocumentXml(out);
+        expect(xml).toMatch(/<w:pStyle w:val="Heading1"\/?>/);
+    });
+
+    it("keeps heading levels 1-3 distinct", async () => {
+        const bytes = await makeDocx(para("A") + para("B") + para("C") + para("End."));
+        const next = [
+            { text: "A", heading: 1, runs: [{ text: "A" }] },
+            { text: "B", heading: 2, runs: [{ text: "B" }] },
+            { text: "C", heading: 3, runs: [{ text: "C" }] },
+            { text: "End.", runs: [{ text: "End." }] },
+        ];
+        const { bytes: out } = await applyFormattedEdits(
+            bytes,
+            ["A", "B", "C", "End."],
+            next,
+        );
+        const xml = await readDocumentXml(out);
+        expect(xml).toMatch(/Heading1/);
+        expect(xml).toMatch(/Heading2/);
+        expect(xml).toMatch(/Heading3/);
+    });
+
+    it("clears a heading back to body text", async () => {
+        const bytes = await makeDocx(
+            `<w:p><w:pPr><w:pStyle w:val="Heading1"/></w:pPr>` +
+                `<w:r><w:t xml:space="preserve">Was a heading</w:t></w:r></w:p>` +
+                para("End."),
+        );
+        const next = [
+            { text: "Was a heading", heading: 0, runs: [{ text: "Was a heading" }] },
+            { text: "End.", runs: [{ text: "End." }] },
+        ];
+        const { bytes: out } = await applyFormattedEdits(
+            bytes,
+            ["Was a heading", "End."],
+            next,
+        );
+        const xml = await readDocumentXml(out);
+        expect(xml).not.toMatch(/w:val="Heading1"/);
+        expect(await lines(out)).toEqual(["Was a heading", "End."]);
+    });
+
+    it("keeps a heading alongside alignment", async () => {
+        const bytes = await makeDocx(para("Centered heading") + para("End."));
+        const next = [
+            {
+                text: "Centered heading",
+                heading: 2,
+                align: "center" as const,
+                runs: [{ text: "Centered heading" }],
+            },
+            { text: "End.", runs: [{ text: "End." }] },
+        ];
+        const { bytes: out } = await applyFormattedEdits(
+            bytes,
+            ["Centered heading", "End."],
+            next,
+        );
+        const xml = await readDocumentXml(out);
+        expect(xml).toMatch(/Heading2/);
+        expect(xml).toMatch(/<w:jc w:val="center"\/?>/);
+        // pStyle must come before jc inside pPr.
+        const pPr = xml.slice(xml.indexOf("<w:pPr>"), xml.indexOf("</w:pPr>"));
+        expect(pPr.indexOf("pStyle")).toBeLessThan(pPr.indexOf("w:jc"));
+    });
+
+    it("does not overwrite a heading style the document already defines", async () => {
+        const zip = new JSZip();
+        zip.file(
+            "word/document.xml",
+            `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>` +
+                `<w:document ${W_NS}><w:body>${para("Title") + para("End.")}</w:body></w:document>`,
+        );
+        zip.file(
+            "word/styles.xml",
+            `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>` +
+                `<w:styles ${W_NS}><w:style w:type="paragraph" w:styleId="Heading1">` +
+                `<w:name w:val="heading 1"/><w:rPr><w:sz w:val="99"/></w:rPr></w:style></w:styles>`,
+        );
+        const bytes = await zip.generateAsync({ type: "nodebuffer" });
+        const { bytes: out } = await applyFormattedEdits(bytes, ["Title", "End."], [
+            { text: "Title", heading: 1, runs: [{ text: "Title" }] },
+            { text: "End.", runs: [{ text: "End." }] },
+        ]);
+        const styles = await (await JSZip.loadAsync(out))
+            .file("word/styles.xml")!
+            .async("string");
+        // The firm's own definition survives untouched.
+        expect(styles).toContain('w:val="99"');
+        expect((styles.match(/w:styleId="Heading1"/g) ?? []).length).toBe(1);
+    });
+
+    it("round-trips colour and size chosen in the editor", async () => {
+        const bytes = await makeDocx(para("Styled text.") + para("End."));
+        const next = [
+            {
+                text: "Styled text.",
+                runs: [
+                    { text: "Styled ", color: "C00000", size: 14 },
+                    { text: "text.", bold: true },
+                ],
+            },
+            { text: "End.", runs: [{ text: "End." }] },
+        ];
+        const { bytes: out } = await applyFormattedEdits(
+            bytes,
+            ["Styled text.", "End."],
+            next,
+        );
+        const xml = await readDocumentXml(out);
+        expect(xml).toMatch(/<w:color w:val="C00000"\/?>/);
+        expect(xml).toMatch(/<w:sz w:val="28"\/?>/); // 14pt -> 28 half-points
+        expect(await lines(out)).toEqual(["Styled text.", "End."]);
+    });
+});

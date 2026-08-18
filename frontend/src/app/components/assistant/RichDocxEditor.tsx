@@ -28,11 +28,43 @@ interface EditRun {
     bold?: boolean;
     italic?: boolean;
     underline?: boolean;
+    color?: string; // 6-hex, no '#'
+    size?: number; // points
 }
 interface EditParagraph {
     text: string;
     align?: "left" | "center" | "right" | "justify" | null;
+    heading?: number | null;
     runs: EditRun[];
+}
+
+const FONT_SIZES = [9, 10, 11, 12, 14, 16, 18, 24];
+const COLORS: { label: string; hex: string }[] = [
+    { label: "Black", hex: "000000" },
+    { label: "Dark red", hex: "C00000" },
+    { label: "Red", hex: "FF0000" },
+    { label: "Blue", hex: "0070C0" },
+    { label: "Dark blue", hex: "002060" },
+    { label: "Green", hex: "008000" },
+    { label: "Grey", hex: "7F7F7F" },
+];
+
+/** rgb()/rgba() or #hex -> 6-hex uppercase, or null if not parseable. */
+function toHex(css: string): string | null {
+    const m = /^rgba?\(([^)]+)\)$/.exec(css.trim());
+    if (m) {
+        const parts = m[1].split(",").map((v) => parseFloat(v));
+        if (parts.length < 3 || parts.some((v) => Number.isNaN(v))) return null;
+        const [r, g, b] = parts;
+        return [r, g, b]
+            .map((v) => Math.max(0, Math.min(255, Math.round(v)))
+                .toString(16)
+                .padStart(2, "0"))
+            .join("")
+            .toUpperCase();
+    }
+    const h = /^#([0-9a-fA-F]{6})$/.exec(css.trim());
+    return h ? h[1].toUpperCase() : null;
 }
 
 type SaveState = "idle" | "saving" | "saved" | "error";
@@ -82,7 +114,13 @@ export function RichDocxEditor({
             let text = "";
             const walk = (
                 node: Node,
-                fmt: { bold: boolean; italic: boolean; underline: boolean },
+                fmt: {
+                    bold: boolean;
+                    italic: boolean;
+                    underline: boolean;
+                    color?: string;
+                    size?: number;
+                },
             ) => {
                 for (const child of Array.from(node.childNodes)) {
                     if (child.nodeType === Node.TEXT_NODE) {
@@ -94,7 +132,9 @@ export function RichDocxEditor({
                             last &&
                             !!last.bold === fmt.bold &&
                             !!last.italic === fmt.italic &&
-                            !!last.underline === fmt.underline
+                            !!last.underline === fmt.underline &&
+                            last.color === fmt.color &&
+                            last.size === fmt.size
                         ) {
                             last.text += t;
                         } else {
@@ -103,6 +143,8 @@ export function RichDocxEditor({
                                 bold: fmt.bold || undefined,
                                 italic: fmt.italic || undefined,
                                 underline: fmt.underline || undefined,
+                                color: fmt.color,
+                                size: fmt.size,
                             });
                         }
                     } else if (child.nodeType === Node.ELEMENT_NODE) {
@@ -115,12 +157,22 @@ export function RichDocxEditor({
                         }
                         const cs = window.getComputedStyle(el);
                         const weight = parseInt(cs.fontWeight, 10);
+                        // Colour and size are only taken from runs the toolbar
+                        // marked. Reading them off computed style for every
+                        // element would rewrite untouched text with the
+                        // renderer's pixel values.
+                        const markedColor = el.dataset?.mikeColor;
+                        const markedSize = el.dataset?.mikeSize;
                         walk(el, {
                             bold: fmt.bold || weight >= 600,
                             italic: fmt.italic || cs.fontStyle === "italic",
                             underline:
                                 fmt.underline ||
                                 cs.textDecorationLine.includes("underline"),
+                            color: markedColor
+                                ? markedColor.toUpperCase()
+                                : fmt.color,
+                            size: markedSize ? Number(markedSize) : fmt.size,
                         });
                     }
                 }
@@ -135,7 +187,19 @@ export function RichDocxEditor({
                       : ta === "justify"
                         ? "justify"
                         : null;
-            paras.push({ text, align, runs });
+            // docx-preview renders a Heading-styled paragraph with a class
+            // like "docx_Heading1"; a paragraph we just marked carries
+            // data-mike-heading.
+            let heading = 0;
+            const marked = p.dataset?.mikeHeading;
+            if (marked !== undefined) {
+                heading = Number(marked) || 0;
+            } else {
+                const cls = p.className || "";
+                const hm = /(?:^|[\s_-])(?:docx_)?[Hh]eading\s?([1-9])/.exec(cls);
+                if (hm) heading = Number(hm[1]);
+            }
+            paras.push({ text, align, heading, runs });
         }
         return paras;
     }, [bodyParagraphEls]);
@@ -201,6 +265,71 @@ export function RichDocxEditor({
     const exec = useCallback(
         (command: string, value?: string) => {
             document.execCommand(command, false, value);
+            containerRef.current?.focus();
+            scheduleSave();
+        },
+        [scheduleSave],
+    );
+
+    /**
+     * Wrap the current selection in a span tagged with the chosen colour or
+     * size. The tag is what the serializer reads, so only text the user
+     * actually styled is sent with colour/size — everything else keeps the
+     * document's own formatting.
+     */
+    const applyRunStyle = useCallback(
+        (kind: "color" | "size", value: string) => {
+            const sel = window.getSelection();
+            if (!sel || sel.isCollapsed || sel.rangeCount === 0) return;
+            const range = sel.getRangeAt(0);
+            const root = containerRef.current;
+            if (!root || !root.contains(range.commonAncestorContainer)) return;
+
+            const span = document.createElement("span");
+            if (kind === "color") {
+                span.dataset.mikeColor = value;
+                span.style.color = `#${value}`;
+            } else {
+                span.dataset.mikeSize = value;
+                span.style.fontSize = `${value}pt`;
+            }
+            try {
+                range.surroundContents(span);
+            } catch {
+                // Selection crosses element boundaries — fall back to
+                // extracting and re-inserting the fragment.
+                const frag = range.extractContents();
+                span.appendChild(frag);
+                range.insertNode(span);
+            }
+            sel.removeAllRanges();
+            containerRef.current?.focus();
+            scheduleSave();
+        },
+        [scheduleSave],
+    );
+
+    /** Mark the paragraph(s) in the selection as a heading (0 = body text). */
+    const applyHeading = useCallback(
+        (level: number) => {
+            const sel = window.getSelection();
+            const root = containerRef.current;
+            if (!sel || sel.rangeCount === 0 || !root) return;
+            const range = sel.getRangeAt(0);
+            const paras = Array.from(
+                root.querySelectorAll<HTMLElement>("article p"),
+            ).filter(
+                (p) => !p.closest("header, footer") && range.intersectsNode(p),
+            );
+            if (paras.length === 0) return;
+            for (const p of paras) {
+                p.dataset.mikeHeading = String(level);
+                // Reflect it on screen straight away.
+                p.style.fontWeight = level ? "700" : "";
+                p.style.fontSize = level
+                    ? `${[0, 16, 14, 13][level] ?? 13}pt`
+                    : "";
+            }
             containerRef.current?.focus();
             scheduleSave();
         },
@@ -382,6 +511,59 @@ export function RichDocxEditor({
                 >
                     <AlignRight className="h-4 w-4" />
                 </ToolbarButton>
+                <div className="mx-1 h-5 w-px bg-gray-200" />
+                <select
+                    aria-label="Paragraph style"
+                    title="Paragraph style"
+                    defaultValue="0"
+                    onMouseDown={(e) => e.stopPropagation()}
+                    onChange={(e) => {
+                        applyHeading(Number(e.target.value));
+                        e.target.selectedIndex = 0;
+                    }}
+                    className="h-7 rounded border border-gray-200 bg-white px-1 text-xs text-gray-600"
+                >
+                    <option value="0">Body text</option>
+                    <option value="1">Heading 1</option>
+                    <option value="2">Heading 2</option>
+                    <option value="3">Heading 3</option>
+                </select>
+                <select
+                    aria-label="Font size"
+                    title="Font size (applies to the selected text)"
+                    defaultValue=""
+                    onMouseDown={(e) => e.stopPropagation()}
+                    onChange={(e) => {
+                        if (e.target.value) applyRunStyle("size", e.target.value);
+                        e.target.selectedIndex = 0;
+                    }}
+                    className="h-7 rounded border border-gray-200 bg-white px-1 text-xs text-gray-600"
+                >
+                    <option value="">Size</option>
+                    {FONT_SIZES.map((sz) => (
+                        <option key={sz} value={String(sz)}>
+                            {sz}
+                        </option>
+                    ))}
+                </select>
+                <select
+                    aria-label="Text colour"
+                    title="Text colour (applies to the selected text)"
+                    defaultValue=""
+                    onMouseDown={(e) => e.stopPropagation()}
+                    onChange={(e) => {
+                        if (e.target.value) applyRunStyle("color", e.target.value);
+                        e.target.selectedIndex = 0;
+                    }}
+                    className="h-7 rounded border border-gray-200 bg-white px-1 text-xs text-gray-600"
+                >
+                    <option value="">Colour</option>
+                    {COLORS.map((c) => (
+                        <option key={c.hex} value={c.hex}>
+                            {c.label}
+                        </option>
+                    ))}
+                </select>
                 <span className="ml-auto pr-1 text-xs text-gray-400">
                     {saveState === "saving"
                         ? "Saving…"

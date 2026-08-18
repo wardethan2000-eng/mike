@@ -1682,6 +1682,13 @@ export interface EditRun {
 export interface EditParagraph {
     text: string;
     align?: "left" | "center" | "right" | "justify" | null;
+    /**
+     * 1-3 to make this paragraph a Word heading, 0/undefined for body text.
+     * Applied as a w:pStyle referencing Word's built-in Heading styles, so the
+     * document's own heading look is used and Word's navigation pane picks
+     * them up.
+     */
+    heading?: number | null;
     runs: EditRun[];
 }
 
@@ -1745,27 +1752,102 @@ function buildRunProps(baseRPr: XNode | null, run: EditRun): XNode | null {
 }
 
 /** Set/replace/remove the alignment on a cloned paragraph-properties element. */
-function applyAlignment(
+function applyParagraphProps(
     basePPr: XNode | null,
     align: EditParagraph["align"],
+    heading: number | null | undefined,
 ): XNode | null {
+    const wantHeading =
+        typeof heading === "number" && heading >= 1 && heading <= 3
+            ? heading
+            : null;
     const base = basePPr ? cloneNode(basePPr) : null;
-    if (!align || align === "left") {
-        // Remove any explicit alignment so it falls back to the style default.
-        if (!base) return null;
-        const kids = elChildren(base).filter((c) => elName(c) !== "w:jc");
-        setChildren(base, kids);
-        return elChildren(base).length ? base : base; // keep pPr even if empty
-    }
+    const noAlign = !align || align === "left";
+    if (noAlign && !wantHeading && !base) return null;
+
     const pPr = base ?? makeEl("w:pPr", []);
-    const kids = elChildren(pPr).filter((c) => elName(c) !== "w:jc");
-    const jc = makeEl("w:jc", [], { "w:val": align });
-    // w:jc sits after w:pStyle/numbering but before run props; front-insert
-    // after any w:pStyle is close enough and Word accepts it.
-    const styleIdx = kids.findIndex((c) => elName(c) === "w:pStyle");
-    const at = styleIdx >= 0 ? styleIdx + 1 : 0;
-    setChildren(pPr, [...kids.slice(0, at), jc, ...kids.slice(at)]);
+    let kids = elChildren(pPr);
+
+    // Heading: replace any existing paragraph style. Removing it returns the
+    // paragraph to the document's default (body) style.
+    kids = kids.filter((c) => elName(c) !== "w:pStyle");
+    if (wantHeading) {
+        // w:pStyle must be the first child of w:pPr.
+        kids = [
+            makeEl("w:pStyle", [], { "w:val": `Heading${wantHeading}` }),
+            ...kids,
+        ];
+    }
+
+    // Alignment.
+    kids = kids.filter((c) => elName(c) !== "w:jc");
+    if (!noAlign) {
+        const styleIdx = kids.findIndex((c) => elName(c) === "w:pStyle");
+        const at = styleIdx >= 0 ? styleIdx + 1 : 0;
+        kids = [
+            ...kids.slice(0, at),
+            makeEl("w:jc", [], { "w:val": align as string }),
+            ...kids.slice(at),
+        ];
+    }
+    setChildren(pPr, kids);
     return pPr;
+}
+
+/**
+ * Word only renders a Heading style the document actually defines. Generated
+ * documents often define none, so add a minimal definition for any heading
+ * level used that is missing — bold, slightly larger than body, with space
+ * above. Existing definitions are never touched, so a firm template keeps its
+ * own heading look.
+ */
+function ensureHeadingStyles(
+    stylesTree: XNode[] | null,
+    levels: Set<number>,
+): boolean {
+    if (!stylesTree || levels.size === 0) return false;
+    let root: XNode | null = null;
+    for (const top of stylesTree) {
+        if (elName(top) === "w:styles") root = top;
+    }
+    if (!root) return false;
+    const kids = elChildren(root);
+    const have = new Set<string>();
+    for (const c of kids) {
+        if (elName(c) !== "w:style") continue;
+        const id = elAttrs(c)["@_w:styleId"];
+        if (id) have.add(String(id));
+    }
+    const SIZES: Record<number, string> = { 1: "32", 2: "28", 3: "26" };
+    let added = false;
+    for (const lvl of Array.from(levels).sort()) {
+        const id = `Heading${lvl}`;
+        if (have.has(id)) continue;
+        const style = makeEl(
+            "w:style",
+            [
+                makeEl("w:name", [], { "w:val": `heading ${lvl}` }),
+                makeEl("w:basedOn", [], { "w:val": "Normal" }),
+                makeEl("w:qFormat", []),
+                makeEl("w:pPr", [
+                    makeEl("w:keepNext", []),
+                    makeEl("w:spacing", [], { "w:before": "240", "w:after": "120" }),
+                    makeEl("w:outlineLvl", [], { "w:val": String(lvl - 1) }),
+                ]),
+                makeEl("w:rPr", [
+                    makeEl("w:b", []),
+                    makeEl("w:bCs", []),
+                    makeEl("w:sz", [], { "w:val": SIZES[lvl] ?? "26" }),
+                    makeEl("w:szCs", [], { "w:val": SIZES[lvl] ?? "26" }),
+                ]),
+            ],
+            { "w:type": "paragraph", "w:styleId": id },
+        );
+        kids.push(style);
+        added = true;
+    }
+    if (added) setChildren(root, kids);
+    return added;
 }
 
 /** Build a fresh <w:p> from a formatted paragraph, inheriting base props. */
@@ -1775,7 +1857,11 @@ function buildFormattedParagraph(
     basePPr: XNode | null,
 ): XNode {
     const children: XNode[] = [];
-    const pPr = applyAlignment(basePPr, para.align ?? null);
+    const pPr = applyParagraphProps(
+        basePPr,
+        para.align ?? null,
+        para.heading ?? null,
+    );
     if (pPr) children.push(pPr);
     const runs = para.runs && para.runs.length ? para.runs : [{ text: para.text }];
     for (const run of runs) {
@@ -1823,6 +1909,7 @@ export async function applyFormattedEdits(
         baseRPr: XNode | null;
         basePPr: XNode | null;
         hasSectPr: boolean;
+        headingLevel: number; // 0 = body text
     }
     const paras: Para[] = [];
     const collect = (nodes: XNode[]) => {
@@ -1832,12 +1919,20 @@ export async function applyFormattedEdits(
             if (name === "w:p") {
                 const kids = elChildren(n);
                 const pPr = findChildByName(kids, "w:pPr");
+                const pStyle = pPr
+                    ? findChildByName(elChildren(pPr), "w:pStyle")
+                    : null;
+                const styleVal = pStyle
+                    ? String(elAttrs(pStyle)["@_w:val"] ?? "")
+                    : "";
+                const hm = /^Heading([1-9])$/.exec(styleVal);
                 paras.push({
                     node: n,
                     text: flattenParagraph(kids).paraText,
                     baseRPr: firstRunRPr(kids),
                     basePPr: pPr,
                     hasSectPr: !!(pPr && findChildByName(elChildren(pPr), "w:sectPr")),
+                    headingLevel: hm ? Number(hm[1]) : 0,
                 });
             } else if (
                 name === "w:tbl" ||
@@ -1909,8 +2004,17 @@ export async function applyFormattedEdits(
             // the ORIGINAL node so untouched paragraphs are byte-identical,
             // unless the editor sent explicit formatting/alignment.
             const ep = next[nj];
+            // A heading level that differs from what the paragraph already has
+            // (including clearing one) must rebuild the paragraph.
+            const currentHeading = paras[oi].headingLevel;
+            const wantHeading =
+                typeof ep.heading === "number" && ep.heading >= 1 && ep.heading <= 3
+                    ? ep.heading
+                    : 0;
+            const headingChanged = wantHeading !== currentHeading;
             const hasFormatting =
                 (ep.align && ep.align !== "left") ||
+                headingChanged ||
                 (ep.runs || []).some(
                     (r) => r.bold || r.italic || r.underline || r.color || r.size,
                 );
@@ -1983,6 +2087,34 @@ export async function applyFormattedEdits(
         "word/document.xml",
         ensureXmlDeclaration(builder.build(tree)),
     );
+
+    // Make sure every heading level used is actually defined, or Word renders
+    // the paragraph as plain body text.
+    const usedHeadings = new Set<number>();
+    for (const ep of next) {
+        if (
+            typeof ep.heading === "number" &&
+            ep.heading >= 1 &&
+            ep.heading <= 3
+        ) {
+            usedHeadings.add(ep.heading);
+        }
+    }
+    if (usedHeadings.size > 0) {
+        const stylesFile = getZipEntry(zip, "word/styles.xml");
+        if (stylesFile) {
+            const stylesRaw = await stylesFile.async("string");
+            const stylesTree = createParser().parse(stylesRaw) as XNode[];
+            if (ensureHeadingStyles(stylesTree, usedHeadings)) {
+                setZipEntry(
+                    zip,
+                    "word/styles.xml",
+                    ensureXmlDeclaration(createBuilder().build(stylesTree)),
+                );
+            }
+        }
+    }
+
     const out = await zip.generateAsync({
         type: "nodebuffer",
         compression: "DEFLATE",
