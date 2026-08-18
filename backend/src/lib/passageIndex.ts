@@ -4,8 +4,14 @@
 // since before that there is no text to store. Runs detached from the request:
 // a document that could not be indexed is still a document you can open, so
 // nothing here is allowed to fail an upload.
-import { isOcrDerived, shouldReadFromRendition } from "./documentRendition";
-import { isSpreadsheetDocumentType } from "./documentTypes";
+import { isOcrDerived } from "./documentRendition";
+import {
+  isPresentationDocumentType,
+  isSpreadsheetDocumentType,
+  isTextDocumentType,
+  isWordDocumentType,
+} from "./documentTypes";
+import { extractPresentationText } from "./officeText";
 import { toPassages } from "./passages";
 import { spreadsheetToLLMText } from "./spreadsheet";
 import { downloadFile } from "./storage";
@@ -57,27 +63,42 @@ async function pdfPageText(buf: Buffer): Promise<string> {
 }
 
 /**
- * The text of a stored version, taken from whichever copy actually has words in
- * it: the searchable PDF for scans, photographs and text files, the file itself
- * for an ordinary PDF, and the grid for a spreadsheet.
+ * The text of a stored version.
+ *
+ * The PDF rendition is preferred whenever one exists — for a scan or photograph
+ * it is the only copy with text, and for a Word, PowerPoint or text file it
+ * carries page numbers the original does not, so citations line up with what is
+ * shown on screen. This also covers an ordinary PDF, whose rendition is itself.
+ *
+ * Only when there is no rendition — a conversion that failed at upload, an image
+ * whose OCR failed — does it fall back to the original, and then it reads with a
+ * reader that suits the type. It never parses non-PDF bytes as a PDF, which is
+ * how a Word file with no rendition used to fail.
  */
 async function versionText(version: IndexableVersion): Promise<string> {
   const fileType = (version.file_type ?? "").toLowerCase();
 
-  if (isSpreadsheetDocumentType(fileType)) {
-    if (!version.storage_path) return "";
-    const raw = await downloadFile(version.storage_path);
-    return raw ? spreadsheetToLLMText(Buffer.from(raw)) : "";
+  if (version.pdf_storage_path) {
+    const raw = await downloadFile(version.pdf_storage_path);
+    if (raw) return pdfPageText(Buffer.from(raw));
   }
 
-  const path = shouldReadFromRendition(version)
-    ? version.pdf_storage_path
-    : (version.pdf_storage_path ?? version.storage_path);
-  if (!path) return "";
-
-  const raw = await downloadFile(path);
+  if (!version.storage_path) return "";
+  const raw = await downloadFile(version.storage_path);
   if (!raw) return "";
-  return pdfPageText(Buffer.from(raw));
+  const buf = Buffer.from(raw);
+
+  if (fileType === "pdf") return pdfPageText(buf);
+  if (isSpreadsheetDocumentType(fileType)) return spreadsheetToLLMText(buf);
+  if (isWordDocumentType(fileType)) {
+    const mammoth = await import("mammoth");
+    const result = await mammoth.extractRawText({ buffer: buf });
+    return result.value ?? "";
+  }
+  if (isPresentationDocumentType(fileType)) return extractPresentationText(buf);
+  if (isTextDocumentType(fileType)) return buf.toString("utf8");
+  // An image whose OCR produced no rendition has no text to store.
+  return "";
 }
 
 export type IndexResult = {
