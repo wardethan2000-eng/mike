@@ -2,6 +2,30 @@ export const PROJECT_EXTRA_TOOLS = [
   {
     type: "function",
     function: {
+      name: "search_matter",
+      description:
+        "Search every document in this matter by keyword and return the passages that match, each with its document and page. Use this to find where something is discussed across many documents — 'which files mention the summons', 'where is the indemnity clause', 'any reference to the March inspection' — without knowing which document holds it or reading them all. Matching understands word stems and tolerates the character errors that scanned documents carry. Cite the document and page from the result; open a document with read_document when you need its full text.",
+      parameters: {
+        type: "object",
+        properties: {
+          query: {
+            type: "string",
+            description:
+              "What to look for — a word, a name, a phrase, or a short description of the idea.",
+          },
+          limit: {
+            type: "number",
+            description:
+              "Most passages to return (default 20, maximum 100).",
+          },
+        },
+        required: ["query"],
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
       name: "list_documents",
       description:
         "List all documents available in the project. Returns each document's ID, filename, and file type. Call this to discover what documents are available before deciding which ones to read.",

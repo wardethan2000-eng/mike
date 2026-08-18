@@ -11,6 +11,7 @@ import {
 } from "./courtlistenerTools";
 import { executeMcpToolCall, type McpToolEvent } from "../../mcpConnectors";
 import { createServerSupabase } from "../../supabase";
+import { searchMatter, formatForAssistant } from "../../matterSearch";
 import {
   type DocStore,
   type DocIndex,
@@ -544,6 +545,23 @@ export async function runToolCalls(
         role: "tool",
         tool_call_id: tc.id,
         content: JSON.stringify(list),
+      });
+    } else if (tc.function.name === "search_matter") {
+      const query = typeof args.query === "string" ? args.query : "";
+      const limit =
+        typeof args.limit === "number" && Number.isFinite(args.limit)
+          ? args.limit
+          : 20;
+      const hits = await searchMatter(db, {
+        userId,
+        projectId: projectId ?? null,
+        query,
+        limit,
+      });
+      toolResults.push({
+        role: "tool",
+        tool_call_id: tc.id,
+        content: formatForAssistant(query, hits),
       });
     } else if (tc.function.name === "fetch_documents") {
       const rawDocIds = (args.doc_ids as string[]) ?? [];
