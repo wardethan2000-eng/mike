@@ -6,6 +6,7 @@ import {
     answerMatter,
     searchMatter,
     type MatterAnswer,
+    type MatterAnswerCitation,
     type MatterSearchHit,
 } from "@/app/lib/mikeApi";
 import { SearchBar } from "@/app/components/ui/search-bar";
@@ -17,8 +18,58 @@ import remarkGfm from "remark-gfm";
 
 type Mode = "find" | "ask";
 
+export type MatterSourceRequest = {
+    documentId: string;
+    filename: string;
+    page: number | null;
+    /** The passage to highlight once the document is open. */
+    quote: string;
+};
+
 interface Props {
     projectId: string;
+    /**
+     * Called when the reader clicks a citation, a source, or a found passage.
+     * The documents view opens that file beside the list, at that page, with the
+     * words highlighted.
+     */
+    onOpenSource?: (source: MatterSourceRequest) => void;
+}
+
+const CITATION_LINK_PREFIX = "#mike-source-";
+
+function escapeForRegExp(value: string): string {
+    return value.replace(/[.*+?^\${}()|[\]\\]/g, "\\$&");
+}
+
+/**
+ * Rewrites the citations the model wrote into markdown links, so each one
+ * renders as something the reader can click. Anything that was not matched to a
+ * real passage is left exactly as it was written.
+ */
+export function withCitationLinks(
+    answer: string,
+    citations: MatterAnswerCitation[],
+): string {
+    if (citations.length === 0) return answer;
+    const indexByText = new Map<string, number>();
+    citations.forEach((citation, index) => {
+        if (!indexByText.has(citation.text)) indexByText.set(citation.text, index);
+    });
+    const texts = [...indexByText.keys()].sort((a, b) => b.length - a.length);
+    const pattern = new RegExp(texts.map(escapeForRegExp).join("|"), "g");
+    return answer.replace(pattern, (match) => {
+        const index = indexByText.get(match);
+        if (index == null) return match;
+        const label = match.replace(/([\[\]])/g, "\\$1");
+        return `[${label}](${CITATION_LINK_PREFIX}${index})`;
+    });
+}
+
+function citationIndexFromHref(href: string | undefined): number | null {
+    if (!href || !href.startsWith(CITATION_LINK_PREFIX)) return null;
+    const index = Number(href.slice(CITATION_LINK_PREFIX.length));
+    return Number.isInteger(index) && index >= 0 ? index : null;
 }
 
 function matchLabel(hit: { matchedBy: string; fromFilename: boolean }): string {
@@ -38,7 +89,7 @@ function whereLabel(page: number | null): string {
  * document and page. The heavy lifting is on the server (GET /search and
  * POST /search/answer); this only shows the results.
  */
-export function MatterSearchPanel({ projectId }: Props) {
+export function MatterSearchPanel({ projectId, onOpenSource }: Props) {
     const [mode, setMode] = useState<Mode>("find");
     const [query, setQuery] = useState("");
     const [loading, setLoading] = useState(false);
@@ -84,6 +135,23 @@ export function MatterSearchPanel({ projectId }: Props) {
         } finally {
             setLoading(false);
         }
+    }
+
+    // A passage found in the file's name has no words inside the file, so there
+    // is nothing to highlight — the document simply opens.
+    function openHit(hit: {
+        documentId: string;
+        filename: string;
+        page: number | null;
+        content: string;
+        fromFilename?: boolean;
+    }) {
+        onOpenSource?.({
+            documentId: hit.documentId,
+            filename: hit.filename,
+            page: hit.page,
+            quote: hit.fromFilename ? "" : hit.content,
+        });
     }
 
     function switchMode(next: Mode) {
@@ -157,21 +225,30 @@ export function MatterSearchPanel({ projectId }: Props) {
                     ) : (
                         <ul className="flex flex-col gap-2">
                             {hits.map((h, i) => (
-                                <li
-                                    key={`${h.documentId}-${i}`}
-                                    className="rounded-xl border border-white/60 bg-white/60 px-3 py-2"
-                                >
-                                    <div className="flex items-baseline justify-between gap-2">
-                                        <span className="truncate text-sm font-medium text-gray-900">
-                                            {h.filename}
-                                        </span>
-                                        <span className="shrink-0 text-[11px] text-gray-500">
-                                            {whereLabel(h.page)} · {matchLabel(h)}
-                                        </span>
-                                    </div>
-                                    <p className="mt-1 line-clamp-3 text-xs text-gray-600">
-                                        {h.content}
-                                    </p>
+                                <li key={`${h.documentId}-${i}`}>
+                                    <button
+                                        type="button"
+                                        onClick={() => openHit(h)}
+                                        disabled={!onOpenSource}
+                                        className="w-full rounded-xl border border-white/60 bg-white/60 px-3 py-2 text-left transition-colors enabled:hover:border-blue-300 enabled:hover:bg-white disabled:cursor-default"
+                                        title={
+                                            onOpenSource
+                                                ? "Open this document at the passage"
+                                                : undefined
+                                        }
+                                    >
+                                        <div className="flex items-baseline justify-between gap-2">
+                                            <span className="truncate text-sm font-medium text-gray-900">
+                                                {h.filename}
+                                            </span>
+                                            <span className="shrink-0 text-[11px] text-gray-500">
+                                                {whereLabel(h.page)} · {matchLabel(h)}
+                                            </span>
+                                        </div>
+                                        <p className="mt-1 line-clamp-3 text-xs text-gray-600">
+                                            {h.content}
+                                        </p>
+                                    </button>
                                 </li>
                             ))}
                         </ul>
@@ -182,8 +259,51 @@ export function MatterSearchPanel({ projectId }: Props) {
             {mode === "ask" && answer && !loading && (
                 <div className="mt-3">
                     <div className="text-sm text-gray-800 [&_p]:mb-2 [&_p:last-child]:mb-0 [&_ul]:my-1 [&_ul]:list-disc [&_ul]:pl-5 [&_ol]:my-1 [&_ol]:list-decimal [&_ol]:pl-5 [&_li]:mb-0.5 [&_strong]:font-semibold [&_h1]:text-base [&_h1]:font-semibold [&_h2]:font-semibold [&_h3]:font-semibold [&_a]:underline">
-                        <ReactMarkdown remarkPlugins={[remarkGfm]}>
-                            {answer.answer}
+                        <ReactMarkdown
+                            remarkPlugins={[remarkGfm]}
+                            components={{
+                                a: ({ href, children, ...rest }) => {
+                                    const index = citationIndexFromHref(href);
+                                    if (index == null)
+                                        return (
+                                            <a href={href} {...rest}>
+                                                {children}
+                                            </a>
+                                        );
+                                    const citation = (answer.citations ?? [])[
+                                        index
+                                    ];
+                                    if (!citation) return <>{children}</>;
+                                    return (
+                                        <button
+                                            type="button"
+                                            onClick={() =>
+                                                onOpenSource?.({
+                                                    documentId:
+                                                        citation.documentId,
+                                                    filename: citation.filename,
+                                                    page: citation.page,
+                                                    quote: citation.quote,
+                                                })
+                                            }
+                                            disabled={!onOpenSource}
+                                            title={
+                                                onOpenSource
+                                                    ? "Open this document at the cited passage"
+                                                    : undefined
+                                            }
+                                            className="rounded-md px-1 py-px font-medium text-blue-700 underline decoration-blue-300 underline-offset-2 transition-colors enabled:hover:bg-blue-50 enabled:hover:decoration-blue-500 disabled:cursor-default disabled:text-gray-600 disabled:no-underline"
+                                        >
+                                            {children}
+                                        </button>
+                                    );
+                                },
+                            }}
+                        >
+                            {withCitationLinks(
+                                answer.answer,
+                                answer.citations ?? [],
+                            )}
                         </ReactMarkdown>
                     </div>
                     {answer.sources.length > 0 && (
@@ -193,12 +313,21 @@ export function MatterSearchPanel({ projectId }: Props) {
                             </p>
                             <ul className="mt-1 flex flex-wrap gap-1.5">
                                 {answer.sources.map((s, i) => (
-                                    <li
-                                        key={`${s.documentId}-${i}`}
-                                        className="rounded-full border border-white/70 bg-white/70 px-2 py-0.5 text-[11px] text-gray-600"
-                                    >
-                                        {s.filename}
-                                        {s.page != null ? `, p${s.page}` : ""}
+                                    <li key={`${s.documentId}-${i}`}>
+                                        <button
+                                            type="button"
+                                            onClick={() => openHit(s)}
+                                            disabled={!onOpenSource}
+                                            title={
+                                                onOpenSource
+                                                    ? "Open this document at the passage"
+                                                    : undefined
+                                            }
+                                            className="rounded-full border border-white/70 bg-white/70 px-2 py-0.5 text-[11px] text-gray-600 transition-colors enabled:hover:border-blue-300 enabled:hover:bg-white enabled:hover:text-gray-900 disabled:cursor-default"
+                                        >
+                                            {s.filename}
+                                            {s.page != null ? `, p${s.page}` : ""}
+                                        </button>
                                     </li>
                                 ))}
                             </ul>

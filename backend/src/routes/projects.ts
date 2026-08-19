@@ -885,9 +885,11 @@ projectsRouter.post(
           documentId: h.documentId,
           filename: h.filename,
           page: h.page,
+          content: h.content,
           matchedBy: h.matchedBy,
           fromFilename: h.fromFilename,
         })),
+        citations: result.citations,
       });
     } catch (err) {
       console.error("[projects/search/answer] failed", {

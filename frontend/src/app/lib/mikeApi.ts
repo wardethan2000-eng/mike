@@ -327,16 +327,32 @@ export async function searchMatter(
     );
 }
 
+export type MatterAnswerSource = {
+    documentId: string;
+    filename: string;
+    page: number | null;
+    /** The passage itself, so the document can open with it highlighted. */
+    content: string;
+    matchedBy: "words" | "meaning" | "similar";
+    fromFilename: boolean;
+};
+
+// A citation written inside an answer, tied back to the document and passage it
+// came from so the reader can click it and see the words in the file.
+export type MatterAnswerCitation = {
+    /** The exact run of text in the answer that should be clickable. */
+    text: string;
+    documentId: string;
+    filename: string;
+    page: number | null;
+    quote: string;
+};
+
 export type MatterAnswer = {
     question: string;
     answer: string;
-    sources: {
-        documentId: string;
-        filename: string;
-        page: number | null;
-        matchedBy: "words" | "meaning" | "similar";
-        fromFilename: boolean;
-    }[];
+    sources: MatterAnswerSource[];
+    citations: MatterAnswerCitation[];
 };
 
 // Ask a whole matter a question and get one consolidated answer that cites the

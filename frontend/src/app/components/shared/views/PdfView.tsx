@@ -226,10 +226,16 @@ export function PdfView({
                 scrollContainerRef.current.style.opacity = "0";
             }
 
+            let revealed = false;
             const reveal = () => {
+                revealed = true;
                 if (scrollContainerRef.current)
                     scrollContainerRef.current.style.opacity = "1";
             };
+            // The page the reader was sent to, if the citation names one. Once
+            // that page is drawn there is no reason to keep the document hidden
+            // while the rest of a long file finishes.
+            const citedPage = list.find((entry) => entry.page)?.page ?? null;
 
             const panelW = containerRef.current.clientWidth;
             const firstPage = await doc.getPage(1);
@@ -298,6 +304,14 @@ export function PdfView({
                     canvas,
                     textDivs,
                 });
+
+                if (hasCitation && !revealed && citedPage === pageNum) {
+                    await applyHighlights(
+                        list.filter((entry) => entry.page === pageNum),
+                    );
+                    scrollToHighlightOnPage(pageNum);
+                    reveal();
+                }
             }
 
             // Apply highlights across all entries, then scroll to the first hit.
@@ -310,7 +324,8 @@ export function PdfView({
                     targetPage = hint;
                 }
             }
-            if (targetPage && targetPage >= 1) {
+            const alreadyOnTargetPage = revealed && targetPage === citedPage;
+            if (targetPage && targetPage >= 1 && !alreadyOnTargetPage) {
                 scrollToHighlightOnPage(targetPage);
             } else if (!hasCitation && scrollToPage && scrollToPage > 1) {
                 // Restore scroll position after zoom re-render

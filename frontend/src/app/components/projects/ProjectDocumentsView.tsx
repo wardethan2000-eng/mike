@@ -31,7 +31,10 @@ import {
 } from "@/app/components/documents/DocTable";
 import { TabPillButton } from "@/app/components/ui/tab-pill-button";
 import { ProjectSectionToolbar, useProjectWorkspace } from "./ProjectWorkspace";
-import { MatterSearchPanel } from "./MatterSearchPanel";
+import {
+    MatterSearchPanel,
+    type MatterSourceRequest,
+} from "./MatterSearchPanel";
 import { APP_SURFACE_HOVER_CLASS } from "@/app/components/ui/liquid-surface";
 
 interface Props {
@@ -72,6 +75,12 @@ export function ProjectDocumentsView({ projectId, folderId = null }: Props) {
         limits: { root: PROJECT_DIRECTORY_PAGE_SIZE },
     }));
     const actionsRef = useRef<HTMLDivElement>(null);
+    // The passage the reader last asked to see. The counter makes clicking the
+    // same citation twice re-open and re-highlight it.
+    const [openSource, setOpenSource] = useState<
+        (MatterSourceRequest & { key: number }) | null
+    >(null);
+    const openSourceCount = useRef(0);
 
     useEffect(() => {
         if (!projectLoading) prefetchProjectSections();
@@ -312,9 +321,16 @@ export function ProjectDocumentsView({ projectId, folderId = null }: Props) {
     return (
         <>
             <ProjectSectionToolbar actions={toolbarActions} />
-            <MatterSearchPanel projectId={projectId} />
+            <MatterSearchPanel
+                projectId={projectId}
+                onOpenSource={(source) => {
+                    openSourceCount.current += 1;
+                    setOpenSource({ ...source, key: openSourceCount.current });
+                }}
+            />
             <DocTable
                 scopeKey={projectId}
+                openSource={openSource}
                 documents={documents}
                 setDocuments={setDocuments}
                 folders={folders}

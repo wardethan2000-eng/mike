@@ -39,6 +39,16 @@ const MAX_PANEL_WIDTH = 1180;
 
 interface DocumentSidePanelProps {
     doc: Document | null;
+    /**
+     * A passage to show highlighted when the document opens — set when the panel
+     * was opened from a search result or from a citation in an answer. The key
+     * changes each time it is asked for, so the same passage can be re-shown.
+     */
+    highlight?: {
+        page: number | null;
+        quote: string;
+        key: number;
+    } | null;
     versionId?: string | null;
     currentVersionId?: string | null;
     versions: DocumentVersion[];
@@ -76,6 +86,7 @@ interface DocumentSidePanelProps {
 
 export function DocumentSidePanel({
     doc,
+    highlight = null,
     versionId,
     currentVersionId,
     versions,
@@ -251,6 +262,17 @@ export function DocumentSidePanel({
     const selectedVersionNumber =
         selectedVersion?.version_number ?? doc.active_version_number ?? null;
     const selectedUploadedAt = selectedVersion?.created_at ?? doc.created_at;
+    // The words to highlight. A passage found only by the file's name has no
+    // text inside the file, so there is nothing to mark.
+    const highlightQuotes =
+        highlight && highlight.quote.trim()
+            ? [
+                  {
+                      page: highlight.page ?? undefined,
+                      quote: highlight.quote,
+                  },
+              ]
+            : undefined;
     const selectedExtension = filenameExtension(selectedFilename);
     const replaceFileType = replaceTargetVersion
         ? fileTypeForVersion(replaceTargetVersion, selectedFileType)
@@ -544,6 +566,8 @@ export function DocumentSidePanel({
                                 key={`${selectedVersionId ?? "current"}:${selectedUploadedAt ?? ""}:${selectedSizeBytes ?? ""}`}
                                 documentId={doc.id}
                                 versionId={selectedVersionId}
+                                quotes={highlightQuotes}
+                                quoteFocusKey={highlight?.key}
                             />
                         ) : (
                             <PdfView
@@ -552,6 +576,8 @@ export function DocumentSidePanel({
                                     document_id: doc.id,
                                     version_id: selectedVersionId,
                                 }}
+                                quotes={highlightQuotes}
+                                quoteFocusKey={highlight?.key}
                             />
                         )}
                     </div>

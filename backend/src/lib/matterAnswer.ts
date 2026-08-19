@@ -7,6 +7,7 @@
 // the question, it says so rather than guessing.
 import { completeText, resolveModel, DEFAULT_MAIN_MODEL, type UserApiKeys } from "./llm";
 import { searchMatter, formatForAssistant, type MatterSearchHit } from "./matterSearch";
+import { linkAnswerCitations, type AnswerCitation } from "./matterCitations";
 import type { createServerSupabase } from "./supabase";
 
 type Db = ReturnType<typeof createServerSupabase>;
@@ -26,6 +27,11 @@ export type MatterAnswer = {
   answer: string;
   /** The passages the answer was drawn from, for citation and follow-up. */
   sources: MatterSearchHit[];
+  /**
+   * The citations written inside the answer, each tied back to the document and
+   * passage it came from so a reader can click it open.
+   */
+  citations: AnswerCitation[];
 };
 
 export async function answerMatter(
@@ -41,7 +47,12 @@ export async function answerMatter(
 ): Promise<MatterAnswer> {
   const question = params.question.trim();
   if (!question) {
-    return { question: "", answer: "Ask a question to search the matter.", sources: [] };
+    return {
+      question: "",
+      answer: "Ask a question to search the matter.",
+      sources: [],
+      citations: [],
+    };
   }
 
   const sources = await searchMatter(db, {
@@ -58,6 +69,7 @@ export async function answerMatter(
         `Nothing in this matter's documents appears to address "${question}". ` +
         "The point may not be covered, or a scanned document may have read poorly — try different words.",
       sources: [],
+      citations: [],
     };
   }
 
@@ -74,5 +86,6 @@ export async function answerMatter(
     apiKeys: params.apiKeys,
   });
 
-  return { question, answer: answer.trim(), sources };
+  const text = answer.trim();
+  return { question, answer: text, sources, citations: linkAnswerCitations(text, sources) };
 }

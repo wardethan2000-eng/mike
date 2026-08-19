@@ -177,6 +177,16 @@ interface DocTableProps {
     documentTypeOptions?: TableFilterOption<string>[];
     autoLoadOnScroll?: boolean;
     defaultSort?: DocumentSort | null;
+    // A passage someone asked to see (from the matter search or an answer's
+    // citation). Setting it opens that document beside the list with the words
+    // highlighted; the key makes the same passage re-open when clicked again.
+    openSource?: {
+        documentId: string;
+        filename: string;
+        page: number | null;
+        quote: string;
+        key: number;
+    } | null;
 }
 
 function apiErrorDetail(error: unknown): string | null {
@@ -320,6 +330,7 @@ export function DocTable({
     documentTypeOptions,
     autoLoadOnScroll = false,
     defaultSort = null,
+    openSource = null,
 }: DocTableProps) {
     const [addDocsOpen, setAddDocsOpen] = useState(false);
     const { user } = useAuth();
@@ -328,6 +339,13 @@ export function DocTable({
     const [viewingDocVersion, setViewingDocVersion] = useState<{
         id: string;
         label: string;
+    } | null>(null);
+    // The passage highlighted in the open document, if it was opened from a
+    // search result or a citation rather than by clicking the row.
+    const [viewingHighlight, setViewingHighlight] = useState<{
+        page: number | null;
+        quote: string;
+        key: number;
     } | null>(null);
     const [selectedDocIds, setSelectedDocIds] = useState<string[]>([]);
     const [selectedFolderIds, setSelectedFolderIds] = useState<Set<string>>(
@@ -1662,6 +1680,7 @@ export function DocTable({
                                 onDrop={(e) => handleDocumentVersionDrop(e, doc)}
                                 onClick={() => {
                                     setViewingDocVersion(null);
+                                    setViewingHighlight(null);
                                     setViewingDoc(doc);
                                 }}
                                 onContextMenu={(e) => {
@@ -1836,6 +1855,7 @@ export function DocTable({
                                             id: versionId,
                                             label,
                                         });
+                                        setViewingHighlight(null);
                                         setViewingDoc(doc);
                                     }}
                                     onRenameVersion={(versionId, filename) =>
@@ -2083,6 +2103,39 @@ export function DocTable({
     // ── Loading skeleton ──────────────────────────────────────────────────────
 
     const docs = serverDocuments ?? documents;
+
+    // Someone clicked a citation or a search result: open that document beside
+    // the list, on the cited page, with the passage highlighted.
+    useEffect(() => {
+        if (!openSource) return;
+        const match =
+            docs.find((doc) => doc.id === openSource.documentId) ??
+            documents.find((doc) => doc.id === openSource.documentId) ??
+            null;
+        const target: Document = match ?? {
+            id: openSource.documentId,
+            project_id: null,
+            filename: openSource.filename,
+            file_type: null,
+            storage_path: null,
+            pdf_storage_path: null,
+            size_bytes: null,
+            page_count: null,
+            structure_tree: null,
+            status: "ready",
+            created_at: null,
+        };
+        setViewingDocVersion(null);
+        setViewingDoc(target);
+        setViewingHighlight({
+            page: openSource.page,
+            quote: openSource.quote,
+            key: openSource.key,
+        });
+        // Only the request itself should re-open the panel — not a document
+        // list that happens to refresh while it is open.
+        // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, [openSource?.key]);
     const downloadDoc = useCallback(async (docId: string) => {
         const { url, filename } = await getDocumentUrl(docId);
         const a = document.createElement("a");
@@ -2777,6 +2830,7 @@ export function DocTable({
                                                             onDrop={(e) => handleDocumentVersionDrop(e, doc)}
                                                             onClick={() => {
                                                                 setViewingDocVersion(null);
+                                                                setViewingHighlight(null);
                                                                 setViewingDoc(doc);
                                                             }}
                                                             onContextMenu={(e) => {
@@ -2948,6 +3002,7 @@ export function DocTable({
                                                                         id: versionId,
                                                                         label,
                                                                     });
+                                                                    setViewingHighlight(null);
                                                                     setViewingDoc(doc);
                                                                 }}
                                                                 onRenameVersion={(versionId, filename) =>
@@ -3084,6 +3139,7 @@ export function DocTable({
 
             <DocumentSidePanel
                 doc={sidePanelDoc}
+                highlight={viewingHighlight}
                 versionId={viewingDocVersion?.id ?? null}
                 currentVersionId={
                     sidePanelDoc ? (versionsByDocId.get(sidePanelDoc.id)?.currentVersionId ?? null) : null
@@ -3093,6 +3149,7 @@ export function DocTable({
                 onClose={() => {
                     setViewingDoc(null);
                     setViewingDocVersion(null);
+                    setViewingHighlight(null);
                 }}
                 onLoadVersions={(docId) => loadDocumentVersions(docId)}
                 onSelectVersion={(versionId, label) => setViewingDocVersion({ id: versionId, label })}
