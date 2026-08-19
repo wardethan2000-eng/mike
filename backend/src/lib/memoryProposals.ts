@@ -11,6 +11,7 @@
 // This runs after the answer has been sent, so a slow or failed suggestion
 // never holds up a reply or breaks one.
 import { completeText, type UserApiKeys } from "./llm";
+import { backfillMemoryFingerprints } from "./memoryEmbedding";
 import {
   MEMORY_CATEGORIES,
   MEMORY_BODY_MAX_CHARS,
@@ -184,17 +185,29 @@ export async function proposeMemoriesForTurn(args: {
       : Math.max(0, MAX_PENDING_PROPOSALS - pending);
     if (room === 0) return;
 
-    await db.from("project_memories").insert(
-      facts.slice(0, room).map((item) => ({
-        project_id: projectId,
-        user_id: userId,
-        category: item.category,
-        body: item.fact,
-        status: autoRemember ? "accepted" : "proposed",
-        origin: "assistant",
-        source_chat_id: chatId,
-      })),
-    );
+    const { data: written } = await db
+      .from("project_memories")
+      .insert(
+        facts.slice(0, room).map((item) => ({
+          project_id: projectId,
+          user_id: userId,
+          category: item.category,
+          body: item.fact,
+          status: autoRemember ? "accepted" : "proposed",
+          origin: "assistant",
+          source_chat_id: chatId,
+        })),
+      )
+      .select("id, body");
+
+    // A fact kept without being asked about goes straight into use, so give it
+    // its fingerprint now rather than waiting for the next read to notice.
+    if (autoRemember && written) {
+      void backfillMemoryFingerprints(
+        db,
+        written as unknown as { id: string; body: string }[],
+      );
+    }
   } catch (error) {
     // Suggestions are a convenience. Losing one is not worth a broken reply.
     console.error("[memory-proposals] could not suggest facts", error);

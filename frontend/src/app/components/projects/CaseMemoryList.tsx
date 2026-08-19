@@ -55,13 +55,19 @@ const NOTICE_TIMEOUT_MS = 6000;
  */
 const SUGGESTION_CHECK_DELAYS_MS = [2500, 9000];
 
+/**
+ * The first three describe the case itself and travel with every question, however
+ * long the list grows. The last three are the ones that pile up as a matter runs
+ * on, and past a few dozen facts only the ones bearing on the question are sent.
+ * They are listed in that order here so the panel reads the way the facts are used.
+ */
 const CATEGORIES: { id: MemoryCategory; label: string; hint: string }[] = [
     { id: "parties", label: "Parties", hint: "Who is who, and what they do" },
-    { id: "dates", label: "Dates", hint: "Deadlines and hearings" },
     { id: "position", label: "Position", hint: "What we are arguing for" },
+    { id: "drafting", label: "Drafting", hint: "How documents should look" },
+    { id: "dates", label: "Dates", hint: "Deadlines and hearings" },
     { id: "decisions", label: "Decisions", hint: "What has been settled" },
     { id: "questions", label: "Open", hint: "Still to be answered" },
-    { id: "drafting", label: "Drafting", hint: "How documents should look" },
 ];
 
 const CATEGORY_HEADINGS: Record<MemoryCategory, string> = {

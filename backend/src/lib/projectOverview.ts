@@ -8,48 +8,43 @@
 // Both are loaded here in one place so the assistant chat and the "ask the
 // matter" answers say the same thing about the case, rather than each route
 // growing its own copy.
+//
+// A matter that has collected more facts than fit comfortably in every question
+// sends the ones that bear on what was asked, plus the ones that describe the
+// case itself. What is left out is counted and the assistant is told, so it can
+// say it may not have the whole picture. See memorySelection.ts.
 import { spotlightCaseOverview } from "./chat/contextBuilders";
+import { embedQuery } from "./embeddings";
+import { backfillMemoryFingerprints } from "./memoryEmbedding";
+import {
+  MEMORY_CATEGORIES,
+  MEMORY_CATEGORY_HEADINGS,
+  type MemoryCategory,
+} from "./memoryCategories";
+import {
+  parseEmbedding,
+  selectMemoriesForQuery,
+  SEND_EVERYTHING_BELOW,
+} from "./memorySelection";
 import type { createServerSupabase } from "./supabase";
 
 type Db = ReturnType<typeof createServerSupabase>;
 
+export {
+  MEMORY_CATEGORIES,
+  MEMORY_BODY_MAX_CHARS,
+  type MemoryCategory,
+} from "./memoryCategories";
+
 /** Matches the cap the projects route enforces when the overview is saved. */
 export const PROJECT_OVERVIEW_MAX_CHARS = 4000;
 
-/** A remembered fact is a line or two. Anything longer belongs in a document. */
-export const MEMORY_BODY_MAX_CHARS = 500;
-
 /**
- * The groups a remembered fact can sit in. They are deliberately few and plain,
- * so a list of thirty facts still reads at a glance.
+ * The most facts read out of the database for one question. Well past what any
+ * matter is likely to hold; the picking then narrows this to what actually
+ * travels with the question.
  */
-export const MEMORY_CATEGORIES = [
-  "parties",
-  "dates",
-  "position",
-  "decisions",
-  "questions",
-  "drafting",
-] as const;
-
-export type MemoryCategory = (typeof MEMORY_CATEGORIES)[number];
-
-/** How each group is headed when the facts are read out to the assistant. */
-const MEMORY_CATEGORY_HEADINGS: Record<MemoryCategory, string> = {
-  parties: "Parties and roles",
-  dates: "Key dates",
-  position: "Our position and strategy",
-  decisions: "Decisions made",
-  questions: "Open questions",
-  drafting: "How they want things drafted",
-};
-
-/**
- * How many facts travel with a question. Well past what a matter normally has;
- * beyond it, pinned facts and the most recent ones go and the rest are left
- * behind, which the assistant is told about rather than left to guess.
- */
-const MEMORY_PROMPT_LIMIT = 80;
+const MEMORY_READ_LIMIT = 400;
 
 export type ProjectMemory = {
   id: string;
@@ -58,6 +53,7 @@ export type ProjectMemory = {
   pinned: boolean;
   source_document_id: string | null;
   source_page: number | null;
+  embedding: number[] | null;
 };
 
 /**
@@ -89,44 +85,83 @@ export async function loadProjectOverview(
 }
 
 /**
- * The facts in force for a matter — everything accepted that has not been
- * replaced by a newer wording. Facts Mike has suggested but nobody has looked
- * at yet are deliberately left out: a suggestion is not a fact until someone
- * says it is. Pinned facts come first so that, if a very long list has to be
- * cut, the ones marked as always-relevant are the ones that survive.
+ * The facts to send with this question: everything the matter holds while it
+ * holds few, and the ones that bear on the question once it holds many.
+ *
+ * Facts Mike has suggested but nobody has looked at yet are deliberately left
+ * out: a suggestion is not a fact until someone says it is.
  */
 export async function loadProjectMemories(
   db: Db,
   projectId: string | null | undefined,
-): Promise<ProjectMemory[]> {
-  if (!projectId) return [];
+  query = "",
+): Promise<{ memories: ProjectMemory[]; omitted: number }> {
+  if (!projectId) return { memories: [], omitted: 0 };
   try {
     const { data, error } = await db
       .from("project_memories")
-      .select("id, category, body, pinned, source_document_id, source_page")
+      .select(
+        "id, category, body, pinned, source_document_id, source_page, embedding",
+      )
       .eq("project_id", projectId)
       .eq("status", "accepted")
       .is("superseded_by", null)
       .order("pinned", { ascending: false })
       .order("created_at", { ascending: false })
-      .limit(MEMORY_PROMPT_LIMIT);
-    if (error || !data) return [];
-    return data as ProjectMemory[];
+      .limit(MEMORY_READ_LIMIT);
+    if (error || !data) return { memories: [], omitted: 0 };
+
+    const rows = (data as unknown as (Omit<ProjectMemory, "embedding"> & {
+      embedding: unknown;
+    })[]).map((row) => ({
+      ...row,
+      embedding: parseEmbedding(row.embedding),
+    }));
+
+    // Small matters send everything, so there is nothing to pick and no reason
+    // to spend anything working out what is relevant.
+    if (rows.length <= SEND_EVERYTHING_BELOW) {
+      return { memories: rows, omitted: 0 };
+    }
+
+    // Facts written before fingerprints existed, or while the model was down,
+    // are filled in behind this answer rather than holding it up.
+    const missing = rows
+      .filter((row) => !row.embedding)
+      .map((row) => ({ id: row.id, body: row.body }));
+    if (missing.length > 0) void backfillMemoryFingerprints(db, missing);
+
+    const queryEmbedding = query.trim() ? await embedQuery(query) : null;
+    const { chosen, omitted } = selectMemoriesForQuery(
+      rows,
+      query,
+      queryEmbedding,
+    );
+    return { memories: chosen, omitted };
   } catch {
-    return [];
+    return { memories: [], omitted: 0 };
   }
 }
 
-/** Both halves of what the assistant is told, loaded together. */
+/**
+ * Both halves of what the assistant is told, loaded together. `query` is what
+ * was just asked, and is used only to decide which facts are worth sending on a
+ * matter that has more than fit.
+ */
 export async function loadProjectContext(
   db: Db,
   projectId: string | null | undefined,
-): Promise<{ overview: string | null; memories: ProjectMemory[] }> {
-  const [overview, memories] = await Promise.all([
+  query = "",
+): Promise<{
+  overview: string | null;
+  memories: ProjectMemory[];
+  omitted: number;
+}> {
+  const [overview, facts] = await Promise.all([
     loadProjectOverview(db, projectId),
-    loadProjectMemories(db, projectId),
+    loadProjectMemories(db, projectId, query),
   ]);
-  return { overview, memories };
+  return { overview, memories: facts.memories, omitted: facts.omitted };
 }
 
 /** The remembered facts as plain text, grouped and headed. */
@@ -145,6 +180,17 @@ function formatMemories(memories: ProjectMemory[]): string {
   return lines.join("\n");
 }
 
+/** Said plainly, so the assistant does not assume it has been told everything. */
+function omittedNote(omitted: number): string {
+  if (omitted <= 0) return "";
+  return (
+    `This matter holds ${omitted} further remembered fact${omitted === 1 ? "" : "s"} ` +
+    "that are not shown here, because only the ones bearing on this question were " +
+    "sent. If the answer turns on something that may be among them, say so rather " +
+    "than assuming the list is complete.\n"
+  );
+}
+
 /**
  * The overview and the remembered facts as they appear in the assistant's
  * system prompt, fenced so the model can tell the lawyers' own standing
@@ -155,6 +201,7 @@ export function caseOverviewPromptSection(
   overview: string | null,
   nonce: string,
   memories: ProjectMemory[] = [],
+  omitted = 0,
 ): string {
   const facts = formatMemories(memories);
   if (!overview && !facts) return "";
@@ -167,7 +214,6 @@ export function caseOverviewPromptSection(
     );
   }
 
-  const truncated = memories.length >= MEMORY_PROMPT_LIMIT;
   return (
     "\n\nCASE OVERVIEW:\n" +
     "Standing instructions for this matter, and the facts it has remembered so far, " +
@@ -175,11 +221,7 @@ export function caseOverviewPromptSection(
     "including when drafting. They are background, not evidence: never cite them as " +
     "a document, and where a remembered fact and an actual document disagree, the " +
     "document wins and you should say so.\n" +
-    (truncated
-      ? "This matter has more remembered facts than fit here; the ones shown are " +
-        "the pinned and the most recent. Say so if the answer turns on something " +
-        "that may not be listed.\n"
-      : "") +
+    omittedNote(omitted) +
     spotlightCaseOverview(parts.join("\n"), nonce)
   );
 }
@@ -192,6 +234,7 @@ export function caseOverviewPromptSection(
 export function caseOverviewBackground(
   overview: string | null,
   memories: ProjectMemory[] = [],
+  omitted = 0,
 ): string {
   const facts = formatMemories(memories);
   if (!overview && !facts) return "";
@@ -202,6 +245,7 @@ export function caseOverviewBackground(
     "Background on this matter, written by the lawyers working on it. Use it to " +
     "understand who the parties are and what the reader is trying to achieve. It " +
     "is not one of the passages and must never be cited as a document:\n" +
-    `${parts.join("\n\n")}\n\n`
+    `${parts.join("\n\n")}\n\n` +
+    omittedNote(omitted)
   );
 }

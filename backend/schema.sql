@@ -2273,3 +2273,13 @@ create index if not exists idx_project_memories_accepted
 -- the facts are still listed and can be removed.
 alter table public.projects
   add column if not exists auto_remember boolean not null default false;
+-- A fingerprint of each remembered fact's meaning, so that once a matter has
+-- collected more facts than fit comfortably in every question, the ones sent
+-- can be the ones that bear on what was actually asked.
+--
+-- Computed on our own machine by the same small local model used for document
+-- search (bge-small-en-v1.5, 384 dimensions). Nothing is sent outside for this.
+create extension if not exists vector;
+
+alter table public.project_memories
+  add column if not exists embedding vector(384);

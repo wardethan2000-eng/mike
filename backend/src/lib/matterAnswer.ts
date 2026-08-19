@@ -79,10 +79,11 @@ export async function answerMatter(
   // The matter's standing instructions, so the answer knows which side the
   // reader is on. It shapes how the passages are read; it is never a source
   // in its own right.
-  const caseContext = await loadProjectContext(db, params.projectId);
+  const caseContext = await loadProjectContext(db, params.projectId, question);
   const background = caseOverviewBackground(
     caseContext.overview,
     caseContext.memories,
+    caseContext.omitted,
   );
   const model = resolveModel(params.model, DEFAULT_MAIN_MODEL);
   const answer = await completeText({

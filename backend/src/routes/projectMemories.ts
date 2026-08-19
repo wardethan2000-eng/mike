@@ -12,6 +12,7 @@ import { requireAuth } from "../middleware/auth";
 import { createServerSupabase } from "../lib/supabase";
 import { checkProjectAccess } from "../lib/access";
 import { safeErrorLog } from "../lib/safeError";
+import { fingerprintMemory } from "../lib/memoryEmbedding";
 import {
     MEMORY_CATEGORIES,
     MEMORY_BODY_MAX_CHARS,
@@ -147,6 +148,9 @@ projectMemoriesRouter.post("/", requireAuth, async (req, res) => {
         console.error("[project-memories] create project memory", safeErrorLog(error));
         return void res.status(500).json({ detail: "Could not save the fact." });
     }
+    // Written behind the answer: a fact is saved whether or not the model that
+    // works out what it is about happens to be up.
+    void fingerprintMemory(db, (data as unknown as MemoryRow).id, body);
     res.status(201).json(data);
 });
 
@@ -190,6 +194,9 @@ projectMemoriesRouter.patch("/:memoryId", requireAuth, async (req, res) => {
     if (error || !data) {
         console.error("[project-memories] update project memory", safeErrorLog(error));
         return void res.status(404).json({ detail: "That fact is no longer there." });
+    }
+    if (typeof updates.body === "string") {
+        void fingerprintMemory(db, memoryId, updates.body);
     }
     res.json(data);
 });
@@ -258,6 +265,7 @@ projectMemoriesRouter.post("/:memoryId/supersede", requireAuth, async (req, res)
         return void res.status(500).json({ detail: "Could not save the new wording." });
     }
 
+    void fingerprintMemory(db, replacement.id, body);
     res.status(201).json(replacement);
 });
 
@@ -299,6 +307,11 @@ projectMemoriesRouter.post("/:memoryId/accept", requireAuth, async (req, res) =>
             .status(404)
             .json({ detail: "That suggestion is no longer there." });
     }
+    void fingerprintMemory(
+        db,
+        memoryId,
+        (data as unknown as MemoryRow).body,
+    );
     res.json(data);
 });
 
