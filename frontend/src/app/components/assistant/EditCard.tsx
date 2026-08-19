@@ -198,6 +198,9 @@ export function EditCard({
     const [localStatus, setLocalStatus] = useState<
         "pending" | "accepted" | "rejected"
     >(annotation.status);
+    // Once a change is settled the card shrinks to a single line. Clicking
+    // that line opens it again; the choice is remembered per card.
+    const [expandedAfterResolve, setExpandedAfterResolve] = useState(false);
     // External override (from a bulk resolve) takes precedence over the
     // card's own click-driven state.
     const status = resolvedStatus ?? localStatus;
@@ -208,7 +211,13 @@ export function EditCard({
         setLocalStatus(annotation.status);
     }, [annotation.edit_id, annotation.status, busy]);
 
+    // A different edit in the same slot starts collapsed again.
+    useEffect(() => {
+        setExpandedAfterResolve(false);
+    }, [annotation.edit_id]);
+
     const resolved = status !== "pending";
+    const collapsed = resolved && !expandedAfterResolve;
     // True while an accept/reject request for any edit on this card's
     // document is in flight — triggered here, in DocPanel, or in the
     // bulk bar. Disables the buttons so the user can't race resolutions.
@@ -273,6 +282,12 @@ export function EditCard({
             changeNumber={changeNumber}
             status={status}
             className={`${RESPONSE_GLASS_SURFACE} p-2`}
+            collapsed={collapsed}
+            onToggleCollapsed={
+                resolved
+                    ? () => setExpandedAfterResolve((open) => !open)
+                    : undefined
+            }
             acceptAction={{
                 label: status === "accepted" ? "Accepted" : "Accept",
                 onClick: () => handle("accept"),

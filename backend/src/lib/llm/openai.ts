@@ -7,6 +7,12 @@ import type {
   StreamChatResult,
 } from "./types";
 import { createRawLlmStreamRecorder, logRawLlmStream } from "./rawStreamLog";
+import {
+  RESUME_INSTRUCTION,
+  RunBudget,
+  wrapUpInstruction,
+  type RunStopReason,
+} from "./runBudget";
 
 const OPENAI_RESPONSES_URL = "https://api.openai.com/v1/responses";
 const MAX_OUTPUT_TOKENS = 16384;
@@ -204,6 +210,18 @@ async function createResponse(params: {
   return response;
 }
 
+/**
+ * OpenAI's Responses API keeps the transcript server-side and we chain to it
+ * with previous_response_id, so a resume only needs the id, whatever input is
+ * still pending, and a running log used to estimate how big the turn has got.
+ */
+type OpenAIResumeTranscript = {
+  input: ResponseInputItem[];
+  previousResponseId?: string;
+  needsCourtlistenerCitationReminder: boolean;
+  sizingLog: unknown[];
+};
+
 export async function streamOpenAI(
   params: StreamChatParams,
 ): Promise<StreamChatResult> {
@@ -216,21 +234,55 @@ export async function streamOpenAI(
     apiKeys,
     enableThinking,
   } = params;
-  const maxIter = params.maxIterations ?? 10;
+  const budget = new RunBudget(
+    params.budget,
+    params.resumeState?.iterationsUsed ?? 0,
+  );
   const key = apiKey(apiKeys?.openai);
   const responseTools = toResponseTools(tools);
-  let input = toResponseInput(params.messages);
-  let previousResponseId: string | undefined;
+  const resumed = params.resumeState
+    ? (params.resumeState.transcript as OpenAIResumeTranscript)
+    : null;
+  const baseMessages = params.resumeState?.baseMessages ?? params.messages;
+  let input: ResponseInputItem[] = resumed
+    ? [
+        ...resumed.input,
+        { role: "user", content: RESUME_INSTRUCTION } as ResponseInputItem,
+      ]
+    : toResponseInput(params.messages);
+  let previousResponseId: string | undefined = resumed?.previousResponseId;
+  const sizingLog: unknown[] = resumed ? [...resumed.sizingLog] : [];
   let fullText = "";
-  let needsCourtlistenerCitationReminder = false;
+  let needsCourtlistenerCitationReminder =
+    resumed?.needsCourtlistenerCitationReminder ?? false;
+  let runStopReason: RunStopReason = "complete";
+  // The final round after a budget runs out: tools off, answer required.
+  let wrappingUp = false;
   const rawStreamRecorder = createRawLlmStreamRecorder({
     provider: "openai",
     model,
   });
 
   try {
-    for (let iter = 0; iter < maxIter; iter++) {
+    for (let iter = 0; ; iter++) {
       throwIfAborted(params.abortSignal);
+      sizingLog.push(input);
+      if (!wrappingUp) {
+        const stop = budget.checkBeforeRound(sizingLog);
+        if (stop) {
+          runStopReason = stop;
+          wrappingUp = true;
+          input = [
+            ...input,
+            {
+              role: "user",
+              content: wrapUpInstruction(stop, budget.repeatedToolName),
+            } as ResponseInputItem,
+          ];
+        } else {
+          budget.startRound();
+        }
+      }
       const response = await createResponse({
         model,
         instructions: responseInstructions(
@@ -238,7 +290,7 @@ export async function streamOpenAI(
           needsCourtlistenerCitationReminder,
         ),
         input,
-        tools: responseTools,
+        tools: wrappingUp ? undefined : responseTools,
         stream: true,
         previousResponseId,
         reasoningSummary: !!enableThinking,
@@ -340,9 +392,16 @@ export async function streamOpenAI(
       if (sawReasoning) callbacks.onReasoningBlockEnd?.();
       throwIfAborted(params.abortSignal);
 
+      // The wrap-up round is always the last one.
+      if (wrappingUp) {
+        input = [];
+        break;
+      }
+
       if (!toolCalls.length || !runTools) {
         break;
       }
+      budget.noteToolCalls(toolCalls);
 
       if (toolCalls.some(shouldAppendCourtlistenerCitationReminder)) {
         needsCourtlistenerCitationReminder = true;
@@ -358,12 +417,34 @@ export async function streamOpenAI(
     }
 
     await rawStreamRecorder?.flush("completed");
-    return { fullText };
+    const stats = budget.stats();
+    if (runStopReason === "complete") {
+      return { fullText, stopReason: runStopReason, stats };
+    }
+    const transcript: OpenAIResumeTranscript = {
+      input,
+      previousResponseId,
+      needsCourtlistenerCitationReminder,
+      sizingLog,
+    };
+    return {
+      fullText,
+      stopReason: runStopReason,
+      stats,
+      resumeState: {
+        provider: "openai",
+        model,
+        baseMessages,
+        transcript,
+        iterationsUsed: stats.iterations,
+      },
+    };
   } catch (error) {
     await rawStreamRecorder?.flush("error", error);
     throw error;
   }
 }
+
 
 export async function completeOpenAIText(params: {
   model: string;

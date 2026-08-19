@@ -253,9 +253,12 @@ export function useAssistantChat({
         AssistantEvent,
         { type: "ask_inputs_response" }
       >;
+      /** Carry on an answer that stopped searching before it finished. */
+      resume?: { token: string; condense?: boolean };
     },
   ): Promise<string | null> => {
-    if (!message.content.trim()) return null;
+    const resume = opts?.resume ?? null;
+    if (!resume && !message.content.trim()) return null;
 
     setIsResponseLoading(true);
 
@@ -265,18 +268,24 @@ export function useAssistantChat({
       lastMessage.role === "user" &&
       lastMessage.content === message.content;
 
-    const apiMessagesForTurn: Message[] = isMessageAlreadyAdded
+    const apiMessagesForTurn: Message[] = resume
       ? messages
-      : [...messages, message];
+      : isMessageAlreadyAdded
+        ? messages
+        : [...messages, message];
     const askInputsResponseEvent = opts?.askInputsResponse ?? null;
     const optimisticResponseEvent = askInputsResponseEvent;
-    const userInputThinkingEvent = optimisticResponseEvent
+    // Both an answered ask_inputs prompt and a resumed turn continue the
+    // assistant message that is already on screen rather than starting a
+    // new one.
+    const continuesLastAnswer = !!optimisticResponseEvent || !!resume;
+    const userInputThinkingEvent = continuesLastAnswer
       ? ({
           type: "thinking" as const,
           isStreaming: true,
         } satisfies AssistantEvent)
       : null;
-    const displayMessages: Message[] = optimisticResponseEvent
+    const displayMessages: Message[] = continuesLastAnswer
       ? (() => {
           const updated = messages.map((item) => ({
             ...item,
@@ -285,11 +294,15 @@ export function useAssistantChat({
           for (let i = updated.length - 1; i >= 0; i--) {
             const current = updated[i];
             if (current.role !== "assistant") continue;
+            // The "keep going" card has been pressed; take it away.
+            const kept = (current.events ?? []).filter(
+              (event) => !(resume && event.type === "paused"),
+            );
             updated[i] = {
               ...current,
               events: [
-                ...(current.events ?? []),
-                optimisticResponseEvent,
+                ...kept,
+                ...(optimisticResponseEvent ? [optimisticResponseEvent] : []),
                 ...(userInputThinkingEvent ? [userInputThinkingEvent] : []),
               ],
             };
@@ -300,7 +313,7 @@ export function useAssistantChat({
       : apiMessagesForTurn;
 
     setMessages(
-      optimisticResponseEvent
+      continuesLastAnswer
         ? displayMessages
         : [
             ...displayMessages,
@@ -315,7 +328,7 @@ export function useAssistantChat({
 
     let streamedChatId: string | null = null;
 
-    eventsRef.current = optimisticResponseEvent
+    eventsRef.current = continuesLastAnswer
       ? ([...displayMessages]
           .reverse()
           .find((item) => item.role === "assistant")?.events ?? [])
@@ -363,6 +376,7 @@ export function useAssistantChat({
             attached_documents:
               attachedDocs.length > 0 ? attachedDocs : undefined,
             ask_inputs_response: opts?.askInputsResponse,
+            resume: resume ?? undefined,
             signal: controller.signal,
           })
         : streamChat({
@@ -370,6 +384,7 @@ export function useAssistantChat({
             chat_id: chatId,
             model,
             ask_inputs_response: opts?.askInputsResponse,
+            resume: resume ?? undefined,
             signal: controller.signal,
           }));
 
@@ -550,6 +565,21 @@ export function useAssistantChat({
                 events: snapshot,
               }));
               pushThinkingPlaceholder();
+              continue;
+            }
+
+            if (data.type === "paused") {
+              finalizeStreamingContent();
+              finalizeStreamingReasoning();
+              pushEvent({
+                type: "paused",
+                reason: data.reason,
+                message:
+                  typeof data.message === "string" ? data.message : "Paused.",
+                resume_token: data.resume_token,
+                iterations:
+                  typeof data.iterations === "number" ? data.iterations : 0,
+              });
               continue;
             }
 
@@ -1347,12 +1377,27 @@ export function useAssistantChat({
     return newChatId;
   };
 
+  /**
+   * "Keep going" on an answer that ran out of research budget. `condense`
+   * summarises the work so far first, for answers that got too big to
+   * carry on as they are.
+   */
+  const continueRun = async (args: {
+    token: string;
+    condense?: boolean;
+  }): Promise<string | null> =>
+    handleChat(
+      { role: "user", content: "" },
+      { resume: { token: args.token, condense: args.condense } },
+    );
+
   return {
     messages,
     isResponseLoading,
     setIsResponseLoading,
     isLoadingCitations,
     handleChat,
+    continueRun,
     handleNewChat,
     setMessages,
     cancel,

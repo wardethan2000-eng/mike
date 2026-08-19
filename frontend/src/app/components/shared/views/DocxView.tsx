@@ -9,6 +9,7 @@ import {
     highlightDocxQuote,
 } from "./highlightDocxQuote";
 import type { CitationQuote } from "../types";
+import { SelectionQuoteButton } from "@/app/components/assistant/SelectionQuoteButton";
 
 interface Props {
     documentId: string;
@@ -80,6 +81,8 @@ interface Props {
      * parent can refresh the version badge / metadata.
      */
     onSaved?: (versionId: string) => void;
+    /** Highlighted text handed to the chat box by the "Ask about this" button. */
+    onQuote?: (text: string) => void;
 }
 
 function findEditElement(
@@ -217,6 +220,7 @@ export function DocxView({
     rounded = true,
     editable = false,
     onSaved,
+    onQuote,
 }: Props) {
     const scrollRef = useRef<HTMLDivElement>(null);
     const containerRef = useRef<HTMLDivElement>(null);
@@ -772,6 +776,12 @@ export function DocxView({
                     </div>
                 )}
                 <div ref={containerRef} className="docx-view-container" />
+                {onQuote && (
+                    <SelectionQuoteButton
+                        containerRef={containerRef}
+                        onQuote={onQuote}
+                    />
+                )}
             </div>
         </div>
     );

@@ -194,6 +194,17 @@ export type AssistantEvent =
                 }
           )[];
       }
+    | {
+          /**
+           * The answer stopped searching before it was finished. Shown as a
+           * card offering to carry on from where it left off.
+           */
+          type: "paused";
+          reason: "iterations" | "time" | "context" | "loop";
+          message: string;
+          resume_token: string;
+          iterations: number;
+      }
     | { type: "thinking"; isStreaming?: boolean }
     | {
           type: "doc_read";
@@ -408,7 +419,37 @@ export type CaseCitation = {
  * anchors. Case citations anchor to a CourtListener cluster and include a
  * quoted opinion passage.
  */
-export type Citation = DocumentCitation | CaseCitation;
+export type LegislationCitationQuote = {
+    quote: string;
+    verification?: {
+        verified: boolean;
+        source_excerpt?: string;
+        start_char?: number;
+        end_char?: number;
+    };
+};
+
+/**
+ * A citation to a statute section retrieved through a law lookup tool. It
+ * carries its own text via `document`, so it opens in the reading panel the
+ * same way a case does.
+ */
+export type LegislationCitation = {
+    type: "citation_data";
+    kind: "legislation";
+    ref: number;
+    leg_id: string;
+    title?: string | null;
+    url?: string | null;
+    quotes: LegislationCitationQuote[];
+    verified?: boolean;
+    document?: PanelDocument;
+};
+
+export type Citation =
+    | DocumentCitation
+    | CaseCitation
+    | LegislationCitation;
 
 export function panelDocumentType(filename: string): PanelDocumentType {
     const extension = filename.split(".").pop()?.toLowerCase();
@@ -430,7 +471,7 @@ export function panelDocumentFromCitation(
   if (citation.document) {
     if (!includeQuotes) return { ...citation.document, quotes: [] };
     const citationQuotes =
-      citation.kind === "case"
+      citation.kind === "case" || citation.kind === "legislation"
         ? citation.quotes
         : getDocumentCitationQuotes(citation);
     return {
@@ -499,6 +540,15 @@ export function panelDocumentFromCitation(
                       },
                   }))
                 : [],
+        };
+    }
+    if (citation.kind === "legislation") {
+        return {
+            document_id: `legislation:${citation.leg_id}`,
+            title: citation.title || citation.leg_id,
+            type: "legislation",
+            metadata: [],
+            quotes: [],
         };
     }
     const quotes = getDocumentCitationQuotes(citation);
@@ -582,7 +632,7 @@ function formatCellLocatorReadable(sheet?: string, cell?: string): string {
 export function getCitationCells(
     a: Citation,
 ): { sheet?: string; cell?: string }[] {
-    if (a.kind === "case") return [];
+    if (a.kind === "case" || a.kind === "legislation") return [];
     return getDocumentCitationQuotes(a)
         .filter((q) => q.cell || q.sheet)
         .map((q) => ({ sheet: q.sheet, cell: q.cell }));
@@ -616,7 +666,7 @@ export function expandDocumentQuoteEntry(entry: {
 export function getDocumentCitationQuotes(
     a: Citation,
 ): DocumentCitationQuote[] {
-    if (a.kind === "case") return [];
+    if (a.kind === "case" || a.kind === "legislation") return [];
     if (Array.isArray(a.quotes) && a.quotes.length) {
         return a.quotes.filter((entry) => entry.quote.trim().length > 0);
     }
@@ -629,7 +679,7 @@ export function getDocumentCitationQuotes(
  * cross-page citation with page "N-M" and a `[[PAGE_BREAK]]` split yields two.
  */
 export function expandCitationToEntries(a: Citation): CitationQuote[] {
-    if (a.kind === "case") return [];
+    if (a.kind === "case" || a.kind === "legislation") return [];
     return getDocumentCitationQuotes(a).flatMap(expandDocumentQuoteEntry);
 }
 
@@ -639,6 +689,7 @@ export function expandCitationToEntries(a: Citation): CitationQuote[] {
  * callers join with `.filter(Boolean)` so the locator is simply omitted.
  */
 export function formatCitationPage(a: Citation): string {
+    if (a.kind === "legislation") return a.title || a.leg_id;
     if (a.kind === "case") {
         return a.citation || a.case_name || `Case ${a.cluster_id}`;
     }
@@ -668,6 +719,7 @@ export function formatCitationQuotePage(
     page: number | string,
     quote?: DocumentCitationQuote,
 ): string {
+    if (a.kind === "legislation") return "";
     if (a.kind !== "case" && isSpreadsheetFilename(a.filename)) {
         return formatCellLocatorReadable(quote?.sheet, quote?.cell);
     }
@@ -684,6 +736,11 @@ export function cleanCitationQuoteText(_a: Citation, rawQuote: string): string {
 
 /** Produce a reader-friendly version of the quote (replaces [[PAGE_BREAK]] with "..."). */
 export function displayCitationQuote(a: Citation): string {
+    if (a.kind === "legislation") {
+        return a.quotes
+            .map((q) => q.quote.replaceAll(PAGE_BREAK_SENTINEL, "..."))
+            .join(" / ");
+    }
     if (a.kind === "case") {
         return a.quotes
             .map((q) => q.quote.replaceAll(PAGE_BREAK_SENTINEL, "..."))

@@ -117,7 +117,7 @@ export default function ModelPreferencesPage() {
                         value={
                             optimisticValues.tabularModel ??
                             profile?.tabularModel ??
-                            "gemini-3-flash-preview"
+                            "ollama/glm-5.2"
                         }
                         options={[...MODELS, ...ollamaModels]}
                         apiKeys={profile?.apiKeys}

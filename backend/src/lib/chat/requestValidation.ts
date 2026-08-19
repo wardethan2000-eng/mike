@@ -53,6 +53,25 @@ export function parseOptionalChatId(
   return parseNonEmptyString(value, "chat_id must be a non-empty string");
 }
 
+export type ChatResumeRequest = {
+  token: string;
+  /** Summarise the work so far instead of carrying the whole transcript. */
+  condense: boolean;
+};
+
+export function parseOptionalResume(
+  value: unknown,
+): ValidationResult<ChatResumeRequest | null> {
+  if (value === undefined || value === null) return { ok: true, value: null };
+  if (!isRecord(value)) return { ok: false, detail: "resume must be an object" };
+  const token = parseNonEmptyString(
+    value.token,
+    "resume.token must be a non-empty string",
+  );
+  if (!token.ok) return token;
+  return { ok: true, value: { token: token.value, condense: value.condense === true } };
+}
+
 export function parseOptionalModel(
   value: unknown,
 ): ValidationResult<string | undefined> {

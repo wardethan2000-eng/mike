@@ -22,6 +22,9 @@ import {
     parseOptionalChatId,
     parseOptionalModel,
     parseOptionalProjectId,
+    parseOptionalResume,
+    condenseForContinuation,
+    takeResumeState,
     createReservedAssistantMessageUpdater,
     openAssistantSse,
     reserveAssistantMessage,
@@ -386,14 +389,27 @@ chatRouter.post("/", requireAuth, async (req, res) => {
             .status(400)
             .json({ detail: parsedAskInputsResponse.detail });
     }
+    const parsedResume = parseOptionalResume(body.resume);
+    if (!parsedResume.ok) {
+        return void res.status(400).json({ detail: parsedResume.detail });
+    }
+    const resume = parsedResume.value;
     const messages = parsedMessages.value;
     const chat_id = parsedChatId.value;
     const project_id = parsedProjectId.value.projectId;
     const model = parsedModel.value;
     const askInputsResponse = parsedAskInputsResponse.value;
+    if (resume && !chat_id) {
+        return void res
+            .status(400)
+            .json({ detail: "resume requires chat_id" });
+    }
+    // Continuing a paused turn adds to the answer that is already on screen,
+    // exactly like answering an ask_inputs prompt does.
+    const appendToPrevious = !!askInputsResponse || !!resume;
     // Reserve a stable assistant identity before streaming. This lets clients
     // associate streamed UI with the same durable message after a reload.
-    const assistantMessageId = askInputsResponse ? null : randomUUID();
+    const assistantMessageId = appendToPrevious ? null : randomUUID();
 
     devLog("[chat/stream] incoming request", {
         userId,
@@ -471,7 +487,7 @@ chatRouter.post("/", requireAuth, async (req, res) => {
             chatId,
             askInputsResponse,
         );
-    } else if (lastUser) {
+    } else if (lastUser && !resume) {
         await db.from("chat_messages").insert({
             chat_id: chatId,
             role: "user",
@@ -506,7 +522,19 @@ chatRouter.post("/", requireAuth, async (req, res) => {
         legal_research_us: legalResearchUs,
         title_model: titleModel,
     } = await getUserModelSettings(userId, db);
-    const apiMessages = buildMessages(
+
+    // A paused turn is held in memory, so it does not survive a backend
+    // restart. Say so plainly rather than silently starting from scratch.
+    let resumeState = resume
+        ? takeResumeState({ token: resume.token, userId, chatId })
+        : null;
+    if (resume && !resumeState) {
+        return void res.status(409).json({
+            detail: "This answer can no longer be continued. Ask the question again.",
+        });
+    }
+
+    let apiMessages = buildMessages(
         enrichedMessages,
         docAvailability,
         undefined,
@@ -514,6 +542,28 @@ chatRouter.post("/", requireAuth, async (req, res) => {
         legalResearchUs,
         nonce,
     );
+
+    // "Condense and keep going": swap the whole working transcript for a
+    // written summary of it, then run on from there with room to spare.
+    if (resumeState && resume?.condense) {
+        try {
+            const condensed = await condenseForContinuation({
+                state: resumeState,
+                apiKeys,
+            });
+            apiMessages = [apiMessages[0], ...condensed];
+            resumeState = null;
+        } catch (error) {
+            console.error(
+                "[chat/stream] failed to condense paused turn",
+                safeErrorLog(error),
+            );
+            return void res.status(500).json({
+                detail: "Could not shorten this answer to continue it.",
+            });
+        }
+    }
+    const runModel = resumeState ? resumeState.model : model;
 
     const workflowStore = await buildWorkflowStore(userId, userEmail, db);
 
@@ -566,7 +616,7 @@ chatRouter.post("/", requireAuth, async (req, res) => {
         );
 
         const shouldGenerateTitle =
-            !chatTitle && !!lastUser?.content && !askInputsResponse;
+            !chatTitle && !!lastUser?.content && !appendToPrevious;
         const titleMessage = lastUser
             ? [
                   lastUser.content,
@@ -616,11 +666,13 @@ chatRouter.post("/", requireAuth, async (req, res) => {
             write,
             workflowStore,
             includeResearchTools: legalResearchUs,
-            model,
+            model: runModel,
             apiKeys,
             signal: stream.signal,
             projectId: resolvedProjectId,
             nonce,
+            chatId,
+            resumeState,
             // This route first makes the advertised assistant ID durable.
             // It emits [DONE] only after the reserved row has been populated.
             emitDone: false,
@@ -632,12 +684,15 @@ chatRouter.post("/", requireAuth, async (req, res) => {
         });
 
         const persistedEvents = stripTransientAssistantEvents(events);
-        if (askInputsResponse) {
+        if (appendToPrevious) {
             await appendAssistantEventsToLastAssistantMessage(
                 db,
                 chatId,
                 persistedEvents,
                 citations,
+                "chat_messages",
+                // The old "keep going" card has been acted on.
+                resume ? ["paused"] : undefined,
             );
         } else {
             const saveError = await updateReservedAssistantMessage(
@@ -712,13 +767,13 @@ chatRouter.post("/", requireAuth, async (req, res) => {
                     buildCitations: (fullText, events) =>
                         extractCitations(fullText, docIndex, events),
                 });
-                const saveError = askInputsResponse
+                const saveError = appendToPrevious
                     ? null
                     : await updateReservedAssistantMessage(
                           partial.events.length ? partial.events : null,
                           partial.citations.length ? partial.citations : null,
                       );
-                if (askInputsResponse) {
+                if (appendToPrevious) {
                     await appendAssistantEventsToLastAssistantMessage(
                         db,
                         chatId,
@@ -749,13 +804,13 @@ chatRouter.post("/", requireAuth, async (req, res) => {
                 docIndex,
                 errorEvents,
             );
-            const saveError = askInputsResponse
+            const saveError = appendToPrevious
                 ? null
                 : await updateReservedAssistantMessage(
                       errorEvents.length ? errorEvents : null,
                       citations.length ? citations : null,
                   );
-            if (askInputsResponse) {
+            if (appendToPrevious) {
                 await appendAssistantEventsToLastAssistantMessage(
                     db,
                     chatId,

@@ -1,4 +1,6 @@
 import { type DocIndex, resolveDoc } from "./types";
+import { normalizeLegId, type LegislationRecord } from "./tools/legislationTurnState";
+import { verifyQuoteAgainstSource } from "./verifyCitations";
 import {
   normalizeCaseDocument,
   sourceDocumentType,
@@ -41,7 +43,17 @@ type ParsedCaseCitation = {
   }[];
 };
 
-type ParsedCitation = ParsedDocumentCitation | ParsedCaseCitation;
+type ParsedLegislationCitation = {
+  kind: "legislation";
+  ref: number;
+  leg_id: string;
+  quotes: { quote: string }[];
+};
+
+type ParsedCitation =
+  | ParsedDocumentCitation
+  | ParsedCaseCitation
+  | ParsedLegislationCitation;
 
 function normalizeCitation(raw: unknown): ParsedCitation | null {
   if (!raw || typeof raw !== "object") return null;
@@ -76,6 +88,21 @@ function normalizeCitation(raw: unknown): ParsedCitation | null {
       quotes.push({ opinionId: null, type: null, author: null, quote });
     }
     return { kind: "case", ref, cluster_id: Math.floor(rawClusterId), quotes };
+  }
+
+  const legId =
+    typeof c.leg_id === "string"
+      ? c.leg_id
+      : typeof c.legId === "string"
+        ? c.legId
+        : null;
+  if (legId && legId.trim()) {
+    const legQuotes = normalizeLegislationCitationQuotes(c);
+    if (!legQuotes.length) {
+      if (typeof quote !== "string" || !quote) return null;
+      legQuotes.push({ quote });
+    }
+    return { kind: "legislation", ref, leg_id: legId.trim(), quotes: legQuotes };
   }
 
   if (typeof c.doc_id !== "string") return null;
@@ -178,6 +205,22 @@ function normalizeCaseCitationQuotes(c: Record<string, unknown>) {
     );
 }
 
+function normalizeLegislationCitationQuotes(
+  c: Record<string, unknown>,
+): { quote: string }[] {
+  if (!Array.isArray(c.quotes)) return [];
+  return c.quotes
+    .slice(0, 3)
+    .map((raw) => {
+      if (!raw || typeof raw !== "object" || Array.isArray(raw)) return null;
+      const row = raw as Record<string, unknown>;
+      const text = typeof row.quote === "string" ? row.quote : row.text;
+      if (typeof text !== "string" || !text.trim()) return null;
+      return { quote: text };
+    })
+    .filter((q): q is { quote: string } => !!q);
+}
+
 // ---------------------------------------------------------------------------
 // Citation block constants and parsers
 // ---------------------------------------------------------------------------
@@ -275,11 +318,83 @@ type CasesByClusterId = Map<number, {
   dateFiled: string | null;
 }>;
 
+function legislationHtml(text: string): string {
+  const escaped = text
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;");
+  return escaped
+    .split(/\n\s*\n/)
+    .map((para) => `<p>${para.trim().replace(/\n/g, "<br/>")}</p>`)
+    .filter((para) => para !== "<p></p>")
+    .join("\n");
+}
+
 export function createCitation(
   citation: ParsedCitation,
   docIndex: DocIndex,
   casesByClusterId?: CasesByClusterId,
+  legById?: Map<string, LegislationRecord>,
 ) {
+  if (citation.kind === "legislation") {
+    const legId = normalizeLegId(citation.leg_id);
+    const record = legById?.get(legId);
+    const subId = `legislation:${legId}`;
+    const title = record?.label ?? citation.leg_id;
+    // Legislation has no stored document id, so it never reaches the streaming
+    // verifier. Match each quote against the statute text we captured this turn
+    // right here — that drives the same green "verified" badge and the panel
+    // highlight that case quotes get, and swaps in the exact source wording
+    // when the model's quote drifted.
+    const verifiedQuotes = citation.quotes.map((q) => {
+      const result = record
+        ? verifyQuoteAgainstSource(record.text, q.quote)
+        : { verified: false, needs_correction: false };
+      const { needs_correction, ...verification } = result;
+      const quote =
+        needs_correction && verification.source_excerpt
+          ? verification.source_excerpt
+          : q.quote;
+      return { quote, verification };
+    });
+    const document = {
+      document_id: subId,
+      title,
+      type: "legislation" as const,
+      metadata: record?.url ? [{ label: "Source", value: record.url }] : [],
+      actions: record?.url
+        ? [{ type: "link" as const, url: record.url, label: "Open source" }]
+        : [],
+      quotes: verifiedQuotes.map((q) => ({
+        quote: q.quote,
+        verification: q.verification,
+        target: { subdocument_id: subId },
+      })),
+      subdocuments: [
+        {
+          document_id: subId,
+          title,
+          type: "html" as const,
+          html: record ? legislationHtml(record.text) : null,
+          text: record?.text ?? null,
+        },
+      ],
+      version_id: null,
+      version_number: null,
+    };
+    return {
+      type: "citation_data",
+      kind: "legislation",
+      ref: citation.ref,
+      document,
+      leg_id: legId,
+      title,
+      url: record?.url ?? null,
+      quotes: verifiedQuotes,
+      verified: verifiedQuotes.every((q) => q.verification.verified),
+    };
+  }
+
   if (citation.kind === "case") {
     const caseRecord = casesByClusterId?.get(citation.cluster_id);
     const document = normalizeCaseDocument({

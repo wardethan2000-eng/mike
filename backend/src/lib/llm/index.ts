@@ -7,6 +7,7 @@ import type { StreamChatParams, StreamChatResult, UserApiKeys } from "./types";
 
 export * from "./types";
 export * from "./models";
+export { stopReasonLabel, defaultRunBudgetLimits } from "./runBudget";
 
 export async function streamChatWithTools(
     params: StreamChatParams,

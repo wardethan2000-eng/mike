@@ -71,6 +71,11 @@ import {
   upsertCourtlistenerCases,
   type CourtlistenerTurnState,
 } from "./courtlistenerTurnState";
+import {
+  ingestLegislationToolResult,
+  newLegislationTurnState,
+  type LegislationTurnState,
+} from "./legislationTurnState";
 
 function sourceMaterialNotice(
   sourceKind: "document" | "library_template" | "workflow_asset" | undefined,
@@ -250,6 +255,7 @@ export async function runToolCalls(
   courtlistenerState?: CourtlistenerTurnState,
   apiKeys?: import("../../llm").UserApiKeys,
   nonce?: string,
+  legislationState?: LegislationTurnState,
 ): Promise<{
   toolResults: unknown[];
   docsRead: { filename: string; document_id?: string }[];
@@ -287,6 +293,8 @@ export async function runToolCalls(
   const courtState: CourtlistenerTurnState = courtlistenerState ?? {
     casesByClusterId: new Map(),
   };
+  const legState: LegislationTurnState =
+    legislationState ?? newLegislationTurnState();
   const groupedFindInCaseSearches = toolCalls
     .filter((tc) => tc.function.name === COURTLISTENER_TOOL_NAMES.findInCase)
     .map((tc) => {
@@ -406,6 +414,8 @@ export async function runToolCalls(
         args,
         db,
       );
+      // Remember statute lookups so the assistant can cite them like cases.
+      ingestLegislationToolResult(legState, event.tool_name, content);
       toolResults.push({
         role: "tool",
         tool_call_id: tc.id,

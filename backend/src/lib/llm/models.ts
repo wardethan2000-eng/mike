@@ -30,9 +30,9 @@ export const CLAUDE_LOW_MODELS = ["claude-haiku-4-5"] as const;
 export const GEMINI_LOW_MODELS = ["gemini-3.1-flash-lite-preview"] as const;
 export const OPENAI_LOW_MODELS = ["gpt-5.4-lite"] as const;
 
-export const DEFAULT_MAIN_MODEL = "gemini-3-flash-preview";
-export const DEFAULT_TITLE_MODEL = "gemini-3.1-flash-lite-preview";
-export const DEFAULT_TABULAR_MODEL = "gemini-3-flash-preview";
+export const DEFAULT_MAIN_MODEL = "ollama/glm-5.2";
+export const DEFAULT_TITLE_MODEL = "ollama/glm-5.2";
+export const DEFAULT_TABULAR_MODEL = "ollama/glm-5.2";
 
 const ALL_MODELS = new Set<string>([
     ...CLAUDE_MAIN_MODELS,

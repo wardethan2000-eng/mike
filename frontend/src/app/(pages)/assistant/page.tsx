@@ -12,6 +12,7 @@ export default function AssistantPage() {
         messages,
         isResponseLoading,
         handleChat,
+        continueRun,
         handleNewChat,
         cancel,
         chatId,
@@ -36,6 +37,7 @@ export default function AssistantPage() {
             messages={messages}
             isResponseLoading={isResponseLoading}
             handleChat={handleChat}
+            continueRun={continueRun}
             cancel={cancel}
         />
     );

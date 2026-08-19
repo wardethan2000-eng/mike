@@ -1,10 +1,14 @@
 import {
   streamChatWithTools,
   resolveModel,
+  stopReasonLabel,
   DEFAULT_MAIN_MODEL,
   type LlmMessage,
   type OpenAIToolSchema,
+  type ResumeState,
+  type RunStopReason,
 } from "../llm";
+import { rememberResumeState } from "./runResume";
 import { safeErrorMessage } from "../safeError";
 import { createServerSupabase } from "../supabase";
 import { buildUserMcpTools, type McpToolEvent } from "../mcpConnectors";
@@ -33,6 +37,7 @@ import {
   CITATIONS_OPEN_TAG,
 } from "./citations";
 import { runToolCalls } from "./tools/toolDispatcher";
+import { newLegislationTurnState } from "./tools/legislationTurnState";
 import {
   getCachedCaseOpinionTexts,
   type CourtlistenerTurnState,
@@ -106,6 +111,18 @@ export type AssistantEvent =
       document: SourceDocument;
     }
   | { type: "content"; text: string }
+  | {
+      /**
+       * The turn stopped searching before it was finished — it ran out of
+       * research steps, time, or room. The answer above is what it had.
+       * The token lets the user pick the same turn back up.
+       */
+      type: "paused";
+      reason: Exclude<RunStopReason, "complete">;
+      message: string;
+      resume_token: string;
+      iterations: number;
+    }
   | { type: "error"; message: string };
 
 export class AssistantStreamError extends Error {
@@ -166,6 +183,10 @@ export async function runLLMStream(params: {
   signal?: AbortSignal;
   /** Let a route persist the completed turn before it signals stream success. */
   emitDone?: boolean;
+  /** Needed to park a paused turn against the right chat. */
+  chatId?: string | null;
+  /** Set to pick up a turn that paused when its research budget ran out. */
+  resumeState?: ResumeState | null;
   /**
    * If set, generate_docx will attach created docs to this project so
    * they appear in the project sidebar. Leave null for general chats —
@@ -199,6 +220,8 @@ export async function runLLMStream(params: {
     signal,
     projectId,
     nonce,
+    chatId,
+    resumeState,
   } = params;
   const researchTools = includeResearchTools ? COURTLISTENER_TOOLS : [];
   const mcpTools = await buildUserMcpTools(userId, db);
@@ -236,6 +259,7 @@ export async function runLLMStream(params: {
   const courtlistenerTurnState: CourtlistenerTurnState = {
     casesByClusterId: new Map(),
   };
+  const legislationTurnState = newLegislationTurnState();
   let fullText = "";
   let iterText = "";
   let iterVisibleText = "";
@@ -262,7 +286,12 @@ export async function runLLMStream(params: {
     if (partial.length <= streamedCitationCount) return;
     streamedCitationCount = partial.length;
     const citations = partial.map((c) =>
-      createCitation(c, docIndex, courtlistenerTurnState.casesByClusterId),
+      createCitation(
+        c,
+        docIndex,
+        courtlistenerTurnState.casesByClusterId,
+        legislationTurnState.byId,
+      ),
     );
     emitCitationStreamSnapshot("partial", citations);
   };
@@ -346,14 +375,15 @@ export async function runLLMStream(params: {
 
   const selectedModel = resolveModel(model, DEFAULT_MAIN_MODEL);
 
+  let runResult: Awaited<ReturnType<typeof streamChatWithTools>> | null = null;
   try {
     throwIfAborted(signal);
-    await streamChatWithTools({
+    runResult = await streamChatWithTools({
       model: selectedModel,
       systemPrompt,
       messages: chatMessages,
       tools: activeTools as OpenAIToolSchema[],
-      maxIterations: 10,
+      resumeState,
       apiKeys,
       enableThinking: true,
       abortSignal: signal,
@@ -430,6 +460,7 @@ export async function runLLMStream(params: {
           courtlistenerTurnState,
           apiKeys,
           nonce,
+          legislationTurnState,
         );
         throwIfAborted(signal);
         for (const r of docsRead) {
@@ -544,6 +575,25 @@ export async function runLLMStream(params: {
 
   flushText();
 
+  // The turn stopped searching before it was done. It has already written the
+  // best answer it could; tell the client so it can offer to carry on.
+  if (runResult && runResult.stopReason !== "complete" && runResult.resumeState) {
+    const resumeToken = rememberResumeState({
+      userId,
+      chatId: chatId ?? "",
+      state: runResult.resumeState,
+    });
+    const pausedEvent: AssistantEvent = {
+      type: "paused",
+      reason: runResult.stopReason,
+      message: stopReasonLabel(runResult.stopReason, runResult.stats),
+      resume_token: resumeToken,
+      iterations: runResult.stats.iterations,
+    };
+    events.push(pausedEvent);
+    write(`data: ${JSON.stringify(pausedEvent)}\n\n`);
+  }
+
   // Parse and emit citations from <CITATIONS> block
   const { citations: parsedCitations, diagnostics: citationDiagnostics } =
     parseCitationsWithDiagnostics(fullText);
@@ -553,7 +603,12 @@ export async function runLLMStream(params: {
     citations = buildCitations(fullText);
   } else {
     const rawCitations = parsedCitations.map((c) =>
-      createCitation(c, docIndex, courtlistenerTurnState.casesByClusterId),
+      createCitation(
+        c,
+        docIndex,
+        courtlistenerTurnState.casesByClusterId,
+        legislationTurnState.byId,
+      ),
     );
     // Server-side quote verification. Fetch each document's extracted source
     // text at most once per turn (memoized by doc_id), reading only bytes

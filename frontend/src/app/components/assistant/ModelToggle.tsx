@@ -46,7 +46,7 @@ export const SETTINGS_MODELS: ModelOption[] = [
     { id: "gpt-5.4-lite", label: "GPT-5.4 Lite", group: "OpenAI" },
 ];
 
-export const DEFAULT_MODEL_ID = "gemini-3-flash-preview";
+export const DEFAULT_MODEL_ID = "ollama/glm-5.2";
 
 export const ALLOWED_MODEL_IDS = new Set(MODELS.map((m) => m.id));
 

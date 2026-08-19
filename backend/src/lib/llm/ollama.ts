@@ -9,6 +9,12 @@ import type {
   LlmMessage,
   OpenAIToolSchema,
 } from "./types";
+import {
+  RESUME_INSTRUCTION,
+  RunBudget,
+  wrapUpInstruction,
+  type RunStopReason,
+} from "./runBudget";
 
 function baseUrl(): string {
   return (process.env.OLLAMA_BASE_URL?.trim() || "http://localhost:11434/v1").replace(/\/$/, "");
@@ -79,26 +85,55 @@ export async function streamOllama(
   params: StreamChatParams,
 ): Promise<StreamChatResult> {
   const { model, systemPrompt, tools = [], callbacks = {}, runTools } = params;
-  const maxIter = params.maxIterations ?? 10;
-  const messages = initialMessages(systemPrompt, params.messages);
+  const budget = new RunBudget(
+    params.budget,
+    params.resumeState?.iterationsUsed ?? 0,
+  );
+  const baseMessages = params.resumeState?.baseMessages ?? params.messages;
+  const messages: ChatMessage[] = params.resumeState
+    ? [
+        ...(params.resumeState.transcript as ChatMessage[]),
+        { role: "user", content: RESUME_INSTRUCTION },
+      ]
+    : initialMessages(systemPrompt, params.messages);
   let fullText = "";
   // Some small local models reject the `tools` param. Drop it and carry on
   // (the model just can't call tools) rather than failing the whole chat.
   let useTools = tools.length > 0;
+  let stopReason: RunStopReason = "complete";
+  // The final round after a budget runs out: tools off, answer required.
+  let wrappingUp = false;
 
-  for (let iter = 0; iter < maxIter; iter++) {
+  for (;;) {
     throwIfAborted(params.abortSignal);
+    if (!wrappingUp) {
+      const stop = budget.checkBeforeRound(messages);
+      if (stop) {
+        stopReason = stop;
+        wrappingUp = true;
+        messages.push({
+          role: "user",
+          content: wrapUpInstruction(stop, budget.repeatedToolName),
+        });
+      } else {
+        budget.startRound();
+      }
+    }
+    const roundUsesTools = useTools && !wrappingUp;
     const sendBody = () => ({
       model: modelName(model),
       messages,
-      tools: useTools ? tools : undefined,
+      tools: roundUsesTools ? tools : undefined,
       stream: true,
     });
     let response: Response;
     try {
       response = await postChat(sendBody(), params.abortSignal);
     } catch (err) {
-      if (useTools && /does not support tools/i.test(String((err as Error)?.message))) {
+      if (
+        roundUsesTools &&
+        /does not support tools/i.test(String((err as Error)?.message))
+      ) {
         useTools = false;
         response = await postChat(sendBody(), params.abortSignal);
       } else {
@@ -147,6 +182,12 @@ export async function streamOllama(
       }
     }
 
+    // The wrap-up round is always the last one, tool calls or not.
+    if (wrappingUp) {
+      messages.push({ role: "assistant", content: assistantText });
+      break;
+    }
+
     const toolCalls: NormalizedToolCall[] = [...partials.values()].map((p) => {
       let input: Record<string, unknown> = {};
       try {
@@ -158,6 +199,7 @@ export async function streamOllama(
     });
 
     if (!toolCalls.length || !runTools) break;
+    budget.noteToolCalls(toolCalls);
 
     // Echo the assistant turn (with tool_calls) then feed tool results back.
     messages.push({
@@ -178,7 +220,20 @@ export async function streamOllama(
     }
   }
 
-  return { fullText };
+  const stats = budget.stats();
+  if (stopReason === "complete") return { fullText, stopReason, stats };
+  return {
+    fullText,
+    stopReason,
+    stats,
+    resumeState: {
+      provider: "ollama",
+      model,
+      baseMessages,
+      transcript: messages,
+      iterationsUsed: stats.iterations,
+    },
+  };
 }
 
 export async function completeOllamaText(params: {

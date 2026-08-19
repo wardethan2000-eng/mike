@@ -14,6 +14,7 @@ import {
     Loader2,
 } from "lucide-react";
 import { supabase } from "@/app/lib/supabase";
+import { SelectionQuoteButton } from "./SelectionQuoteButton";
 
 const apiBase =
     process.env.NEXT_PUBLIC_API_BASE_URL ?? "http://localhost:3001";
@@ -84,10 +85,13 @@ export function RichDocxEditor({
     documentId,
     versionId,
     onSaved,
+    onQuote,
 }: {
     documentId: string;
     versionId?: string | null;
     onSaved?: (versionId: string) => void;
+    /** Highlighted text handed to the chat box by the "Ask about this" button. */
+    onQuote?: (text: string) => void;
 }) {
     const scrollRef = useRef<HTMLDivElement>(null);
     const containerRef = useRef<HTMLDivElement>(null);
@@ -720,6 +724,12 @@ export function RichDocxEditor({
                     className="docx-view-container"
                     onInput={scheduleSave}
                 />
+                {onQuote && (
+                    <SelectionQuoteButton
+                        containerRef={containerRef}
+                        onQuote={onQuote}
+                    />
+                )}
             </div>
         </div>
     );

@@ -44,6 +44,11 @@ interface Props {
             >;
         },
     ) => Promise<string | null>;
+    /** Carry on an answer that stopped searching before it finished. */
+    continueRun?: (args: {
+        token: string;
+        condense?: boolean;
+    }) => Promise<string | null>;
     cancel: () => void;
 }
 
@@ -65,6 +70,7 @@ export function ChatView({
     messages,
     isResponseLoading,
     handleChat,
+    continueRun,
     cancel,
 }: Props) {
     const [tabs, setTabs] = useState<AssistantSidePanelTab[]>([]);
@@ -757,6 +763,17 @@ export function ChatView({
                                                 resolvedEditStatuses={
                                                     resolvedEditStatuses
                                                 }
+                                                onContinue={
+                                                    continueRun
+                                                        ? (args) =>
+                                                              void continueRun(
+                                                                  args,
+                                                              )
+                                                        : undefined
+                                                }
+                                                isContinuing={
+                                                    isResponseLoading
+                                                }
                                             />
                                         )}
                                     </div>
@@ -877,6 +894,9 @@ export function ChatView({
                         onEditError={handleEditError}
                         onWarningDismiss={handleWarningDismiss}
                         onScrollChange={handleScrollChange}
+                        onQuote={(quote) =>
+                            chatInputRef.current?.addQuote(quote)
+                        }
                     />
                 </div>
             )}

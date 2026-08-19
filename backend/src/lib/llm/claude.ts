@@ -8,6 +8,12 @@ import type {
 } from "./types";
 import { toClaudeTools } from "./tools";
 import { createRawLlmStreamRecorder, logRawLlmStream } from "./rawStreamLog";
+import {
+  RESUME_INSTRUCTION,
+  RunBudget,
+  wrapUpInstruction,
+  type RunStopReason,
+} from "./runBudget";
 
 type ContentBlock =
   | { type: "text"; text: string }
@@ -101,6 +107,20 @@ function throwIfAborted(signal?: AbortSignal) {
   if (signal?.aborted) throw abortError();
 }
 
+/**
+ * Append a system-style nudge to the transcript. Claude merges consecutive
+ * user turns, but the tool_result turn is a structured block list, so the
+ * nudge is added as one more block on it rather than as a second user turn.
+ */
+function appendNudge(messages: NativeMessage[], text: string) {
+  const last = messages[messages.length - 1];
+  if (last?.role === "user" && Array.isArray(last.content)) {
+    (last.content as unknown[]).push({ type: "text", text });
+    return;
+  }
+  messages.push({ role: "user", content: text });
+}
+
 export async function streamClaude(
   params: StreamChatParams,
 ): Promise<StreamChatResult> {
@@ -113,26 +133,50 @@ export async function streamClaude(
     apiKeys,
     enableThinking,
   } = params;
-  const maxIter = params.maxIterations ?? 10;
+  const budget = new RunBudget(
+    params.budget,
+    params.resumeState?.iterationsUsed ?? 0,
+  );
   const anthropic = client(apiKeys?.claude);
   const claudeTools = toClaudeTools(tools);
 
-  const messages: NativeMessage[] = toNativeMessages(params.messages);
+  const baseMessages = params.resumeState?.baseMessages ?? params.messages;
+  const messages: NativeMessage[] = params.resumeState
+    ? (params.resumeState.transcript as NativeMessage[])
+    : toNativeMessages(params.messages);
+  if (params.resumeState) appendNudge(messages, RESUME_INSTRUCTION);
   let fullText = "";
+  let runStopReason: RunStopReason = "complete";
+  // The final round after a budget runs out: tools off, answer required.
+  let wrappingUp = false;
   const rawStreamRecorder = createRawLlmStreamRecorder({
     provider: "claude",
     model,
   });
 
   try {
-    for (let iter = 0; iter < maxIter; iter++) {
+    for (let iter = 0; ; iter++) {
       throwIfAborted(params.abortSignal);
+      if (!wrappingUp) {
+        const stop = budget.checkBeforeRound(messages);
+        if (stop) {
+          runStopReason = stop;
+          wrappingUp = true;
+          appendNudge(
+            messages,
+            wrapUpInstruction(stop, budget.repeatedToolName),
+          );
+        } else {
+          budget.startRound();
+        }
+      }
+      const roundTools = wrappingUp ? [] : claudeTools;
       const stream = anthropic.messages.stream({
         model,
         system: systemPrompt,
         messages: messages as Anthropic.MessageParam[],
-        tools: claudeTools.length
-          ? (claudeTools as unknown as Tool[])
+        tools: roundTools.length
+          ? (roundTools as unknown as Tool[])
           : undefined,
         max_tokens: MAX_TOKENS,
         // Claude 4.x models require `thinking.type: "adaptive"` and
@@ -236,9 +280,16 @@ export async function streamClaude(
         }
       }
 
+      // The wrap-up round is always the last one.
+      if (wrappingUp) {
+        messages.push({ role: "assistant", content: assistantBlocks });
+        break;
+      }
+
       if (stopReason !== "tool_use" || !toolCalls.length || !runTools) {
         break;
       }
+      budget.noteToolCalls(toolCalls);
 
       const results = await runTools(toolCalls);
       throwIfAborted(params.abortSignal);
@@ -258,7 +309,22 @@ export async function streamClaude(
     }
 
     await rawStreamRecorder?.flush("completed");
-    return { fullText };
+    const stats = budget.stats();
+    if (runStopReason === "complete") {
+      return { fullText, stopReason: runStopReason, stats };
+    }
+    return {
+      fullText,
+      stopReason: runStopReason,
+      stats,
+      resumeState: {
+        provider: "claude",
+        model,
+        baseMessages,
+        transcript: messages,
+        iterationsUsed: stats.iterations,
+      },
+    };
   } catch (error) {
     await rawStreamRecorder?.flush("error", error);
     throw error;

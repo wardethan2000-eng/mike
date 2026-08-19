@@ -1,3 +1,11 @@
+import type {
+    RunBudgetLimits,
+    RunStats,
+    RunStopReason,
+} from "./runBudget";
+
+export type { RunBudgetLimits, RunStats, RunStopReason };
+
 // Shared types for the LLM provider adapter.
 // Callers always speak OpenAI-style tools + { role, content } messages; each
 // provider translates internally.
@@ -44,12 +52,26 @@ export type UserApiKeys = {
     courtlistener?: string | null;
 };
 
+/**
+ * Everything needed to pick a paused turn back up. Held in memory by
+ * `lib/chat/runResume` and handed back to the same provider.
+ */
+export type ResumeState = {
+    provider: Provider;
+    model: string;
+    /** The conversation as the caller sees it, before any tool rounds ran. */
+    baseMessages: LlmMessage[];
+    /** Provider-native working transcript, including every tool result. */
+    transcript: unknown;
+    /** Tool rounds already spent, so the pause card can report a true total. */
+    iterationsUsed: number;
+};
+
 export type StreamChatParams = {
     model: string;
     systemPrompt: string;
     messages: LlmMessage[];
     tools?: OpenAIToolSchema[];
-    maxIterations?: number;
     callbacks?: StreamCallbacks;
     runTools?: (calls: NormalizedToolCall[]) => Promise<NormalizedToolResult[]>;
     apiKeys?: UserApiKeys;
@@ -61,8 +83,17 @@ export type StreamChatParams = {
      */
     enableThinking?: boolean;
     abortSignal?: AbortSignal;
+    /** Per-turn stop conditions. Omitted fields fall back to the defaults. */
+    budget?: Partial<RunBudgetLimits>;
+    /** Set to pick up a turn that paused when its budget ran out. */
+    resumeState?: ResumeState | null;
 };
 
 export type StreamChatResult = {
     fullText: string;
+    /** "complete" means the model finished on its own. */
+    stopReason: RunStopReason;
+    stats: RunStats;
+    /** Present only when the turn paused, so the user can resume it. */
+    resumeState?: ResumeState;
 };

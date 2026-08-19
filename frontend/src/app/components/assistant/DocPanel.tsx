@@ -73,6 +73,15 @@ interface Props {
     onWarningDismiss?: () => void;
     initialScrollTop?: number | null;
     onScrollChange?: (scrollTop: number) => void;
+    /**
+     * Fires when the user highlights text in the document and clicks
+     * "Ask about this". The chat box picks the passage up as a quote.
+     */
+    onQuote?: (args: {
+        text: string;
+        documentId: string;
+        documentTitle: string;
+    }) => void;
 }
 
 /** One shared panel shell with a document-type-specific body. */
@@ -85,6 +94,7 @@ export function DocPanel({
     onWarningDismiss,
     initialScrollTop,
     onScrollChange,
+    onQuote,
 }: Props) {
     const {
         document: resolvedDocument,
@@ -236,6 +246,17 @@ export function DocPanel({
                         documentId={documentId}
                         versionId={versionId ?? undefined}
                         onSaved={() => retryDocument()}
+                        onQuote={
+                            onQuote
+                                ? (text) =>
+                                      onQuote({
+                                          text,
+                                          documentId,
+                                          documentTitle:
+                                              resolvedDocument.title,
+                                      })
+                                : undefined
+                        }
                     />
                 ) : isDocx ? (
                     <DocxView
@@ -251,6 +272,17 @@ export function DocPanel({
                         onScrollChange={onScrollChange}
                         editable={false}
                         onSaved={() => retryDocument()}
+                        onQuote={
+                            onQuote
+                                ? (text) =>
+                                      onQuote({
+                                          text,
+                                          documentId,
+                                          documentTitle:
+                                              resolvedDocument.title,
+                                      })
+                                : undefined
+                        }
                     />
                 ) : isSpreadsheet ? (
                     <SpreadsheetView

@@ -119,8 +119,8 @@ export function UserProfileProvider({ children }: { children: ReactNode }) {
                 creditsResetDate: futureResetDate.toISOString(),
                 creditsRemaining: 999999, // temporarily unlimited
                 tier: "Free",
-                titleModel: "gemini-3.1-flash-lite-preview",
-                tabularModel: "gemini-3-flash-preview",
+                titleModel: "ollama/glm-5.2",
+                tabularModel: "ollama/glm-5.2",
                 mfaOnLogin: false,
                 legalResearchUs: true,
                 quickActionsVisible: true,

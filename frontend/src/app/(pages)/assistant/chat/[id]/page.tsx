@@ -16,8 +16,14 @@ export default function AssistantChatPage() {
         useChatHistoryContext();
 
     const initialMessages = newChatMessages ?? [];
-    const { messages, isResponseLoading, handleChat, setMessages, cancel } =
-        useAssistantChat({ initialMessages, chatId: id });
+    const {
+        messages,
+        isResponseLoading,
+        handleChat,
+        continueRun,
+        setMessages,
+        cancel,
+    } = useAssistantChat({ initialMessages, chatId: id });
 
     const hasAutoSent = useRef(false);
     const hasLoaded = useRef(false);
@@ -65,6 +71,7 @@ export default function AssistantChatPage() {
             messages={messages}
             isResponseLoading={isResponseLoading}
             handleChat={handleChat}
+            continueRun={continueRun}
             cancel={cancel}
         />
     );

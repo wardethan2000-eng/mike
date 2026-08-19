@@ -5,6 +5,12 @@ import type {
 } from "./types";
 import { toGeminiTools } from "./tools";
 import { createRawLlmStreamRecorder, logRawLlmStream } from "./rawStreamLog";
+import {
+  RESUME_INSTRUCTION,
+  RunBudget,
+  wrapUpInstruction,
+  type RunStopReason,
+} from "./runBudget";
 
 type GeminiPart = {
   text?: string;
@@ -157,6 +163,16 @@ function throwIfAborted(signal?: AbortSignal) {
   if (signal?.aborted) throw abortError();
 }
 
+/** Append a system-style nudge, merging into a trailing user turn. */
+function appendNudge(contents: GeminiContent[], text: string) {
+  const last = contents[contents.length - 1];
+  if (last?.role === "user") {
+    last.parts.push({ text });
+    return;
+  }
+  contents.push({ role: "user", parts: [{ text }] });
+}
+
 export async function streamGemini(
   params: StreamChatParams,
 ): Promise<StreamChatResult> {
@@ -169,20 +185,44 @@ export async function streamGemini(
     apiKeys,
     enableThinking,
   } = params;
-  const maxIter = params.maxIterations ?? 10;
+  const budget = new RunBudget(
+    params.budget,
+    params.resumeState?.iterationsUsed ?? 0,
+  );
   const ai = await client(apiKeys?.gemini);
   const functionDeclarations = toGeminiTools(tools);
 
-  const contents: GeminiContent[] = toNativeContents(params.messages);
+  const baseMessages = params.resumeState?.baseMessages ?? params.messages;
+  const contents: GeminiContent[] = params.resumeState
+    ? (params.resumeState.transcript as GeminiContent[])
+    : toNativeContents(params.messages);
+  if (params.resumeState) appendNudge(contents, RESUME_INSTRUCTION);
   let fullText = "";
+  let runStopReason: RunStopReason = "complete";
+  // The final round after a budget runs out: tools off, answer required.
+  let wrappingUp = false;
   const rawStreamRecorder = createRawLlmStreamRecorder({
     provider: "gemini",
     model,
   });
 
   try {
-    for (let iter = 0; iter < maxIter; iter++) {
+    for (let iter = 0; ; iter++) {
       throwIfAborted(params.abortSignal);
+      if (!wrappingUp) {
+        const stop = budget.checkBeforeRound(contents);
+        if (stop) {
+          runStopReason = stop;
+          wrappingUp = true;
+          appendNudge(
+            contents,
+            wrapUpInstruction(stop, budget.repeatedToolName),
+          );
+        } else {
+          budget.startRound();
+        }
+      }
+      const roundTools = wrappingUp ? [] : functionDeclarations;
       let stream: AsyncIterable<unknown>;
       try {
         stream = await ai.models.generateContentStream({
@@ -190,8 +230,8 @@ export async function streamGemini(
           contents: contents as never,
           config: {
             systemInstruction: systemPrompt,
-            tools: functionDeclarations.length
-              ? [{ functionDeclarations } as never]
+            tools: roundTools.length
+              ? [{ functionDeclarations: roundTools } as never]
               : undefined,
             // When enabled, ask Gemini to surface thought summaries.
             // When disabled, explicitly zero the thinking budget so the
@@ -289,9 +329,21 @@ export async function streamGemini(
 
       fullText += textParts.join("");
 
+      // The wrap-up round is always the last one.
+      if (wrappingUp) {
+        if (textParts.length) {
+          contents.push({
+            role: "model",
+            parts: [{ text: textParts.join("") }],
+          });
+        }
+        break;
+      }
+
       if (!toolCalls.length || !runTools) {
         break;
       }
+      budget.noteToolCalls(toolCalls);
 
       const results = await runTools(toolCalls);
       throwIfAborted(params.abortSignal);
@@ -321,7 +373,22 @@ export async function streamGemini(
     }
 
     await rawStreamRecorder?.flush("completed");
-    return { fullText };
+    const stats = budget.stats();
+    if (runStopReason === "complete") {
+      return { fullText, stopReason: runStopReason, stats };
+    }
+    return {
+      fullText,
+      stopReason: runStopReason,
+      stats,
+      resumeState: {
+        provider: "gemini",
+        model,
+        baseMessages,
+        transcript: contents,
+        iterationsUsed: stats.iterations,
+      },
+    };
   } catch (error) {
     await rawStreamRecorder?.flush("error", error);
     throw error;

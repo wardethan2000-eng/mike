@@ -1285,6 +1285,9 @@ export default function ProjectAssistantChatPage({ params }: Props) {
                                               }
                                             : { kind: "document" }
                                     }
+                                    onQuote={(quote) =>
+                                        chatInputRef.current?.addQuote(quote)
+                                    }
                                 />
                             ) : isDocxFilename(activeTab.filename) ? (
                                 <DocxView
@@ -1317,6 +1320,13 @@ export default function ProjectAssistantChatPage({ params }: Props) {
                                         )
                                     }
                                     rounded={false}
+                                    onQuote={(text) =>
+                                        chatInputRef.current?.addQuote({
+                                            text,
+                                            documentId: activeTab.documentId,
+                                            documentTitle: activeTab.filename,
+                                        })
+                                    }
                                 />
                             ) : isSpreadsheetFilename(activeTab.filename) ? (
                                 <SpreadsheetView

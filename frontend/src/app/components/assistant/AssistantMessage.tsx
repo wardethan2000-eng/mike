@@ -31,6 +31,7 @@ import {
     WorkflowAppliedBlock,
     type CourtListenerBlockItem,
 } from "./message/EventBlocks";
+import { PausedBlock } from "./message/PausedBlock";
 
 interface Props {
     events?: AssistantEvent[];
@@ -101,6 +102,13 @@ interface Props {
      * edits flip their per-card UI without per-card clicks.
      */
     resolvedEditStatuses?: Record<string, "accepted" | "rejected">;
+    /**
+     * Carry on an answer that stopped searching before it finished.
+     * Omitted on read-only surfaces, which just show why it stopped.
+     */
+    onContinue?: (args: { token: string; condense: boolean }) => void;
+    /** True while a "keep going" request is in flight. */
+    isContinuing?: boolean;
 }
 
 export function AssistantMessage({
@@ -123,6 +131,8 @@ export function AssistantMessage({
     isDocReloading,
     isEditReloading,
     resolvedEditStatuses,
+    onContinue,
+    isContinuing,
 }: Props) {
     const contentDivRef = useRef<HTMLDivElement | null>(null);
     const [isCopied, setIsCopied] = useState(false);
@@ -245,7 +255,12 @@ export function AssistantMessage({
             onOpenCitationSource(citation);
             return;
         }
-        if (citation.kind === "case" || !onOpenDocument) return;
+        if (
+            citation.kind === "case" ||
+            citation.kind === "legislation" ||
+            !onOpenDocument
+        )
+            return;
         onOpenDocument({
             documentId: citation.document_id,
             filename: citation.filename,
@@ -418,7 +433,10 @@ export function AssistantMessage({
         }
         if (event.type === "doc_read") {
             const ann = citations.find(
-                (a) => a.kind !== "case" && a.filename === event.filename,
+                (a) =>
+                    a.kind !== "case" &&
+                    a.kind !== "legislation" &&
+                    a.filename === event.filename,
             );
             return (
                 <DocReadBlock
@@ -556,6 +574,18 @@ export function AssistantMessage({
                             ? () => onWorkflowClick(event.workflow_id)
                             : undefined
                     }
+                />
+            );
+        }
+        if (event.type === "paused") {
+            return (
+                <PausedBlock
+                    key={globalIdx}
+                    event={event}
+                    showConnector={showConnector}
+                    onContinue={onContinue}
+                    isContinuing={isContinuing}
+                    disabled={isStreaming}
                 />
             );
         }

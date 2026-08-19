@@ -157,6 +157,12 @@ interface Props {
     }) => void;
     onWarningDismiss?: (tabId: string) => void;
     onScrollChange?: (tabId: string, scrollTop: number) => void;
+    /** Text the user highlighted in a document and sent to the chat box. */
+    onQuote?: (args: {
+        text: string;
+        documentId: string;
+        documentTitle: string;
+    }) => void;
 }
 
 const MIN_WIDTH = 300;
@@ -188,6 +194,7 @@ export function AssistantSidePanel({
     onEditError,
     onWarningDismiss,
     onScrollChange,
+    onQuote,
 }: Props) {
     const panelRef = useRef<HTMLDivElement>(null);
     const [panelWidth, setPanelWidth] = useState(() =>
@@ -538,6 +545,7 @@ export function AssistantSidePanel({
                                 onScrollChange={(scrollTop) =>
                                     onScrollChange?.(tab.id, scrollTop)
                                 }
+                                onQuote={onQuote}
                             />
                         </div>
                     );

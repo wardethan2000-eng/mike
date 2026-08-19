@@ -1,5 +1,6 @@
 "use client";
 
+import { Check, ChevronDown, X } from "lucide-react";
 import { PillButtonUI, type PillButtonUITone } from "./PillButtonUI";
 
 export interface EditCardUIAction {
@@ -20,6 +21,14 @@ export interface EditCardUIProps {
     ariaBusy?: boolean;
     className?: string;
     actionOrder?: "resolve-first" | "view-first";
+    /**
+     * Collapse the card down to a single line saying what happened. Used
+     * after an edit is accepted or rejected so the chat stops showing a
+     * full proposal card for a change that is already settled.
+     */
+    collapsed?: boolean;
+    /** Called when the one-line summary is clicked to open the card again. */
+    onToggleCollapsed?: () => void;
     viewAction?: EditCardUIAction;
     acceptAction?: EditCardUIAction;
     rejectAction?: EditCardUIAction;
@@ -62,6 +71,8 @@ export function EditCardUI({
     ariaBusy = false,
     className = "",
     actionOrder = "resolve-first",
+    collapsed = false,
+    onToggleCollapsed,
     viewAction,
     acceptAction,
     rejectAction,
@@ -73,6 +84,54 @@ export function EditCardUI({
     const hasOriginal = originalText !== undefined && originalText !== "";
     const hasResolveActions = !!acceptAction || !!rejectAction;
     const hasActions = !!viewAction || hasResolveActions;
+
+    if (collapsed) {
+        const accepted = status === "accepted";
+        const clean = (value?: string) =>
+            (value ?? "").replace(/\s+/g, " ").trim();
+        // Show whatever text the document is left with: the new wording on an
+        // accept, the original wording on a reject. A pure deletion has no new
+        // wording, so quote what was taken out and say so.
+        const removed = accepted && !hasReplacement;
+        const trimmed = accepted
+            ? clean(replacementText) || clean(originalText)
+            : clean(originalText) || clean(replacementText);
+        const label = accepted ? "Accepted" : "Rejected";
+        return (
+            <div
+                className={className}
+                data-edit-status={status}
+                data-edit-collapsed="true"
+            >
+                <button
+                    type="button"
+                    onClick={onToggleCollapsed}
+                    aria-expanded={false}
+                    aria-label={`${label}${trimmed ? `: ${trimmed}` : ""} — show details`}
+                    className="flex w-full min-w-0 items-center gap-2 rounded-lg px-1 py-0.5 text-left text-xs text-gray-500 transition-colors hover:bg-gray-900/5"
+                >
+                    {accepted ? (
+                        <Check className="h-3 w-3 shrink-0 text-green-600" />
+                    ) : (
+                        <X className="h-3 w-3 shrink-0 text-gray-400" />
+                    )}
+                    <span className="shrink-0 font-medium text-gray-600">
+                        {changeNumber !== undefined
+                            ? `${changeNumber}. ${label}`
+                            : label}
+                    </span>
+                    {trimmed && (
+                        <span className="min-w-0 flex-1 truncate font-sans text-gray-400">
+                            {removed
+                                ? `removed \u201C${trimmed}\u201D`
+                                : `\u201C${trimmed}\u201D`}
+                        </span>
+                    )}
+                    <ChevronDown className="ml-auto h-3 w-3 shrink-0 text-gray-400" />
+                </button>
+            </div>
+        );
+    }
 
     const resolveActions = hasResolveActions ? (
         <div className="flex gap-2">
@@ -154,6 +213,18 @@ export function EditCardUI({
                         />
                     )}
                 </div>
+            )}
+
+            {onToggleCollapsed && !collapsed && (status === "accepted" || status === "rejected") && (
+                <button
+                    type="button"
+                    onClick={onToggleCollapsed}
+                    aria-expanded={true}
+                    className="mt-2 inline-flex items-center gap-1 text-xs text-gray-400 transition-colors hover:text-gray-600"
+                >
+                    <ChevronDown className="h-3 w-3 rotate-180" />
+                    Hide
+                </button>
             )}
 
             {statusMessage && (
