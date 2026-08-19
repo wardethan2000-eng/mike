@@ -1,4 +1,4 @@
-import { describe, it, expect, vi, afterEach } from "vitest";
+import { describe, it, expect, vi, afterEach, beforeEach } from "vitest";
 import request from "supertest";
 
 // requireAuth reads SUPABASE_URL / SUPABASE_SECRET_KEY from process.env at
@@ -73,6 +73,15 @@ describe("requireAuth middleware", () => {
 });
 
 describe("GET /manifest-signing-key", () => {
+    // Signing is switched on by an environment variable, and this
+    // test is about it being off. Clear it rather than assume the
+    // surrounding environment has not set it — run the suite inside a
+    // deployment that signs its exports and it otherwise fails for a
+    // reason that has nothing to do with the code.
+    beforeEach(() => {
+        delete process.env.MANIFEST_SIGNING_KEY;
+    });
+
     afterEach(() => {
         delete process.env.MANIFEST_SIGNING_KEY;
     });

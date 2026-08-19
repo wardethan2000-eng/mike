@@ -866,6 +866,12 @@ describe("projects.routes", () => {
         });
 
         it("carries a digest and no signature when signing is not configured", async () => {
+        // Signing is switched on by an environment variable, and this
+        // test is about it being off. Clear it rather than assume the
+        // surrounding environment has not set it — run the suite inside a
+        // deployment that signs its exports and it otherwise fails for a
+        // reason that has nothing to do with the code.
+            delete process.env.MANIFEST_SIGNING_KEY;
             seedProjectWithOneVersion();
 
             const res = await request(app)

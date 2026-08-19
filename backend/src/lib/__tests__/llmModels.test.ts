@@ -111,9 +111,18 @@ describe("default models", () => {
         );
     });
 
+    // Which provider the defaults point at is a running choice — it has
+    // already moved off Gemini once — so this checks what the test is named
+    // for: that each default resolves to a provider at all, rather than
+    // throwing "Unknown model id" the first time someone starts a chat.
     it("every default has a resolvable provider", () => {
-        expect(providerForModel(DEFAULT_MAIN_MODEL)).toBe("gemini");
-        expect(providerForModel(DEFAULT_TITLE_MODEL)).toBe("gemini");
-        expect(providerForModel(DEFAULT_TABULAR_MODEL)).toBe("gemini");
+        const providers = ["gemini", "claude", "openai", "ollama"];
+        for (const model of [
+            DEFAULT_MAIN_MODEL,
+            DEFAULT_TITLE_MODEL,
+            DEFAULT_TABULAR_MODEL,
+        ]) {
+            expect(providers).toContain(providerForModel(model));
+        }
     });
 });

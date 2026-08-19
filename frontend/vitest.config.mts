@@ -24,9 +24,21 @@ export default defineConfig({
         // app/lib/supabase.ts creates its client at module load, so any
         // component whose import graph reaches it needs these set. Dummy
         // values — unit tests never talk to Supabase.
+        //
+        // These are pinned rather than inherited so the suite gives the same
+        // result wherever it is run. Run it inside a deployed container and
+        // the surrounding environment would otherwise supply the real
+        // deployment's API address, and every assertion about a request URL
+        // fails for no reason worth reading.
         env: {
             NEXT_PUBLIC_SUPABASE_URL: "http://localhost:54321",
             NEXT_PUBLIC_SUPABASE_PUBLISHABLE_DEFAULT_KEY: "test-anon-key",
+            NEXT_PUBLIC_API_BASE_URL: "http://localhost:3001",
+            // React only ships the helper testing-library needs to render
+            // components in its development build. A production build drops
+            // it, and every rendering test dies on "React.act is not a
+            // function" — which reads like a broken suite and is not one.
+            NODE_ENV: "test",
         },
         // jsdom 27's CSS-color parser (@asamuzakjp/css-color) is CJS but
         // require()s the ESM-only @csstools/css-calc. That require() happens
