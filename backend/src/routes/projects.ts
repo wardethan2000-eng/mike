@@ -62,6 +62,18 @@ function normalizeOptionalString(value: unknown) {
   return trimmed.length > 0 ? trimmed : null;
 }
 
+/**
+ * The case overview is sent with every question asked inside the matter, so
+ * it has to stay short enough to be affordable. Roughly two pages of text.
+ */
+export const PROJECT_OVERVIEW_MAX_CHARS = 4000;
+
+function normalizeOverview(value: unknown) {
+  if (typeof value !== "string") return null;
+  const trimmed = value.trim();
+  return trimmed.length > 0 ? trimmed.slice(0, PROJECT_OVERVIEW_MAX_CHARS) : null;
+}
+
 function normalizeDocumentFilename(nextName: unknown, currentName: string) {
   if (typeof nextName !== "string") return null;
   const trimmed = nextName.trim().slice(0, 200);
@@ -375,10 +387,11 @@ projectsRouter.get("/", requireAuth, async (req, res) => {
 projectsRouter.post("/", requireAuth, async (req, res) => {
   const userId = res.locals.userId as string;
   const userEmail = res.locals.userEmail as string | undefined;
-  const { name, cm_number, practice, shared_with } = req.body as {
+  const { name, cm_number, practice, overview, shared_with } = req.body as {
     name: string;
     cm_number?: string;
     practice?: string;
+    overview?: string;
     shared_with?: string[];
   };
   if (!name?.trim())
@@ -416,6 +429,7 @@ projectsRouter.post("/", requireAuth, async (req, res) => {
       name: name.trim(),
       cm_number: normalizeOptionalString(cm_number),
       practice: normalizeOptionalString(practice),
+      overview: normalizeOverview(overview),
       shared_with: cleanedSharedWith,
     })
     .select("*")
@@ -734,6 +748,9 @@ projectsRouter.patch("/:projectId", requireAuth, async (req, res) => {
   if (req.body.cm_number != null) updates.cm_number = req.body.cm_number;
   if ("practice" in req.body) {
     updates.practice = normalizeOptionalString(req.body.practice);
+  }
+  if ("overview" in req.body) {
+    updates.overview = normalizeOverview(req.body.overview);
   }
   if (Array.isArray(req.body.shared_with)) {
     // Normalise: lowercase + dedupe + drop empties.

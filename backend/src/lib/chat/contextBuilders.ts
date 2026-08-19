@@ -41,7 +41,7 @@ function neutralizeFenceTokens(text: string, nonce: string): string {
     .split(nonce)
     .join("[redacted-nonce]")
     .replace(
-      /<(\/?)(untrusted-content|workflow-instructions)/gi,
+      /<(\/?)(untrusted-content|workflow-instructions|case-overview)/gi,
       "&lt;$1$2",
     );
 }
@@ -86,6 +86,22 @@ export function spotlightFilename(filename: string, nonce?: string): string {
 export function spotlightWorkflow(text: string, nonce: string): string {
   const neutralized = neutralizeFenceTokens(text, nonce);
   return `<workflow-instructions nonce="${nonce}">\n${neutralized}\n</workflow-instructions nonce="${nonce}">`;
+}
+
+/**
+ * Wraps a matter's case overview — the standing instructions the lawyer wrote
+ * for that matter — in its own semi-trusted fence.
+ *
+ * Like a workflow body, the overview exists precisely so the model follows it,
+ * so it cannot go in `<untrusted-content>` ("data only"). Unlike a workflow, it
+ * is written by the people on the matter rather than installed from a pack, and
+ * it is present on every single request, so it gets its own boundary the model
+ * is told about separately. It never overrides system rules, and document text
+ * it refers to still arrives as data via `spotlight()`.
+ */
+export function spotlightCaseOverview(text: string, nonce: string): string {
+  const neutralized = neutralizeFenceTokens(text, nonce);
+  return `<case-overview nonce="${nonce}">\n${neutralized}\n</case-overview nonce="${nonce}">`;
 }
 
 

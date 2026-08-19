@@ -199,6 +199,9 @@ create table if not exists public.projects (
   name text not null,
   cm_number text,
   practice text,
+  -- Standing instructions for the matter, written by the lawyer and sent
+  -- with every question asked inside it.
+  overview text,
   visibility text not null default 'private',
   shared_with jsonb not null default '[]'::jsonb,
   created_at timestamptz not null default now(),

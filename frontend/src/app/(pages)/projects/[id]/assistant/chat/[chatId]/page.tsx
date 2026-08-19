@@ -15,6 +15,7 @@ import {
 import { useRouter } from "next/navigation";
 import {
     Columns3,
+    ClipboardList,
     FileText,
     FolderClosed,
     Loader2,
@@ -55,6 +56,7 @@ import { useSidebar } from "@/app/contexts/SidebarContext";
 import { PageHeader } from "@/app/components/shared/PageHeader";
 import { HeaderActionsMenu } from "@/app/components/shared/HeaderActionsMenu";
 import { PaneHeader } from "@/app/components/projects/PaneHeader";
+import { CaseOverviewPanel } from "@/app/components/projects/CaseOverviewPanel";
 import {
     PANE_LABELS,
     useProjectChatLayout,
@@ -276,6 +278,8 @@ export default function ProjectAssistantChatPage({ params }: Props) {
         laidOut,
         filesOpen,
         setFilesOpen,
+        overviewOpen,
+        setOverviewOpen,
         movePane,
         resizePanes,
         resetLayout,
@@ -988,9 +992,46 @@ export default function ProjectAssistantChatPage({ params }: Props) {
         [resizePanes],
     );
 
-    // ── The three panels ──────────────────────────────────────────────────────
+    // ── The panels ────────────────────────────────────────────────────────────
     // Each is laid out by the reader's own arrangement below.
     const paneContent: Record<PaneId, ReactNode> = {
+        overview: (
+            <div className="flex h-full min-h-0 flex-col">
+                <PaneHeader
+                    paneId="overview"
+                    label={PANE_LABELS.overview}
+                    draggingPane={draggingPane}
+                    hoverPane={hoverPane}
+                    onStartDrag={startDrag}
+                    actions={
+                        <button
+                            onClick={() => setOverviewOpen(false)}
+                            title="Hide the case overview"
+                            className="p-1 rounded text-gray-400 hover:text-gray-700 hover:bg-gray-100 transition-colors"
+                        >
+                            <X className="h-3.5 w-3.5" />
+                        </button>
+                    }
+                >
+                    <span className="self-center truncate text-xs text-gray-700">
+                        Case overview
+                    </span>
+                </PaneHeader>
+
+                <div className="flex-1 min-h-0">
+                    <CaseOverviewPanel
+                        projectId={projectId}
+                        overview={project ? (project.overview ?? null) : undefined}
+                        canEdit={project?.is_owner !== false}
+                        onSaved={(overview) =>
+                            setProject((prev) =>
+                                prev ? { ...prev, overview } : prev,
+                            )
+                        }
+                    />
+                </div>
+            </div>
+        ),
         files: (
             <div
                 className="flex h-full min-h-0 flex-col"
@@ -1465,6 +1506,14 @@ export default function ProjectAssistantChatPage({ params }: Props) {
                 ]}
                 actions={[
                     {
+                        icon: <ClipboardList className="h-4 w-4" />,
+                        onClick: () => setOverviewOpen(!overviewOpen),
+                        iconOnly: true,
+                        title: overviewOpen
+                            ? "Hide the case overview"
+                            : "Show the case overview",
+                    },
+                    {
                         icon: <FolderClosed className="h-4 w-4" />,
                         onClick: () => setFilesOpen(!filesOpen),
                         iconOnly: true,
@@ -1483,6 +1532,14 @@ export default function ProjectAssistantChatPage({ params }: Props) {
                         render: (
                             <HeaderActionsMenu
                                 items={[
+                                    {
+                                        label: overviewOpen
+                                            ? "Hide case overview"
+                                            : "Show case overview",
+                                        icon: ClipboardList,
+                                        onSelect: () =>
+                                            setOverviewOpen(!overviewOpen),
+                                    },
                                     {
                                         label: filesOpen
                                             ? "Hide files"

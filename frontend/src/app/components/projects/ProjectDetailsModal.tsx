@@ -9,13 +9,19 @@ import {
 } from "@/app/components/ui/form-field";
 import type { Project } from "@/app/components/shared/types";
 import { ProjectPracticeField } from "./ProjectPracticeField";
+import { OVERVIEW_MAX_CHARS } from "./CaseOverviewPanel";
 
 interface ProjectDetailsModalProps {
     open: boolean;
     project: Project | null;
     canEdit: boolean;
     onClose: () => void;
-    onSave: (values: { name: string; cmNumber: string; practice: string }) => Promise<void>;
+    onSave: (values: {
+        name: string;
+        cmNumber: string;
+        practice: string;
+        overview: string;
+    }) => Promise<void>;
     onShareProject?: () => void;
 }
 
@@ -30,6 +36,7 @@ export function ProjectDetailsModal({
     const [nameDraft, setNameDraft] = useState("");
     const [cmDraft, setCmDraft] = useState("");
     const [practiceDraft, setPracticeDraft] = useState("");
+    const [overviewDraft, setOverviewDraft] = useState("");
     const [saving, setSaving] = useState(false);
     const [saved, setSaved] = useState(false);
     const [error, setError] = useState<string | null>(null);
@@ -39,6 +46,7 @@ export function ProjectDetailsModal({
         setNameDraft(project.name);
         setCmDraft(project.cm_number ?? "");
         setPracticeDraft(project.practice ?? "");
+        setOverviewDraft(project.overview ?? "");
         setSaved(false);
         setError(null);
     }, [open, project]);
@@ -46,14 +54,22 @@ export function ProjectDetailsModal({
     const trimmedName = nameDraft.trim();
     const trimmedCm = cmDraft.trim();
     const trimmedPractice = practiceDraft.trim();
+    const trimmedOverview = overviewDraft.trim();
     const hasChanges = useMemo(() => {
         if (!project) return false;
         return (
             trimmedName !== project.name ||
             trimmedCm !== (project.cm_number ?? "") ||
-            trimmedPractice !== (project.practice ?? "")
+            trimmedPractice !== (project.practice ?? "") ||
+            trimmedOverview !== (project.overview ?? "")
         );
-    }, [project, trimmedCm, trimmedName, trimmedPractice]);
+    }, [
+        project,
+        trimmedCm,
+        trimmedName,
+        trimmedOverview,
+        trimmedPractice,
+    ]);
 
     if (!project) return null;
 
@@ -70,6 +86,7 @@ export function ProjectDetailsModal({
                     trimmedPractice && trimmedPractice !== "Other"
                         ? trimmedPractice
                         : "",
+                overview: trimmedOverview,
             });
             setSaved(true);
         } catch {
@@ -162,6 +179,39 @@ export function ProjectDetailsModal({
                             setError(null);
                         }}
                         disabled={!canEdit || saving}
+                    />
+                </div>
+
+                <div>
+                    <div className="flex items-baseline justify-between gap-3">
+                        <FieldLabel htmlFor="project-details-overview">
+                            Case overview
+                        </FieldLabel>
+                        {canEdit && (
+                            <span className="shrink-0 text-xs tabular-nums text-gray-400">
+                                {overviewDraft.length}/{OVERVIEW_MAX_CHARS}
+                            </span>
+                        )}
+                    </div>
+                    <p className="mb-2 text-xs text-gray-500">
+                        What the assistant should know every time it works on
+                        this matter — who you act for, what you are trying to
+                        achieve, and how you want documents drafted. It is sent
+                        with every question asked here.
+                    </p>
+                    <textarea
+                        id="project-details-overview"
+                        value={overviewDraft}
+                        onChange={(e) => {
+                            setOverviewDraft(e.target.value);
+                            setSaved(false);
+                            setError(null);
+                        }}
+                        disabled={!canEdit || saving}
+                        maxLength={OVERVIEW_MAX_CHARS}
+                        rows={7}
+                        placeholder="We act for... The goal is... Draft in..."
+                        className="w-full resize-y rounded border border-gray-200 p-3 text-sm leading-relaxed text-gray-800 outline-none placeholder:text-gray-400 focus:border-gray-400 disabled:bg-gray-50"
                     />
                 </div>
 

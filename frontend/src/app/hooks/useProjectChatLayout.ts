@@ -9,8 +9,8 @@ import {
 /**
  * Panel arrangement for the project chat page.
  *
- * The page shows up to three panes — the chat, an open document, and the
- * matter's files. Each person can put them in whatever order they like and
+ * The page shows up to four panes — the chat, an open document, the matter's
+ * files, and the case overview. Each person can put them in whatever order they like and
  * size them however they like.
  *
  * The arrangement is saved against their account, so it follows them to any
@@ -23,12 +23,13 @@ import {
  * different-sized screen.
  */
 
-export type PaneId = "chat" | "document" | "files";
+export type PaneId = "chat" | "document" | "files" | "overview";
 
 export const PANE_LABELS: Record<PaneId, string> = {
     chat: "Assistant",
     document: "Document",
     files: "Files",
+    overview: "Case overview",
 };
 
 /** Smallest a pane may be dragged to, in pixels. */
@@ -36,6 +37,7 @@ const PANE_MIN_PX: Record<PaneId, number> = {
     chat: 320,
     document: 280,
     files: 180,
+    overview: 240,
 };
 
 export type ProjectChatLayout = {
@@ -43,6 +45,7 @@ export type ProjectChatLayout = {
     order: PaneId[];
     weights: Record<PaneId, number>;
     filesOpen: boolean;
+    overviewOpen: boolean;
 };
 
 /** This browser's copy — a cache so the first paint is already correct. */
@@ -53,12 +56,13 @@ const PREFERENCE_KEY = "projectChatLayout";
 const SAVE_DELAY_MS = 700;
 
 export const DEFAULT_LAYOUT: ProjectChatLayout = {
-    order: ["chat", "document", "files"],
-    weights: { chat: 1, document: 1.35, files: 0.5 },
+    order: ["overview", "chat", "document", "files"],
+    weights: { chat: 1, document: 1.35, files: 0.5, overview: 0.55 },
     filesOpen: false,
+    overviewOpen: false,
 };
 
-const PANE_IDS: PaneId[] = ["chat", "document", "files"];
+const PANE_IDS: PaneId[] = ["chat", "document", "files", "overview"];
 
 function isPaneId(value: unknown): value is PaneId {
     return typeof value === "string" && PANE_IDS.includes(value as PaneId);
@@ -75,9 +79,13 @@ function normalize(raw: unknown): ProjectChatLayout {
             if (isPaneId(id) && !order.includes(id)) order.push(id);
         }
     }
-    for (const id of DEFAULT_LAYOUT.order) {
-        if (!order.includes(id)) order.push(id);
-    }
+    // A saved arrangement from before a panel existed simply does not mention
+    // it. Slot any such panel into the place it sits by default, so everyone
+    // finds a new panel in the same spot rather than tacked on the end.
+    DEFAULT_LAYOUT.order.forEach((id, defaultIndex) => {
+        if (order.includes(id)) return;
+        order.splice(Math.min(defaultIndex, order.length), 0, id);
+    });
 
     const weights = { ...DEFAULT_LAYOUT.weights };
     for (const id of PANE_IDS) {
@@ -94,6 +102,10 @@ function normalize(raw: unknown): ProjectChatLayout {
             typeof candidate.filesOpen === "boolean"
                 ? candidate.filesOpen
                 : DEFAULT_LAYOUT.filesOpen,
+        overviewOpen:
+            typeof candidate.overviewOpen === "boolean"
+                ? candidate.overviewOpen
+                : DEFAULT_LAYOUT.overviewOpen,
     };
 }
 
@@ -255,13 +267,19 @@ export function useProjectChatLayout({
             layout.order.filter((id) => {
                 if (id === "document") return documentOpen;
                 if (id === "files") return layout.filesOpen;
+                if (id === "overview") return layout.overviewOpen;
                 return true;
             }),
-        [documentOpen, layout.filesOpen, layout.order],
+        [documentOpen, layout.filesOpen, layout.overviewOpen, layout.order],
     );
 
     const setFilesOpen = useCallback(
         (open: boolean) => update((prev) => ({ ...prev, filesOpen: open })),
+        [update],
+    );
+
+    const setOverviewOpen = useCallback(
+        (open: boolean) => update((prev) => ({ ...prev, overviewOpen: open })),
         [update],
     );
 
@@ -318,7 +336,11 @@ export function useProjectChatLayout({
     );
 
     const resetLayout = useCallback(() => {
-        update((prev) => ({ ...DEFAULT_LAYOUT, filesOpen: prev.filesOpen }));
+        update((prev) => ({
+            ...DEFAULT_LAYOUT,
+            filesOpen: prev.filesOpen,
+            overviewOpen: prev.overviewOpen,
+        }));
     }, [update]);
 
     const isDefaultLayout =
@@ -334,6 +356,8 @@ export function useProjectChatLayout({
         laidOut,
         filesOpen: layout.filesOpen,
         setFilesOpen,
+        overviewOpen: layout.overviewOpen,
+        setOverviewOpen,
         movePane,
         resizePanes,
         resetLayout,

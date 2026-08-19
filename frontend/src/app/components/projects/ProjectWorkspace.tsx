@@ -282,6 +282,7 @@ export function ProjectWorkspaceProvider({
         name: string;
         cmNumber: string;
         practice: string;
+        overview: string;
     }) {
         if (project && project.is_owner === false) {
             setOwnerOnlyAction("edit project details");
@@ -290,11 +291,13 @@ export function ProjectWorkspaceProvider({
         const name = values.name.trim();
         const cmNumber = values.cmNumber.trim();
         const practice = values.practice.trim();
+        const overview = values.overview.trim();
         if (!name) return;
         const updated = await updateProject(projectId, {
             name,
             cm_number: cmNumber,
             practice: practice || null,
+            overview: overview || null,
         });
         setProject((prev) =>
             prev
@@ -303,6 +306,7 @@ export function ProjectWorkspaceProvider({
                       name: updated.name,
                       cm_number: updated.cm_number,
                       practice: updated.practice,
+                      overview: updated.overview ?? null,
                   }
                 : updated,
         );

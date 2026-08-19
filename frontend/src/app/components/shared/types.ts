@@ -38,6 +38,8 @@ export interface Project {
     name: string;
     cm_number: string | null;
     practice: string | null;
+    /** Standing instructions for the matter, sent with every question. */
+    overview?: string | null;
     shared_with: string[];
     created_at: string;
     updated_at: string;

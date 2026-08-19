@@ -34,6 +34,10 @@ import {
     getUserModelSettings,
 } from "../lib/userSettings";
 import { checkProjectAccess } from "../lib/access";
+import {
+    loadProjectOverview,
+    caseOverviewPromptSection,
+} from "../lib/projectOverview";
 import { safeErrorLog, safeErrorMessage } from "../lib/safeError";
 import { generateAssistantChatTitle } from "../lib/chatTitle";
 
@@ -227,7 +231,15 @@ projectChatRouter.post("/", requireAuth, async (req, res) => {
     // the system prompt with the current-turn doc_id slugs so the model
     // knows which docs the user is highlighting *now*, distinct from
     // the broader project doc list.
-    let systemPromptExtra = PROJECT_SYSTEM_PROMPT_EXTRA;
+    // The matter's standing instructions — who we act for, what we are
+    // trying to achieve, how this firm wants things done — go in ahead of the
+    // per-turn detail, so they apply to answering and drafting alike.
+    let systemPromptExtra =
+        PROJECT_SYSTEM_PROMPT_EXTRA +
+        caseOverviewPromptSection(
+            await loadProjectOverview(db, projectId),
+            nonce,
+        );
     if (attached_documents?.length) {
         const lines = attached_documents.map((d) => {
             const document = documentPromptRef(d.document_id, d.filename);

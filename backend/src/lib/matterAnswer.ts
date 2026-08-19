@@ -8,6 +8,7 @@
 import { completeText, resolveModel, DEFAULT_MAIN_MODEL, type UserApiKeys } from "./llm";
 import { searchMatter, formatForAssistant, type MatterSearchHit } from "./matterSearch";
 import { linkAnswerCitations, type AnswerCitation } from "./matterCitations";
+import { loadProjectOverview, caseOverviewBackground } from "./projectOverview";
 import type { createServerSupabase } from "./supabase";
 
 type Db = ReturnType<typeof createServerSupabase>;
@@ -19,6 +20,7 @@ const SYSTEM_PROMPT = [
   "- Cite the document and page for every fact you state, written as (filename, page N).",
   "- If the passages do not answer the question, say so plainly and stop. Do not guess.",
   "- A passage marked as matched on the file's name has no readable text inside the file; treat it only as a label, not as content.",
+  "- Background on the matter may be given before the question. Use it to understand the parties and what the reader wants, but never cite it and never state it as something a document says.",
   "- Be concise and neutral. Nothing here replaces reading a document in full when it matters.",
 ].join("\n");
 
@@ -74,11 +76,18 @@ export async function answerMatter(
   }
 
   const context = formatForAssistant(question, sources);
+  // The matter's standing instructions, so the answer knows which side the
+  // reader is on. It shapes how the passages are read; it is never a source
+  // in its own right.
+  const background = caseOverviewBackground(
+    await loadProjectOverview(db, params.projectId),
+  );
   const model = resolveModel(params.model, DEFAULT_MAIN_MODEL);
   const answer = await completeText({
     model,
     systemPrompt: SYSTEM_PROMPT,
     user:
+      background +
       `Question: ${question}\n\n` +
       `Passages found in the matter's documents:\n${context}\n\n` +
       "Answer the question using only these passages, citing the document and page for each point.",

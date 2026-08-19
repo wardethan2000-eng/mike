@@ -754,6 +754,7 @@ export async function updateProject(
         name?: string;
         cm_number?: string;
         practice?: string | null;
+        overview?: string | null;
         shared_with?: string[];
     },
 ): Promise<Project> {
