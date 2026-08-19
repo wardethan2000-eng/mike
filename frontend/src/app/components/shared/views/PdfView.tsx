@@ -29,14 +29,34 @@ const SIDE_PADDING = 20;
 const ZOOM_MIN = 0.5;
 const ZOOM_MAX = 3.0;
 const ZOOM_STEP = 0.25;
+// Pages are drawn at the screen's own pixel density, capped so a very dense
+// screen does not ask for pictures the browser cannot hold.
+const MAX_PIXEL_RATIO = 2;
+// How many pages keep their drawn picture in memory. Pages beyond this that the
+// reader has scrolled away from are given back their blank placeholder, so a
+// long file does not grow until the tab runs out of memory.
+const MAX_DRAWN_PAGES = 16;
+// Start drawing a page before it reaches the window, so scrolling feels ready.
+const DRAW_AHEAD = "600px 0px";
 
-type RenderedPage = {
+/** One page of the file: always laid out, drawn only when it is needed. */
+type PageSlot = {
+    pageNumber: number;
     page: import("pdfjs-dist").PDFPageProxy;
     viewport: import("pdfjs-dist").PageViewport;
     wrapper: HTMLDivElement;
-    canvas: HTMLCanvasElement;
-    textDivs: HTMLElement[];
+    canvas: HTMLCanvasElement | null;
+    textLayerDiv: HTMLDivElement | null;
+    textDivs: HTMLElement[] | null;
+    drawing: Promise<void> | null;
+    /** A page the reader was sent to; never given back its placeholder. */
+    pinned: boolean;
 };
+
+/** Letters and digits only — the same rough comparison the highlighter uses. */
+function lettersOnly(value: string): string {
+    return value.replace(/[^a-zA-Z0-9]/g, "").toLowerCase();
+}
 
 export function PdfView({
     doc,
@@ -51,7 +71,15 @@ export function PdfView({
     const pdfDocRef = useRef<import("pdfjs-dist").PDFDocumentProxy | null>(
         null,
     );
-    const renderedPagesRef = useRef<RenderedPage[]>([]);
+    /** Every page of the open file, in order. */
+    const slotsRef = useRef<PageSlot[]>([]);
+    /** Page numbers in the order they were drawn, oldest first. */
+    const drawOrderRef = useRef<number[]>([]);
+    const observerRef = useRef<IntersectionObserver | null>(null);
+    /** Guards against two runs of the drawing loop fighting over one view. */
+    const renderGenerationRef = useRef(0);
+    /** The panel width the pages were laid out for. */
+    const renderedWidthRef = useRef(0);
     const quoteListRef = useRef<QuoteEntry[]>([]);
     const zoomRef = useRef(1.0);
     const currentPageRef = useRef(1);
@@ -78,7 +106,6 @@ export function PdfView({
         doc?.version_id ?? null,
     );
 
-    // Track container width via ResizeObserver so re-renders fire on resize
     useEffect(() => {
         const el = scrollContainerRef.current;
         if (!el) return;
@@ -95,74 +122,155 @@ export function PdfView({
         if (!scrollEl) return;
 
         const handleScroll = () => {
-            const pages = renderedPagesRef.current;
-            if (!pages.length) return;
+            const slots = slotsRef.current;
+            if (!slots.length) return;
             const scrollCenter = scrollEl.scrollTop + scrollEl.clientHeight / 2;
-            let closest = 0;
+            let closest = 1;
             let closestDist = Infinity;
-            pages.forEach((p, i) => {
+            slots.forEach((slot) => {
                 const pageCenter =
-                    p.wrapper.offsetTop + p.wrapper.clientHeight / 2;
+                    slot.wrapper.offsetTop + slot.wrapper.clientHeight / 2;
                 const dist = Math.abs(pageCenter - scrollCenter);
                 if (dist < closestDist) {
                     closestDist = dist;
-                    closest = i;
+                    closest = slot.pageNumber;
                 }
             });
-            currentPageRef.current = closest + 1;
-            setCurrentPage(closest + 1);
+            currentPageRef.current = closest;
+            setCurrentPage(closest);
         };
 
         scrollEl.addEventListener("scroll", handleScroll, { passive: true });
         return () => scrollEl.removeEventListener("scroll", handleScroll);
     }, []);
 
-    // Highlights all entries in `list` across the already-rendered pages.
-    // Returns the 1-based page number of the first successfully highlighted entry, or null.
-    const applyHighlights = useCallback(
-        async (list: QuoteEntry[]): Promise<number | null> => {
-            // Clear any prior highlights across all pages
-            for (const p of renderedPagesRef.current)
-                clearHighlights(p.textDivs);
+    /** Hand a page back its blank placeholder and let go of the picture. */
+    const releaseSlot = useCallback((slot: PageSlot) => {
+        if (slot.canvas) {
+            slot.canvas.width = 0;
+            slot.canvas.height = 0;
+            slot.canvas.remove();
+            slot.canvas = null;
+        }
+        slot.textLayerDiv?.remove();
+        slot.textLayerDiv = null;
+        slot.textDivs = null;
+        slot.drawing = null;
+    }, []);
 
-            let firstHitPage: number | null = null;
-            for (const entry of list) {
-                let hitPage: number | null = null;
+    /** Keep only a workable number of drawn pages in memory. */
+    const trimDrawnPages = useCallback(() => {
+        const slots = slotsRef.current;
+        while (drawOrderRef.current.length > MAX_DRAWN_PAGES) {
+            const index = drawOrderRef.current.findIndex((pageNumber) => {
+                const slot = slots[pageNumber - 1];
+                if (!slot || slot.pinned) return false;
+                return Math.abs(pageNumber - currentPageRef.current) > 2;
+            });
+            if (index === -1) return;
+            const [pageNumber] = drawOrderRef.current.splice(index, 1);
+            const slot = slots[pageNumber - 1];
+            if (slot) releaseSlot(slot);
+        }
+    }, [releaseSlot]);
 
-                if (entry.page) {
-                    const target = renderedPagesRef.current[entry.page - 1];
-                    if (target) {
-                        const found = await highlightQuote(
-                            target.textDivs,
-                            entry.quote,
-                        );
-                        if (found) hitPage = entry.page;
+    /** Draw one page: its picture and the text layer the highlighter needs. */
+    const drawSlot = useCallback(
+        async (slot: PageSlot, generation: number): Promise<void> => {
+            if (slot.textDivs) return;
+            if (slot.drawing) return slot.drawing;
+
+            const work = (async () => {
+                const lib = await getPdfJs();
+                if (generation !== renderGenerationRef.current) return;
+
+                const pixelRatio = Math.min(
+                    MAX_PIXEL_RATIO,
+                    Math.max(1, window.devicePixelRatio || 1),
+                );
+                const canvas = document.createElement("canvas");
+                canvas.width = Math.floor(slot.viewport.width * pixelRatio);
+                canvas.height = Math.floor(slot.viewport.height * pixelRatio);
+                canvas.style.width = `${slot.viewport.width}px`;
+                canvas.style.height = `${slot.viewport.height}px`;
+                canvas.style.display = "block";
+                const ctx = canvas.getContext("2d");
+                if (!ctx) return;
+                slot.wrapper.appendChild(canvas);
+                slot.canvas = canvas;
+
+                try {
+                    await slot.page.render({
+                        canvasContext: ctx,
+                        viewport: slot.viewport,
+                        transform:
+                            pixelRatio === 1
+                                ? undefined
+                                : [pixelRatio, 0, 0, pixelRatio, 0, 0],
+                    }).promise;
+                } catch (e: unknown) {
+                    if (
+                        (e as { name?: string })?.name !==
+                        "RenderingCancelledException"
+                    ) {
+                        console.error("PDF render error", e);
                     }
+                    return;
                 }
+                if (generation !== renderGenerationRef.current) return;
 
-                // Fall back to scanning all pages for this quote
-                if (hitPage === null) {
-                    console.warn(
-                        `Quote not found on hinted page, scanning all pages: "${entry.quote.slice(0, 60)}..."`,
-                    );
-                    for (let i = 0; i < renderedPagesRef.current.length; i++) {
-                        const p = renderedPagesRef.current[i];
-                        const found = await highlightQuote(
-                            p.textDivs,
-                            entry.quote,
-                        );
-                        if (found) {
-                            hitPage = i + 1;
-                            break;
-                        }
-                    }
-                }
+                const textLayerDiv = document.createElement("div");
+                textLayerDiv.className = "pdf-text-layer";
+                textLayerDiv.style.position = "absolute";
+                textLayerDiv.style.left = "0";
+                textLayerDiv.style.top = "0";
+                textLayerDiv.style.width = `${slot.viewport.width}px`;
+                textLayerDiv.style.height = `${slot.viewport.height}px`;
+                textLayerDiv.style.setProperty(
+                    "--scale-factor",
+                    String(slot.viewport.scale),
+                );
+                slot.wrapper.appendChild(textLayerDiv);
+                slot.textLayerDiv = textLayerDiv;
 
-                if (hitPage !== null && firstHitPage === null) {
-                    firstHitPage = hitPage;
-                }
+                const textLayer = new lib.TextLayer({
+                    textContentSource: slot.page.streamTextContent(),
+                    container: textLayerDiv,
+                    viewport: slot.viewport,
+                });
+                await textLayer.render();
+                if (generation !== renderGenerationRef.current) return;
+
+                slot.textDivs = textLayer.textDivs;
+                drawOrderRef.current.push(slot.pageNumber);
+                trimDrawnPages();
+            })();
+
+            slot.drawing = work;
+            await work;
+            slot.drawing = null;
+        },
+        [trimDrawnPages],
+    );
+
+    /** The page whose text contains this quote, without drawing anything. */
+    const findPageWithQuote = useCallback(
+        async (text: string, generation: number): Promise<number | null> => {
+            const needle = lettersOnly(text).slice(0, 30);
+            if (needle.length < 8) return null;
+            for (const slot of slotsRef.current) {
+                if (generation !== renderGenerationRef.current) return null;
+                const content = await slot.page.getTextContent();
+                const pageText = lettersOnly(
+                    content.items
+                        .map((item) =>
+                            "str" in item ? (item.str as string) : "",
+                        )
+                        .join(""),
+                );
+                if (pageText.includes(needle)) return slot.pageNumber;
             }
-            return firstHitPage;
+            return null;
         },
         [],
     );
@@ -173,11 +281,11 @@ export function PdfView({
     // positioned text layer can scroll just the overlay while leaving the
     // canvas untouched, which is why we don't use it here.
     const scrollToHighlightOnPage = useCallback((pageNum: number) => {
-        const pageEntry = renderedPagesRef.current[pageNum - 1];
+        const slot = slotsRef.current[pageNum - 1];
         const scrollEl = scrollContainerRef.current;
-        if (!pageEntry || !scrollEl) return;
+        if (!slot || !scrollEl) return;
 
-        const highlightEl = pageEntry.wrapper.querySelector<HTMLElement>(
+        const highlightEl = slot.wrapper.querySelector<HTMLElement>(
             ".pdf-text-highlight",
         );
         if (highlightEl) {
@@ -194,7 +302,7 @@ export function PdfView({
                 behavior: "instant" as ScrollBehavior,
             });
         } else {
-            const wrapperRect = pageEntry.wrapper.getBoundingClientRect();
+            const wrapperRect = slot.wrapper.getBoundingClientRect();
             const containerRect = scrollEl.getBoundingClientRect();
             const targetTop =
                 scrollEl.scrollTop + (wrapperRect.top - containerRect.top);
@@ -203,7 +311,69 @@ export function PdfView({
                 behavior: "instant" as ScrollBehavior,
             });
         }
+        currentPageRef.current = pageNum;
+        setCurrentPage(pageNum);
     }, []);
+
+    /**
+     * Marks the quotes on the pages they belong to, drawing those pages first.
+     * Returns the page of the first quote actually found, or null.
+     */
+    const showQuotes = useCallback(
+        async (list: QuoteEntry[], generation: number) => {
+            for (const slot of slotsRef.current) {
+                if (slot.textDivs) clearHighlights(slot.textDivs);
+            }
+            if (!list.length) return null;
+
+            let firstHitPage: number | null = null;
+            for (const entry of list) {
+                let pageNumber = entry.page ?? null;
+                if (pageNumber) {
+                    const slot = slotsRef.current[pageNumber - 1];
+                    if (slot) {
+                        slot.pinned = true;
+                        await drawSlot(slot, generation);
+                        if (generation !== renderGenerationRef.current)
+                            return null;
+                        const found =
+                            !!slot.textDivs &&
+                            (await highlightQuote(slot.textDivs, entry.quote));
+                        if (!found) pageNumber = null;
+                    } else {
+                        pageNumber = null;
+                    }
+                }
+
+                // No page given, or the words are not where the page said:
+                // look through the file's text for them.
+                if (!pageNumber) {
+                    const foundPage = await findPageWithQuote(
+                        entry.quote,
+                        generation,
+                    );
+                    if (generation !== renderGenerationRef.current) return null;
+                    if (!foundPage) continue;
+                    const slot = slotsRef.current[foundPage - 1];
+                    if (!slot) continue;
+                    slot.pinned = true;
+                    await drawSlot(slot, generation);
+                    if (generation !== renderGenerationRef.current) return null;
+                    if (
+                        slot.textDivs &&
+                        (await highlightQuote(slot.textDivs, entry.quote))
+                    ) {
+                        pageNumber = foundPage;
+                    }
+                }
+
+                if (pageNumber && firstHitPage === null)
+                    firstHitPage = pageNumber;
+            }
+            return firstHitPage;
+        },
+        [drawSlot, findPageWithQuote],
+    );
 
     const renderPDF = useCallback(
         async (
@@ -212,9 +382,17 @@ export function PdfView({
             scrollToPage?: number,
         ) => {
             if (!containerRef.current) return;
+            const generation = ++renderGenerationRef.current;
+            const superseded = () => generation !== renderGenerationRef.current;
+
+            observerRef.current?.disconnect();
+            observerRef.current = null;
+            slotsRef.current = [];
+            drawOrderRef.current = [];
             containerRef.current.innerHTML = "";
-            renderedPagesRef.current = [];
+
             const lib = await getPdfJs();
+            if (superseded()) return;
             lib.TextLayer.cleanup();
 
             setNumPages(doc.numPages);
@@ -225,20 +403,15 @@ export function PdfView({
             if (hasCitation && scrollContainerRef.current) {
                 scrollContainerRef.current.style.opacity = "0";
             }
-
-            let revealed = false;
             const reveal = () => {
-                revealed = true;
                 if (scrollContainerRef.current)
                     scrollContainerRef.current.style.opacity = "1";
             };
-            // The page the reader was sent to, if the citation names one. Once
-            // that page is drawn there is no reason to keep the document hidden
-            // while the rest of a long file finishes.
-            const citedPage = list.find((entry) => entry.page)?.page ?? null;
 
             const panelW = containerRef.current.clientWidth;
+            renderedWidthRef.current = panelW;
             const firstPage = await doc.getPage(1);
+            if (superseded()) return;
             const naturalWidth = firstPage.getViewport({ scale: 1 }).width;
             const baseScale = Math.max(
                 0.5,
@@ -246,112 +419,93 @@ export function PdfView({
             );
             const scale = baseScale * zoomRef.current;
 
+            // Lay every page out at its true size first, so the file is the
+            // right length straight away and the reader can move around it
+            // while the pages themselves are drawn.
             for (let pageNum = 1; pageNum <= doc.numPages; pageNum++) {
-                const page = await doc.getPage(pageNum);
+                const page =
+                    pageNum === 1 ? firstPage : await doc.getPage(pageNum);
+                if (superseded()) return;
                 const viewport = page.getViewport({ scale });
 
                 const wrapper = document.createElement("div");
                 wrapper.style.position = "relative";
                 wrapper.style.margin = "0 auto 8px";
-                wrapper.style.width = "fit-content";
+                wrapper.style.width = `${viewport.width}px`;
+                wrapper.style.height = `${viewport.height}px`;
+                wrapper.style.background = "#fff";
                 wrapper.className = "shadow-md";
-
-                const canvas = document.createElement("canvas");
-                canvas.width = viewport.width;
-                canvas.height = viewport.height;
-                canvas.style.display = "block";
-                wrapper.appendChild(canvas);
                 containerRef.current?.appendChild(wrapper);
 
-                const ctx = canvas.getContext("2d");
-                if (!ctx) continue;
-
-                const task = page.render({ canvasContext: ctx, viewport });
-                try {
-                    await task.promise;
-                } catch (e: unknown) {
-                    if (
-                        (e as { name?: string })?.name !==
-                        "RenderingCancelledException"
-                    ) {
-                        console.error("PDF render error", e);
-                    }
-                    continue;
-                }
-
-                const textLayerDiv = document.createElement("div");
-                textLayerDiv.className = "pdf-text-layer";
-                textLayerDiv.style.position = "absolute";
-                textLayerDiv.style.left = "0";
-                textLayerDiv.style.top = "0";
-                textLayerDiv.style.width = `${viewport.width}px`;
-                textLayerDiv.style.height = `${viewport.height}px`;
-                textLayerDiv.style.setProperty("--scale-factor", String(scale));
-                wrapper.appendChild(textLayerDiv);
-
-                const textLayer = new lib.TextLayer({
-                    textContentSource: page.streamTextContent(),
-                    container: textLayerDiv,
-                    viewport,
-                });
-                await textLayer.render();
-                const textDivs = textLayer.textDivs;
-
-                renderedPagesRef.current.push({
+                slotsRef.current.push({
+                    pageNumber: pageNum,
                     page,
                     viewport,
                     wrapper,
-                    canvas,
-                    textDivs,
+                    canvas: null,
+                    textLayerDiv: null,
+                    textDivs: null,
+                    drawing: null,
+                    pinned: false,
                 });
+            }
 
-                if (hasCitation && !revealed && citedPage === pageNum) {
-                    await applyHighlights(
-                        list.filter((entry) => entry.page === pageNum),
-                    );
-                    scrollToHighlightOnPage(pageNum);
-                    reveal();
+            // Draw pages as they come into view.
+            const observer = new IntersectionObserver(
+                (entries) => {
+                    for (const entry of entries) {
+                        if (!entry.isIntersecting) continue;
+                        const pageNumber = Number(
+                            (entry.target as HTMLElement).dataset.pageNumber,
+                        );
+                        const slot = slotsRef.current[pageNumber - 1];
+                        if (slot) void drawSlot(slot, generation);
+                    }
+                },
+                { root: scrollContainerRef.current, rootMargin: DRAW_AHEAD },
+            );
+            observerRef.current = observer;
+            for (const slot of slotsRef.current) {
+                slot.wrapper.dataset.pageNumber = String(slot.pageNumber);
+                observer.observe(slot.wrapper);
+            }
+
+            if (hasCitation) {
+                const hitPage = await showQuotes(list, generation);
+                if (superseded()) return;
+                const target =
+                    hitPage ?? list.find((entry) => entry.page)?.page ?? null;
+                if (target) scrollToHighlightOnPage(target);
+                reveal();
+                return;
+            }
+
+            if (scrollToPage && scrollToPage > 1) {
+                const slot = slotsRef.current[scrollToPage - 1];
+                if (slot) {
+                    await drawSlot(slot, generation);
+                    if (superseded()) return;
+                    scrollToHighlightOnPage(scrollToPage);
                 }
+            } else {
+                const first = slotsRef.current[0];
+                if (first) await drawSlot(first, generation);
             }
-
-            // Apply highlights across all entries, then scroll to the first hit.
-            let targetPage: number | null = null;
-            if (list.length) {
-                targetPage = await applyHighlights(list);
-                if (targetPage === null) {
-                    // Fallback: scroll to the first entry's page hint, even without a highlight
-                    const hint = list.find((e) => e.page)?.page ?? null;
-                    targetPage = hint;
-                }
-            }
-            const alreadyOnTargetPage = revealed && targetPage === citedPage;
-            if (targetPage && targetPage >= 1 && !alreadyOnTargetPage) {
-                scrollToHighlightOnPage(targetPage);
-            } else if (!hasCitation && scrollToPage && scrollToPage > 1) {
-                // Restore scroll position after zoom re-render
-                const pageEntry = renderedPagesRef.current[scrollToPage - 1];
-                if (pageEntry)
-                    pageEntry.wrapper.scrollIntoView({
-                        behavior: "instant" as ScrollBehavior,
-                        block: "start",
-                    });
-            }
-
             reveal();
         },
-        [applyHighlights, scrollToHighlightOnPage],
+        [drawSlot, scrollToHighlightOnPage, showQuotes],
     );
 
     const rehighlightQuotes = useCallback(
         async (list: QuoteEntry[]) => {
-            const targetPage = await applyHighlights(list);
-            const scrollPage =
-                targetPage ?? list.find((e) => e.page)?.page ?? null;
-            if (scrollPage && scrollPage >= 1) {
-                scrollToHighlightOnPage(scrollPage);
-            }
+            const generation = renderGenerationRef.current;
+            const hitPage = await showQuotes(list, generation);
+            if (generation !== renderGenerationRef.current) return;
+            const target =
+                hitPage ?? list.find((entry) => entry.page)?.page ?? null;
+            if (target) scrollToHighlightOnPage(target);
         },
-        [applyHighlights, scrollToHighlightOnPage],
+        [scrollToHighlightOnPage, showQuotes],
     );
 
     // Trackpad pinch-to-zoom (wheel + ctrlKey)
@@ -457,6 +611,7 @@ export function PdfView({
     // Clean up PDF.js static font-measurement canvases on unmount
     useEffect(() => {
         return () => {
+            observerRef.current?.disconnect();
             getPdfJs().then((lib) => lib.TextLayer.cleanup());
         };
     }, []);
@@ -465,7 +620,6 @@ export function PdfView({
     useEffect(() => {
         if (!result || result.type !== "pdf") return;
         pdfDocRef.current = null;
-        renderedPagesRef.current = [];
         quoteListRef.current = quoteList;
         zoomRef.current = 1.0;
         const list = quoteList;
@@ -497,9 +651,11 @@ export function PdfView({
     useEffect(() => {
         if (!pdfDocRef.current) return;
         const timer = setTimeout(() => {
-            if (pdfDocRef.current) {
-                renderPDF(pdfDocRef.current, quoteListRef.current);
-            }
+            if (!pdfDocRef.current) return;
+            // Opening the panel takes the width from nothing to its real size;
+            // redrawing for that would only repeat work already in hand.
+            if (Math.abs(containerWidth - renderedWidthRef.current) < 2) return;
+            renderPDF(pdfDocRef.current, quoteListRef.current);
         }, 150);
         return () => clearTimeout(timer);
     }, [containerWidth, renderPDF]);

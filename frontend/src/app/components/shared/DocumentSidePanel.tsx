@@ -5,6 +5,8 @@ import { createPortal } from "react-dom";
 import {
     AlertCircle,
     Check,
+    ChevronLeft,
+    ChevronRight,
     Download,
     Eye,
     Loader2,
@@ -36,6 +38,9 @@ const MIN_DATA_COLUMN_WIDTH = 280;
 const DEFAULT_DATA_COLUMN_WIDTH = 340;
 const RESIZER_WIDTH = 0;
 const MAX_PANEL_WIDTH = 1180;
+const DETAILS_OPEN_KEY = "documentPanelDetailsOpen";
+// The panel sits 12px in from the window edge; leave the same gap on its left.
+const PANEL_EDGE_GAP = 24;
 
 interface DocumentSidePanelProps {
     doc: Document | null;
@@ -133,6 +138,9 @@ export function DocumentSidePanel({
     const [panelWidth, setPanelWidth] = useState(
         DEFAULT_DOC_COLUMN_WIDTH + RESIZER_WIDTH + DEFAULT_DATA_COLUMN_WIDTH,
     );
+    // Whether the details column beside the document is showing. Remembered, so
+    // someone who wants the widest possible document keeps it.
+    const [detailsOpen, setDetailsOpen] = useState(true);
     const [isMobile, setIsMobile] = useState(false);
     const [mobilePane, setMobilePane] = useState<"document" | "details">(
         "document",
@@ -147,6 +155,40 @@ export function DocumentSidePanel({
     );
 
     useEffect(() => setMounted(true), []);
+
+    // Keep the page beside the panel instead of underneath it: the main area
+    // gives up exactly as much room as the panel takes, so a search result or
+    // an answer stays readable while its document is open.
+    useEffect(() => {
+        if (typeof document === "undefined") return;
+        const main = document.querySelector("main");
+        if (!main || !(main instanceof HTMLElement)) return;
+        if (!doc || isMobile) {
+            main.style.paddingRight = "";
+            return;
+        }
+        main.style.paddingRight = `${panelWidth + PANEL_EDGE_GAP}px`;
+        return () => {
+            main.style.paddingRight = "";
+        };
+    }, [doc, isMobile, panelWidth]);
+
+    useEffect(() => {
+        if (typeof window === "undefined") return;
+        setDetailsOpen(
+            window.localStorage.getItem(DETAILS_OPEN_KEY) !== "false",
+        );
+    }, []);
+
+    function toggleDetails() {
+        setDetailsOpen((open) => {
+            const next = !open;
+            if (typeof window !== "undefined") {
+                window.localStorage.setItem(DETAILS_OPEN_KEY, String(next));
+            }
+            return next;
+        });
+    }
 
     useEffect(() => {
         if (!mounted) return;
@@ -531,6 +573,23 @@ export function DocumentSidePanel({
                     </div>
                     <button
                         type="button"
+                        onClick={toggleDetails}
+                        className="hidden h-7 shrink-0 items-center gap-1 rounded-full border border-white/70 bg-white/55 px-2.5 text-[11px] font-medium text-gray-600 shadow-[inset_0_1px_0_rgba(255,255,255,0.75),inset_0_-1px_0_rgba(255,255,255,0.55),0_6px_18px_rgba(15,23,42,0.08)] backdrop-blur-xl transition-colors hover:bg-white/75 hover:text-gray-800 md:flex"
+                        title={
+                            detailsOpen
+                                ? "Hide the details and widen the document"
+                                : "Show the document details"
+                        }
+                    >
+                        {detailsOpen ? (
+                            <ChevronRight className="h-3.5 w-3.5" />
+                        ) : (
+                            <ChevronLeft className="h-3.5 w-3.5" />
+                        )}
+                        Details
+                    </button>
+                    <button
+                        type="button"
                         onClick={onClose}
                         className="flex h-7 w-7 shrink-0 items-center justify-center rounded-full border border-white/70 bg-white/55 text-gray-500 shadow-[inset_0_1px_0_rgba(255,255,255,0.75),inset_0_-1px_0_rgba(255,255,255,0.55),0_6px_18px_rgba(15,23,42,0.08)] backdrop-blur-xl transition-colors hover:bg-white/75 hover:text-gray-700"
                         aria-label="Close"
@@ -543,14 +602,16 @@ export function DocumentSidePanel({
             <div
                 className="grid min-h-0 flex-1"
                 style={{
-                    gridTemplateColumns: isMobile
-                        ? "minmax(0, 1fr)"
-                        : `minmax(${MIN_DOC_COLUMN_WIDTH}px, 1fr) ${RESIZER_WIDTH}px ${dataColumnWidth}px`,
+                    gridTemplateColumns:
+                        isMobile || !detailsOpen
+                            ? "minmax(0, 1fr)"
+                            : `minmax(${MIN_DOC_COLUMN_WIDTH}px, 1fr) ${RESIZER_WIDTH}px ${dataColumnWidth}px`,
                 }}
             >
                 <section
                     className={cn(
-                        "min-h-0 min-w-0 p-3 pt-0 md:flex md:pr-0",
+                        "min-h-0 min-w-0 p-3 pt-0 md:flex",
+                        detailsOpen ? "md:pr-0" : "md:pr-3",
                         mobilePane === "document" ? "flex" : "hidden",
                     )}
                 >
@@ -583,19 +644,22 @@ export function DocumentSidePanel({
                     </div>
                 </section>
 
-                <div
-                    onMouseDown={handleResizeMouseDown}
-                    className={cn(
-                        "relative z-10 hidden w-1.5 -translate-x-1/2 cursor-col-resize transition-colors md:block",
-                        "bg-transparent hover:bg-blue-400/60",
-                    )}
-                    title="Resize document panel"
-                />
+                {detailsOpen && (
+                    <div
+                        onMouseDown={handleResizeMouseDown}
+                        className={cn(
+                            "relative z-10 hidden w-1.5 -translate-x-1/2 cursor-col-resize transition-colors md:block",
+                            "bg-transparent hover:bg-blue-400/60",
+                        )}
+                        title="Resize document panel"
+                    />
+                )}
 
                 <aside
                     className={cn(
                         "mx-5 mt-2 min-h-0 flex-col",
-                        mobilePane === "details" ? "flex" : "hidden md:flex",
+                        mobilePane === "details" ? "flex" : "hidden",
+                        detailsOpen && "md:flex",
                     )}
                 >
                     <div className="mb-4 shrink-0">
