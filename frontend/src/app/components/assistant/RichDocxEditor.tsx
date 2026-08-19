@@ -8,6 +8,9 @@ import {
     AlignLeft,
     AlignCenter,
     AlignRight,
+    List,
+    ListOrdered,
+    Undo2,
     Loader2,
 } from "lucide-react";
 import { supabase } from "@/app/lib/supabase";
@@ -35,6 +38,7 @@ interface EditParagraph {
     text: string;
     align?: "left" | "center" | "right" | "justify" | null;
     heading?: number | null;
+    list?: "bullet" | "number" | null;
     runs: EditRun[];
 }
 
@@ -96,6 +100,9 @@ export function RichDocxEditor({
     const [loading, setLoading] = useState(true);
     const [error, setError] = useState<string | null>(null);
     const [saveState, setSaveState] = useState<SaveState>("idle");
+    const [undoError, setUndoError] = useState<string | null>(null);
+    // Bumped after an undo so the document is re-fetched and re-rendered.
+    const [reloadKey, setReloadKey] = useState(0);
 
     // --- serialize the rendered body into formatted paragraphs -------------
 
@@ -199,7 +206,24 @@ export function RichDocxEditor({
                 const hm = /(?:^|[\s_-])(?:docx_)?[Hh]eading\s?([1-9])/.exec(cls);
                 if (hm) heading = Number(hm[1]);
             }
-            paras.push({ text, align, heading, runs });
+            // A list item is either one we just marked, or one docx-preview
+            // rendered inside a <ul>/<ol> (or with a list-ish class) from the
+            // document's own numbering.
+            let list: "bullet" | "number" | null = null;
+            const markedList = p.dataset?.mikeList;
+            if (markedList === "bullet" || markedList === "number") {
+                list = markedList;
+            } else if (markedList === "none") {
+                list = null;
+            } else {
+                const li = p.closest("li");
+                if (li) {
+                    list = li.closest("ol") ? "number" : "bullet";
+                } else if (/docx-num|list-paragraph|ListParagraph/i.test(p.className || "")) {
+                    list = "bullet";
+                }
+            }
+            paras.push({ text, align, heading, list, runs });
         }
         return paras;
     }, [bodyParagraphEls]);
@@ -308,6 +332,75 @@ export function RichDocxEditor({
         },
         [scheduleSave],
     );
+
+    /** Mark the paragraph(s) in the selection as a bullet/numbered item. */
+    const applyList = useCallback(
+        (kind: "bullet" | "number") => {
+            const sel = window.getSelection();
+            const root = containerRef.current;
+            if (!sel || sel.rangeCount === 0 || !root) return;
+            const range = sel.getRangeAt(0);
+            const paras = Array.from(
+                root.querySelectorAll<HTMLElement>("article p"),
+            ).filter(
+                (p) => !p.closest("header, footer") && range.intersectsNode(p),
+            );
+            if (paras.length === 0) return;
+            // Toggle: if every selected paragraph is already this kind, clear it.
+            const allSame = paras.every((p) => p.dataset.mikeList === kind);
+            for (const p of paras) {
+                if (allSame) {
+                    p.dataset.mikeList = "none";
+                    p.style.removeProperty("list-style-type");
+                    p.style.removeProperty("display");
+                    p.style.removeProperty("margin-left");
+                } else {
+                    p.dataset.mikeList = kind;
+                    // Show it as a list straight away.
+                    p.style.display = "list-item";
+                    p.style.listStyleType = kind === "bullet" ? "disc" : "decimal";
+                    p.style.marginLeft = "2em";
+                }
+            }
+            containerRef.current?.focus();
+            scheduleSave();
+        },
+        [scheduleSave],
+    );
+
+    /** Step the document back to how it was before the last save. */
+    const undoLastSave = useCallback(async () => {
+        if (savingRef.current) return;
+        setSaveState("saving");
+        try {
+            const headers = await authHeaders();
+            const resp = await fetch(
+                `${apiBase}/single-documents/${documentId}/undo-edit`,
+                { method: "POST", headers },
+            );
+            if (!resp.ok) {
+                const body = (await resp.json().catch(() => null)) as {
+                    detail?: string;
+                } | null;
+                setUndoError(body?.detail ?? "Couldn't undo.");
+                setSaveState("idle");
+                return;
+            }
+            const data = (await resp.json()) as { id?: string };
+            if (data.id) {
+                savedVersionRef.current = data.id;
+                onSaved?.(data.id);
+            }
+            setUndoError(null);
+            // Re-render the restored document.
+            setReloadKey((n) => n + 1);
+            setSaveState("idle");
+        } catch (e) {
+            console.error("[RichDocxEditor] undo failed", e);
+            setUndoError("Couldn't undo.");
+            setSaveState("idle");
+        }
+    }, [documentId, onSaved]);
 
     /** Mark the paragraph(s) in the selection as a heading (0 = body text). */
     const applyHeading = useCallback(
@@ -454,7 +547,7 @@ export function RichDocxEditor({
             cancelled = true;
             if (saveTimer.current) clearTimeout(saveTimer.current);
         };
-    }, [documentId, bodyParagraphEls]);
+    }, [documentId, bodyParagraphEls, reloadKey]);
 
     const ToolbarButton = ({
         onClick,
@@ -512,6 +605,19 @@ export function RichDocxEditor({
                     <AlignRight className="h-4 w-4" />
                 </ToolbarButton>
                 <div className="mx-1 h-5 w-px bg-gray-200" />
+                <ToolbarButton
+                    onClick={() => applyList("bullet")}
+                    title="Bulleted list"
+                >
+                    <List className="h-4 w-4" />
+                </ToolbarButton>
+                <ToolbarButton
+                    onClick={() => applyList("number")}
+                    title="Numbered list"
+                >
+                    <ListOrdered className="h-4 w-4" />
+                </ToolbarButton>
+                <div className="mx-1 h-5 w-px bg-gray-200" />
                 <select
                     aria-label="Paragraph style"
                     title="Paragraph style"
@@ -564,6 +670,26 @@ export function RichDocxEditor({
                         </option>
                     ))}
                 </select>
+                <div className="mx-1 h-5 w-px bg-gray-200" />
+                <ToolbarButton
+                    onClick={() => void undoLastSave()}
+                    title="Undo the last saved change"
+                >
+                    <Undo2 className="h-4 w-4" />
+                </ToolbarButton>
+                {undoError && (
+                    <span className="flex items-center gap-1 rounded bg-amber-50 px-1.5 py-0.5 text-[11px] text-amber-800">
+                        {undoError}
+                        <button
+                            type="button"
+                            onClick={() => setUndoError(null)}
+                            aria-label="Dismiss"
+                            className="text-amber-600 hover:text-amber-900"
+                        >
+                            ×
+                        </button>
+                    </span>
+                )}
                 <span className="ml-auto pr-1 text-xs text-gray-400">
                     {saveState === "saving"
                         ? "Saving…"
