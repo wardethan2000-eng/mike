@@ -1,6 +1,7 @@
 "use client";
 
 import {
+    Fragment,
     use,
     useCallback,
     useEffect,
@@ -9,12 +10,13 @@ import {
     useReducer,
     useRef,
     useState,
+    type ReactNode,
 } from "react";
 import { useRouter } from "next/navigation";
 import {
-    ChevronLeft,
-    ChevronRight,
+    Columns3,
     FileText,
+    FolderClosed,
     Loader2,
     Pencil,
     Trash2,
@@ -52,6 +54,12 @@ import { useUserProfile } from "@/app/contexts/UserProfileContext";
 import { useSidebar } from "@/app/contexts/SidebarContext";
 import { PageHeader } from "@/app/components/shared/PageHeader";
 import { HeaderActionsMenu } from "@/app/components/shared/HeaderActionsMenu";
+import { PaneHeader } from "@/app/components/projects/PaneHeader";
+import {
+    PANE_LABELS,
+    useProjectChatLayout,
+    type PaneId,
+} from "@/app/hooks/useProjectChatLayout";
 import type {
     CitationQuote,
     Citation,
@@ -105,10 +113,6 @@ type EditScrollTarget = {
 
 const ICON_SIZE = 28;
 const GAP = 14;
-const EXPLORER_MIN = 160;
-const EXPLORER_DEFAULT = 280;
-const CHAT_MIN = 320;
-const CHAT_DEFAULT = 420;
 const DEFAULT_ASSISTANT_BOTTOM_PADDING = 116;
 
 function AssistantGreeting({ username }: { username: string }) {
@@ -241,10 +245,10 @@ export default function ProjectAssistantChatPage({ params }: Props) {
     const pendingDeleteFolderStatus = folderDeleteDialog.status;
     const folderDeleteDismissTimerRef = useRef<number | null>(null);
 
-    // Panel widths
-    const [explorerWidth, setExplorerWidth] = useState(EXPLORER_DEFAULT);
-    const [chatWidth, setChatWidth] = useState(CHAT_DEFAULT);
-    const [explorerCollapsed, setExplorerCollapsed] = useState(false);
+    // Panel arrangement — order, sizes and whether the files rail is showing
+    // are the reader's own choice and are remembered between visits.
+    const [draggingPane, setDraggingPane] = useState<PaneId | null>(null);
+    const paneRowRef = useRef<HTMLDivElement>(null);
 
     // Upload state
     const fileInputRef = useRef<HTMLInputElement>(null);
@@ -266,6 +270,17 @@ export default function ProjectAssistantChatPage({ params }: Props) {
     );
 
     const activeTab = tabs.find((t) => t.documentId === activeTabId) ?? null;
+
+    const {
+        layout,
+        laidOut,
+        filesOpen,
+        setFilesOpen,
+        movePane,
+        resizePanes,
+        resetLayout,
+        isDefaultLayout,
+    } = useProjectChatLayout({ documentOpen: tabs.length > 0 });
     const tabBarRef = useRef<HTMLDivElement | null>(null);
     const tabItemRefs = useRef<Record<string, HTMLDivElement | null>>({});
 
@@ -959,426 +974,326 @@ export default function ProjectAssistantChatPage({ params }: Props) {
         }
     };
 
-    // ── Resize handlers ───────────────────────────────────────────────────────
-    const onExplorerDividerDrag = useCallback((dx: number) => {
-        setExplorerWidth((w) => Math.max(EXPLORER_MIN, w + dx));
-    }, []);
+    // ── Panel arrangement ─────────────────────────────────────────────────────
+    const handleDividerDrag = useCallback(
+        (left: PaneId, right: PaneId, dx: number) => {
+            resizePanes(
+                left,
+                right,
+                dx,
+                paneRowRef.current?.getBoundingClientRect().width ?? 0,
+            );
+        },
+        [resizePanes],
+    );
 
-    const onChatDividerDrag = useCallback((dx: number) => {
-        setChatWidth((w) => Math.max(CHAT_MIN, w - dx));
-    }, []);
-
-    return (
-        <div className="flex flex-col h-full">
-            {/* Page header */}
-            <PageHeader
-                shrink
-                breadcrumbs={[
-                    {
-                        label: "Projects",
-                        onClick: () => router.push("/projects"),
-                    },
-                    project
-                        ? {
-                              label: project.name,
-                              onClick: () =>
-                                  router.push(`/projects/${projectId}`),
-                              title: "Back to project",
-                          }
-                        : {
-                              loading: true,
-                              skeletonClassName: "w-32",
-                              onClick: () =>
-                                  router.push(`/projects/${projectId}`),
-                              title: "Back to project",
-                          },
-                    {
-                        label: "Chats",
-                        onClick: () =>
-                            router.push(`/projects/${projectId}/assistant`),
-                        title: "Back to Chats",
-                    },
-                    chatLoaded
-                        ? {
-                              label: chatTitle ?? "Untitled New Chat",
-                          }
-                        : {
-                              loading: true,
-                              skeletonClassName: "w-40",
-                          },
-                ]}
-                actions={[
-                    {
-                        type: "new",
-                        onClick: handleNewChat,
-                        loading: creatingChat,
-                        title: "New chat",
-                    },
-                    {
-                        type: "custom",
-                        render: (
-                            <HeaderActionsMenu
-                                items={[
-                                    {
-                                        label: "Rename",
-                                        icon: Pencil,
-                                        onSelect: () =>
-                                            void handleRenameChat(),
-                                    },
-                                    {
-                                        label: deletingChat
-                                            ? "Deleting..."
-                                            : "Delete",
-                                        icon: Trash2,
-                                        onSelect: () =>
-                                            void handleDeleteChat(),
-                                        disabled: deletingChat,
-                                        variant: "danger",
-                                    },
-                                ]}
+    // ── The three panels ──────────────────────────────────────────────────────
+    // Each is laid out by the reader's own arrangement below.
+    const paneContent: Record<PaneId, ReactNode> = {
+        files: (
+            <div
+                className="flex h-full min-h-0 flex-col"
+                onDragOver={(e) => {
+                    e.preventDefault();
+                    // Only show the upload overlay for external file drags, not internal moves
+                    const isInternal =
+                        Array.from(e.dataTransfer.types).includes(
+                            "application/mike-doc",
+                        ) ||
+                        Array.from(e.dataTransfer.types).includes(
+                            "application/mike-folder",
+                        );
+                    if (!isInternal) setExplorerDragOver(true);
+                }}
+                onDragLeave={(e) => {
+                    if (!e.currentTarget.contains(e.relatedTarget as Node))
+                        setExplorerDragOver(false);
+                }}
+                onDrop={handleExplorerFileDrop}
+            >
+                <PaneHeader
+                    paneId="files"
+                    label={PANE_LABELS.files}
+                    draggingPane={draggingPane}
+                    onDragStateChange={setDraggingPane}
+                    onDropPane={movePane}
+                    actions={
+                        <>
+                            <input
+                                ref={fileInputRef}
+                                type="file"
+                                accept=".pdf,.docx,.doc,.xlsx,.xlsm,.xls,.pptx,.ppt,.jpg,.jpeg,.png,.tif,.tiff,.bmp,.gif,.heic,.heif,.webp,.txt,.md,.csv,.rtf,.odt"
+                                multiple
+                                className="hidden"
+                                onChange={(e) =>
+                                    uploadFiles(Array.from(e.target.files ?? []))
+                                }
                             />
-                        ),
-                    },
-                ]}
-            />
-
-            {/* Three-panel body */}
-            <div className="flex flex-1 min-h-0 border-t border-gray-200 overflow-hidden">
-                {/* LEFT: Project Explorer */}
-                {!explorerCollapsed && (
-                    <>
-                        <div
-                            style={{ width: explorerWidth }}
-                            className="shrink-0 flex flex-col border-r border-gray-200"
-                            onDragOver={(e) => {
-                                e.preventDefault();
-                                // Only show the upload overlay for external file drags, not internal moves
-                                const isInternal =
-                                    Array.from(e.dataTransfer.types).includes(
-                                        "application/mike-doc",
-                                    ) ||
-                                    Array.from(e.dataTransfer.types).includes(
-                                        "application/mike-folder",
-                                    );
-                                if (!isInternal) setExplorerDragOver(true);
-                            }}
-                            onDragLeave={(e) => {
-                                if (
-                                    !e.currentTarget.contains(
-                                        e.relatedTarget as Node,
-                                    )
-                                )
-                                    setExplorerDragOver(false);
-                            }}
-                            onDrop={handleExplorerFileDrop}
-                        >
-                            {/* Explorer header */}
-                            <div className="h-10 flex items-center justify-between px-3 border-b border-gray-200 shrink-0">
-                                <span className="text-xs text-gray-700">
-                                    Explorer
-                                </span>
-                                <div className="flex items-center gap-1">
-                                    <input
-                                        ref={fileInputRef}
-                                        type="file"
-                                        accept=".pdf,.docx,.doc,.xlsx,.xlsm,.xls,.pptx,.ppt,.jpg,.jpeg,.png,.tif,.tiff,.bmp,.gif,.heic,.heif,.webp,.txt,.md,.csv,.rtf,.odt"
-                                        multiple
-                                        className="hidden"
-                                        onChange={(e) =>
-                                            uploadFiles(
-                                                Array.from(
-                                                    e.target.files ?? [],
-                                                ),
-                                            )
-                                        }
-                                    />
-                                    <button
-                                        onClick={() =>
-                                            fileInputRef.current?.click()
-                                        }
-                                        disabled={uploading}
-                                        title="Upload documents"
-                                        className="p-1 rounded text-gray-400 hover:text-gray-700 hover:bg-gray-100 transition-colors disabled:opacity-40"
-                                    >
-                                        {uploading ? (
-                                            <Loader2 className="h-3.5 w-3.5 animate-spin" />
-                                        ) : (
-                                            <Upload className="h-3.5 w-3.5" />
-                                        )}
-                                    </button>
-                                    <button
-                                        onClick={() =>
-                                            setExplorerCollapsed(true)
-                                        }
-                                        title="Collapse explorer"
-                                        className="p-1 rounded text-gray-400 hover:text-gray-700 hover:bg-gray-100 transition-colors"
-                                    >
-                                        <ChevronLeft className="h-3.5 w-3.5" />
-                                    </button>
-                                </div>
-                            </div>
-
-                            {/* Drop overlay */}
-                            <div
-                                className={`flex-1 overflow-y-auto relative h-full ${explorerDragOver ? "bg-blue-50" : ""}`}
-                                onDragOver={(e) => {
-                                    e.preventDefault();
-                                }}
-                                onDrop={async (e) => {
-                                    e.preventDefault();
-                                    const docId = e.dataTransfer.getData(
-                                        "application/mike-doc",
-                                    );
-                                    const folderId = e.dataTransfer.getData(
-                                        "application/mike-folder",
-                                    );
-                                    if (docId) {
-                                        e.stopPropagation();
-                                        await handleMoveDoc(docId, null);
-                                    } else if (folderId) {
-                                        e.stopPropagation();
-                                        await handleMoveFolder(folderId, null);
-                                    }
-                                    // External file drops are not stopped — they bubble to handleExplorerFileDrop
-                                }}
-                            >
-                                {explorerDragOver && (
-                                    <div className="absolute inset-0 z-10 flex items-center justify-center pointer-events-none">
-                                        <p className="text-xs text-blue-500 font-medium">
-                                            Drop to upload
-                                        </p>
-                                    </div>
-                                )}
-                                <ProjectExplorer
-                                    projectName={project?.name}
-                                    documents={project?.documents ?? []}
-                                    folders={project?.folders ?? []}
-                                    selectedDocId={selectedDocId}
-                                    onDocClick={handleDocClick}
-                                    onCreateFolder={handleCreateFolder}
-                                    onRenameFolder={handleRenameFolder}
-                                    onDeleteFolder={requestDeleteFolder}
-                                    onDeleteDoc={handleDeleteDoc}
-                                    onMoveDoc={handleMoveDoc}
-                                    onMoveFolder={handleMoveFolder}
-                                />
-                            </div>
-                        </div>
-                        <Divider onDrag={onExplorerDividerDrag} />
-                    </>
-                )}
-
-                {/* Collapsed explorer toggle */}
-                {explorerCollapsed && (
-                    <div className="shrink-0 flex flex-col border-r border-gray-200">
-                        <div className="h-10 flex items-center justify-center border-b border-gray-200 shrink-0 px-1">
                             <button
-                                onClick={() => setExplorerCollapsed(false)}
-                                title="Expand explorer"
+                                onClick={() => fileInputRef.current?.click()}
+                                disabled={uploading}
+                                title="Upload documents"
+                                className="p-1 rounded text-gray-400 hover:text-gray-700 hover:bg-gray-100 transition-colors disabled:opacity-40"
+                            >
+                                {uploading ? (
+                                    <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                                ) : (
+                                    <Upload className="h-3.5 w-3.5" />
+                                )}
+                            </button>
+                            <button
+                                onClick={() => setFilesOpen(false)}
+                                title="Hide files"
                                 className="p-1 rounded text-gray-400 hover:text-gray-700 hover:bg-gray-100 transition-colors"
                             >
-                                <ChevronRight className="h-3.5 w-3.5" />
+                                <X className="h-3.5 w-3.5" />
                             </button>
-                        </div>
-                    </div>
-                )}
+                        </>
+                    }
+                >
+                    <span className="self-center truncate text-xs text-gray-700">
+                        Files
+                    </span>
+                </PaneHeader>
 
-                {/* CENTER: Document Panel */}
-                <div className="flex-1 flex flex-col min-w-0 border-r border-gray-200">
-                    {/* Tab bar */}
+                <div
+                    className={`flex-1 min-h-0 overflow-y-auto relative ${explorerDragOver ? "bg-blue-50" : ""}`}
+                    onDragOver={(e) => {
+                        e.preventDefault();
+                    }}
+                    onDrop={async (e) => {
+                        e.preventDefault();
+                        const docId = e.dataTransfer.getData(
+                            "application/mike-doc",
+                        );
+                        const folderId = e.dataTransfer.getData(
+                            "application/mike-folder",
+                        );
+                        if (docId) {
+                            e.stopPropagation();
+                            await handleMoveDoc(docId, null);
+                        } else if (folderId) {
+                            e.stopPropagation();
+                            await handleMoveFolder(folderId, null);
+                        }
+                        // External file drops are not stopped — they bubble to handleExplorerFileDrop
+                    }}
+                >
+                    {explorerDragOver && (
+                        <div className="absolute inset-0 z-10 flex items-center justify-center pointer-events-none">
+                            <p className="text-xs text-blue-500 font-medium">
+                                Drop to upload
+                            </p>
+                        </div>
+                    )}
+                    <ProjectExplorer
+                        projectName={project?.name}
+                        documents={project?.documents ?? []}
+                        folders={project?.folders ?? []}
+                        selectedDocId={selectedDocId}
+                        onDocClick={handleDocClick}
+                        onCreateFolder={handleCreateFolder}
+                        onRenameFolder={handleRenameFolder}
+                        onDeleteFolder={requestDeleteFolder}
+                        onDeleteDoc={handleDeleteDoc}
+                        onMoveDoc={handleMoveDoc}
+                        onMoveFolder={handleMoveFolder}
+                    />
+                </div>
+            </div>
+        ),
+
+        document: (
+            <div className="flex h-full min-h-0 flex-col">
+                <PaneHeader
+                    paneId="document"
+                    label={PANE_LABELS.document}
+                    draggingPane={draggingPane}
+                    onDragStateChange={setDraggingPane}
+                    onDropPane={movePane}
+                >
                     <div
                         ref={tabBarRef}
-                        className="h-10 flex items-end border-b border-gray-200 shrink-0 overflow-x-auto min-w-0 [scrollbar-width:none] [-ms-overflow-style:none] [&::-webkit-scrollbar]:hidden"
+                        className="flex w-full min-w-0 items-end overflow-x-auto [scrollbar-width:none] [-ms-overflow-style:none] [&::-webkit-scrollbar]:hidden"
                     >
-                        {tabs.length === 0 ? (
-                            <span className="px-4 self-center text-xs text-gray-700">
-                                Document Viewer
-                            </span>
-                        ) : (
-                            tabs.map((tab) => {
-                                const isActive = tab.documentId === activeTabId;
-                                const ext = tab.filename
-                                    .split(".")
-                                    .pop()
-                                    ?.toLowerCase();
-                                const iconColor =
-                                    ext === "pdf"
-                                        ? "text-red-500"
-                                        : ext === "doc" || ext === "docx"
-                                          ? "text-blue-500"
-                                          : "text-gray-400";
-                                // Pull the doc's latest_version_number out
-                                // of the project state so the tab shows V#
-                                // whenever the doc has been edited.
-                                const versionNumber = (
-                                    project?.documents ?? []
-                                ).find((d) => d.id === tab.documentId)
-                                    ?.latest_version_number as
-                                    | number
-                                    | null
-                                    | undefined;
-                                const showVersionBadge =
-                                    typeof versionNumber === "number" &&
-                                    Number.isFinite(versionNumber) &&
-                                    versionNumber > 1;
-                                return (
-                                    <div
-                                        key={tab.documentId}
-                                        ref={(el) => {
-                                            tabItemRefs.current[
-                                                tab.documentId
-                                            ] = el;
-                                        }}
-                                        onClick={() =>
-                                            switchTab(tab.documentId)
-                                        }
-                                        className={`group flex items-center gap-1.5 px-3 h-full border-r border-gray-200 cursor-pointer shrink-0 max-w-[260px] transition-colors ${
-                                            isActive
-                                                ? "bg-gray-100"
-                                                : "bg-white hover:bg-gray-50"
-                                        }`}
+                        {tabs.map((tab) => {
+                            const isActive = tab.documentId === activeTabId;
+                            const ext = tab.filename
+                                .split(".")
+                                .pop()
+                                ?.toLowerCase();
+                            const iconColor =
+                                ext === "pdf"
+                                    ? "text-red-500"
+                                    : ext === "doc" || ext === "docx"
+                                      ? "text-blue-500"
+                                      : "text-gray-400";
+                            // Pull the doc's latest_version_number out
+                            // of the project state so the tab shows V#
+                            // whenever the doc has been edited.
+                            const versionNumber = (
+                                project?.documents ?? []
+                            ).find((d) => d.id === tab.documentId)
+                                ?.latest_version_number as
+                                | number
+                                | null
+                                | undefined;
+                            const showVersionBadge =
+                                typeof versionNumber === "number" &&
+                                Number.isFinite(versionNumber) &&
+                                versionNumber > 1;
+                            return (
+                                <div
+                                    key={tab.documentId}
+                                    ref={(el) => {
+                                        tabItemRefs.current[tab.documentId] =
+                                            el;
+                                    }}
+                                    onClick={() => switchTab(tab.documentId)}
+                                    className={`group flex items-center gap-1.5 px-3 h-full border-r border-gray-200 cursor-pointer shrink-0 max-w-[260px] transition-colors ${
+                                        isActive
+                                            ? "bg-gray-100"
+                                            : "bg-white hover:bg-gray-50"
+                                    }`}
+                                >
+                                    <FileText
+                                        className={`h-3.5 w-3.5 shrink-0 ${iconColor}`}
+                                    />
+                                    <span
+                                        className={`text-xs truncate ${isActive ? "text-gray-900 font-medium" : "text-gray-500"}`}
                                     >
-                                        <FileText
-                                            className={`h-3.5 w-3.5 shrink-0 ${iconColor}`}
-                                        />
+                                        {tab.filename}
+                                    </span>
+                                    {showVersionBadge && (
                                         <span
-                                            className={`text-xs truncate ${isActive ? "text-gray-900 font-medium" : "text-gray-500"}`}
+                                            className={`shrink-0 inline-flex items-center rounded border px-1 py-px text-[9px] font-medium ${
+                                                isActive
+                                                    ? "border-gray-200 bg-white text-gray-600"
+                                                    : "border-gray-200 bg-gray-50 text-gray-500"
+                                            }`}
                                         >
-                                            {tab.filename}
+                                            V{versionNumber}
                                         </span>
-                                        {showVersionBadge && (
-                                            <span
-                                                className={`shrink-0 inline-flex items-center rounded border px-1 py-px text-[9px] font-medium ${
-                                                    isActive
-                                                        ? "border-gray-200 bg-white text-gray-600"
-                                                        : "border-gray-200 bg-gray-50 text-gray-500"
-                                                }`}
-                                            >
-                                                V{versionNumber}
-                                            </span>
-                                        )}
-                                        <button
-                                            onClick={(e) => {
-                                                e.stopPropagation();
-                                                closeTab(tab.documentId);
-                                            }}
-                                            className={`shrink-0 transition-colors ${isActive ? "text-gray-500 hover:text-gray-700" : "text-gray-300 hover:text-gray-600"}`}
-                                        >
-                                            <X className="h-3 w-3" />
-                                        </button>
-                                    </div>
-                                );
-                            })
-                        )}
-                    </div>
-                    <div className="flex-1 min-h-0 overflow-hidden flex flex-col">
-                        {activeTab ? (
-                            activeTab.panelDocument ? (
-                                <DocPanel
-                                    key={activeTab.documentId}
-                                    document={activeTab.panelDocument}
-                                    mode={
-                                        activeTab.citation
-                                            ? {
-                                                  kind: "citation",
-                                                  citation: activeTab.citation,
-                                              }
-                                            : { kind: "document" }
-                                    }
-                                    onQuote={(quote) =>
-                                        chatInputRef.current?.addQuote(quote)
-                                    }
-                                />
-                            ) : isDocxFilename(activeTab.filename) ? (
-                                <DocxView
-                                    key={activeTab.documentId}
-                                    documentId={activeTab.documentId}
-                                    versionId={activeTab.versionId}
-                                    refetchKey={activeTab.refetchKey}
-                                    quotes={activeQuotes ?? undefined}
-                                    highlightEdit={
-                                        editScrollTarget &&
-                                        editScrollTarget.documentId ===
-                                            activeTab.documentId
-                                            ? editScrollTarget
-                                            : null
-                                    }
-                                    onReady={() =>
-                                        handleDocxReady(activeTab.documentId)
-                                    }
-                                    warning={activeTab.warning ?? null}
-                                    onWarningDismiss={() =>
-                                        dismissTabWarning(activeTab.documentId)
-                                    }
-                                    initialScrollTop={
-                                        activeTab.scrollTop ?? null
-                                    }
-                                    onScrollChange={(top) =>
-                                        handleTabScrollChange(
-                                            activeTab.documentId,
-                                            top,
-                                        )
-                                    }
-                                    rounded={false}
-                                    onQuote={(text) =>
-                                        chatInputRef.current?.addQuote({
-                                            text,
-                                            documentId: activeTab.documentId,
-                                            documentTitle: activeTab.filename,
-                                        })
-                                    }
-                                />
-                            ) : isSpreadsheetFilename(activeTab.filename) ? (
-                                <SpreadsheetView
-                                    key={activeTab.documentId}
-                                    documentId={activeTab.documentId}
-                                    versionId={activeTab.versionId}
-                                    rounded={false}
-                                />
-                            ) : (
-                                <PdfView
-                                    key={activeTab.documentId}
-                                    doc={{ document_id: activeTab.documentId }}
-                                    quotes={activeQuotes ?? undefined}
-                                    rounded={false}
-                                />
-                            )
-                        ) : (
-                            <div className="flex items-center justify-center h-full px-8 bg-gray-100">
-                                <div className="text-center space-y-3">
-                                    <p className="font-serif text-gray-700 text-xl">
-                                        Click on a document to display here.
-                                    </p>
-                                    <p className="font-serif text-base text-gray-500">
-                                        Pro tip: Drag a document from the
-                                        Project Explorer to the Assistant to
-                                        direct it to read or edit.
-                                    </p>
+                                    )}
+                                    <button
+                                        onClick={(e) => {
+                                            e.stopPropagation();
+                                            closeTab(tab.documentId);
+                                        }}
+                                        className={`shrink-0 transition-colors ${isActive ? "text-gray-500 hover:text-gray-700" : "text-gray-300 hover:text-gray-600"}`}
+                                    >
+                                        <X className="h-3 w-3" />
+                                    </button>
                                 </div>
-                            </div>
-                        )}
+                            );
+                        })}
                     </div>
+                </PaneHeader>
+
+                <div className="flex-1 min-h-0 overflow-hidden flex flex-col">
+                    {activeTab ? (
+                        activeTab.panelDocument ? (
+                            <DocPanel
+                                key={activeTab.documentId}
+                                document={activeTab.panelDocument}
+                                mode={
+                                    activeTab.citation
+                                        ? {
+                                              kind: "citation",
+                                              citation: activeTab.citation,
+                                          }
+                                        : { kind: "document" }
+                                }
+                                onQuote={(quote) =>
+                                    chatInputRef.current?.addQuote(quote)
+                                }
+                            />
+                        ) : isDocxFilename(activeTab.filename) ? (
+                            <DocxView
+                                key={activeTab.documentId}
+                                documentId={activeTab.documentId}
+                                versionId={activeTab.versionId}
+                                refetchKey={activeTab.refetchKey}
+                                quotes={activeQuotes ?? undefined}
+                                highlightEdit={
+                                    editScrollTarget &&
+                                    editScrollTarget.documentId ===
+                                        activeTab.documentId
+                                        ? editScrollTarget
+                                        : null
+                                }
+                                onReady={() =>
+                                    handleDocxReady(activeTab.documentId)
+                                }
+                                warning={activeTab.warning ?? null}
+                                onWarningDismiss={() =>
+                                    dismissTabWarning(activeTab.documentId)
+                                }
+                                initialScrollTop={activeTab.scrollTop ?? null}
+                                onScrollChange={(top) =>
+                                    handleTabScrollChange(
+                                        activeTab.documentId,
+                                        top,
+                                    )
+                                }
+                                rounded={false}
+                                onQuote={(text) =>
+                                    chatInputRef.current?.addQuote({
+                                        text,
+                                        documentId: activeTab.documentId,
+                                        documentTitle: activeTab.filename,
+                                    })
+                                }
+                            />
+                        ) : isSpreadsheetFilename(activeTab.filename) ? (
+                            <SpreadsheetView
+                                key={activeTab.documentId}
+                                documentId={activeTab.documentId}
+                                versionId={activeTab.versionId}
+                                rounded={false}
+                            />
+                        ) : (
+                            <PdfView
+                                key={activeTab.documentId}
+                                doc={{ document_id: activeTab.documentId }}
+                                quotes={activeQuotes ?? undefined}
+                                rounded={false}
+                            />
+                        )
+                    ) : (
+                        <div className="flex items-center justify-center h-full px-8 bg-gray-100">
+                            <p className="font-serif text-gray-700 text-xl">
+                                Pick a tab to read a document.
+                            </p>
+                        </div>
+                    )}
                 </div>
+            </div>
+        ),
 
-                <Divider onDrag={onChatDividerDrag} />
-
-                {/* RIGHT: Assistant Panel */}
-                <div
-                    ref={assistantPanelRef}
-                    style={{ width: chatWidth }}
-                    className="relative shrink-0 flex flex-col"
-                    onDragOver={(e) => e.preventDefault()}
-                    onDrop={handleChatDrop}
+        chat: (
+            <div
+                ref={assistantPanelRef}
+                className="relative flex h-full min-h-0 flex-col"
+                onDragOver={(e) => e.preventDefault()}
+                onDrop={handleChatDrop}
+            >
+                <PaneHeader
+                    paneId="chat"
+                    label={PANE_LABELS.chat}
+                    draggingPane={draggingPane}
+                    onDragStateChange={setDraggingPane}
+                    onDropPane={movePane}
                 >
-                    <div className="h-10 flex items-center px-4 border-b border-gray-200 shrink-0">
-                        <span className="text-xs text-gray-700">
-                            Project Assistant
-                        </span>
-                    </div>
+                    <span className="self-center truncate text-xs text-gray-700">
+                        Project Assistant
+                    </span>
+                </PaneHeader>
 
-                    {/* Messages / greeting / shimmer */}
-                    {!chatLoaded ? (
-                        <div className="flex-1 px-4 py-4 space-y-4">
+                {/* Messages / greeting / shimmer */}
+                {!chatLoaded ? (
+                    <div className="flex-1 px-4 py-4">
+                        <div className="mx-auto w-full max-w-3xl space-y-4">
                             <div className="flex justify-end">
                                 <div className="bg-gray-100 rounded-2xl p-4 w-3/4">
                                     <div className="h-3 bg-gradient-to-r from-gray-200 via-gray-300 to-gray-200 bg-[length:200%_100%] animate-[shimmer_2s_ease-in-out_infinite] rounded w-full" />
@@ -1393,19 +1308,21 @@ export default function ProjectAssistantChatPage({ params }: Props) {
                                 ))}
                             </div>
                         </div>
-                    ) : messages.length === 0 ? (
-                        <div className="flex-1 flex flex-col min-h-0">
-                            <AssistantGreeting username={username} />
-                        </div>
-                    ) : (
-                        <div
-                            ref={messagesContainerRef}
-                            className="flex-1 overflow-y-auto px-4 pt-6 md:pt-8 space-y-6 md:space-y-8 min-h-0"
-                            style={{
-                                paddingBottom: DEFAULT_ASSISTANT_BOTTOM_PADDING,
-                                scrollbarGutter: "stable",
-                            }}
-                        >
+                    </div>
+                ) : messages.length === 0 ? (
+                    <div className="flex-1 flex flex-col min-h-0">
+                        <AssistantGreeting username={username} />
+                    </div>
+                ) : (
+                    <div
+                        ref={messagesContainerRef}
+                        className="flex-1 overflow-y-auto px-4 pt-6 md:pt-8 min-h-0"
+                        style={{
+                            paddingBottom: DEFAULT_ASSISTANT_BOTTOM_PADDING,
+                            scrollbarGutter: "stable",
+                        }}
+                    >
+                        <div className="mx-auto w-full max-w-3xl space-y-6 md:space-y-8">
                             {(() => {
                                 const lastUserIdx = messages
                                     .map((m) => m.role)
@@ -1451,9 +1368,7 @@ export default function ProjectAssistantChatPage({ params }: Props) {
                                             }
                                             isError={!!msg.error}
                                             citations={msg.citations}
-                                            citationStatus={
-                                                msg.citationStatus
-                                            }
+                                            citationStatus={msg.citationStatus}
                                             onCitationClick={
                                                 handleCitationClick
                                             }
@@ -1481,12 +1396,14 @@ export default function ProjectAssistantChatPage({ params }: Props) {
                             })()}
                             <div ref={messagesEndRef} />
                         </div>
-                    )}
+                    </div>
+                )}
 
-                    {/* ChatInput */}
-                    <div className="absolute bottom-2 left-0 right-0 z-30 w-full md:bottom-3">
-                        <div className="pointer-events-none absolute -bottom-2 left-4 right-4 z-0 h-7 bg-white/50 backdrop-blur-[1px] md:-bottom-3" />
-                        <div className="relative z-20 w-full px-4">
+                {/* ChatInput */}
+                <div className="absolute bottom-2 left-0 right-0 z-30 w-full md:bottom-3">
+                    <div className="pointer-events-none absolute -bottom-2 left-4 right-4 z-0 h-7 bg-white/50 backdrop-blur-[1px] md:-bottom-3" />
+                    <div className="relative z-20 w-full px-4">
+                        <div className="mx-auto w-full max-w-3xl">
                             <ChatInput
                                 ref={chatInputRef}
                                 onSubmit={handleSubmit}
@@ -1503,6 +1420,139 @@ export default function ProjectAssistantChatPage({ params }: Props) {
                     </div>
                 </div>
             </div>
+        ),
+    };
+
+    return (
+        <div className="flex flex-col h-full">
+            {/* Page header */}
+            <PageHeader
+                shrink
+                breadcrumbs={[
+                    {
+                        label: "Projects",
+                        onClick: () => router.push("/projects"),
+                    },
+                    project
+                        ? {
+                              label: project.name,
+                              onClick: () =>
+                                  router.push(`/projects/${projectId}`),
+                              title: "Back to project",
+                          }
+                        : {
+                              loading: true,
+                              skeletonClassName: "w-32",
+                              onClick: () =>
+                                  router.push(`/projects/${projectId}`),
+                              title: "Back to project",
+                          },
+                    {
+                        label: "Chats",
+                        onClick: () =>
+                            router.push(`/projects/${projectId}/assistant`),
+                        title: "Back to Chats",
+                    },
+                    chatLoaded
+                        ? {
+                              label: chatTitle ?? "Untitled New Chat",
+                          }
+                        : {
+                              loading: true,
+                              skeletonClassName: "w-40",
+                          },
+                ]}
+                actions={[
+                    {
+                        icon: <FolderClosed className="h-4 w-4" />,
+                        onClick: () => setFilesOpen(!filesOpen),
+                        iconOnly: true,
+                        title: filesOpen
+                            ? "Hide the matter's files"
+                            : "Show the matter's files",
+                    },
+                    {
+                        type: "new",
+                        onClick: handleNewChat,
+                        loading: creatingChat,
+                        title: "New chat",
+                    },
+                    {
+                        type: "custom",
+                        render: (
+                            <HeaderActionsMenu
+                                items={[
+                                    {
+                                        label: filesOpen
+                                            ? "Hide files"
+                                            : "Show files",
+                                        icon: FolderClosed,
+                                        onSelect: () => setFilesOpen(!filesOpen),
+                                    },
+                                    {
+                                        label: "Reset panel layout",
+                                        icon: Columns3,
+                                        onSelect: resetLayout,
+                                        disabled: isDefaultLayout,
+                                    },
+                                    {
+                                        label: "Rename",
+                                        icon: Pencil,
+                                        onSelect: () =>
+                                            void handleRenameChat(),
+                                    },
+                                    {
+                                        label: deletingChat
+                                            ? "Deleting..."
+                                            : "Delete",
+                                        icon: Trash2,
+                                        onSelect: () =>
+                                            void handleDeleteChat(),
+                                        disabled: deletingChat,
+                                        variant: "danger",
+                                    },
+                                ]}
+                            />
+                        ),
+                    },
+                ]}
+            />
+
+            {/* Panels, in whatever order and sizes the reader chose */}
+            <div
+                ref={paneRowRef}
+                className="flex flex-1 min-h-0 border-t border-gray-200 overflow-hidden"
+            >
+                {laidOut.map((paneId, index) => (
+                    <Fragment key={paneId}>
+                        {index > 0 && (
+                            <Divider
+                                onDrag={(dx) =>
+                                    handleDividerDrag(
+                                        laidOut[index - 1],
+                                        paneId,
+                                        dx,
+                                    )
+                                }
+                            />
+                        )}
+                        <div
+                            style={{
+                                flexGrow: layout.weights[paneId],
+                                flexBasis: 0,
+                            }}
+                            className={`flex min-w-0 flex-col ${
+                                index < laidOut.length - 1
+                                    ? "border-r border-gray-200"
+                                    : ""
+                            }`}
+                        >
+                            {paneContent[paneId]}
+                        </div>
+                    </Fragment>
+                ))}
+            </div>
+
             <OwnerOnlyPopup
                 open={!!ownerOnlyAction}
                 action={ownerOnlyAction ?? undefined}
