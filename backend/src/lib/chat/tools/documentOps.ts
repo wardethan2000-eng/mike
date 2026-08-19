@@ -8,6 +8,7 @@ import { createServerSupabase } from "../../supabase";
 import {
   applyTrackedEdits,
   extractDocxBodyText,
+  resolveTrackedChange,
   type EditInput,
 } from "../../docxTrackedChanges";
 import { buildDownloadUrl } from "../../downloadTokens";
@@ -1376,6 +1377,21 @@ export async function runEditDocument(params: {
     versionNumber: number;
     storagePath: string;
   };
+  /**
+   * How the edits land in the file.
+   *
+   * `true` (the default for a document the user owns) writes them as tracked
+   * changes the user accepts or rejects one by one.
+   *
+   * `false` writes them straight into the document. That is what filling in a
+   * fresh copy needs: the text being replaced belongs to the document it was
+   * copied from, so there is nothing for the user to review — they asked for a
+   * new document, not a redline of somebody else's.
+   *
+   * When omitted, a copy made by replicate_document that has never been edited
+   * defaults to `false` and everything else defaults to `true`.
+   */
+  trackChanges?: boolean;
 }): Promise<
   | {
       ok: true;
@@ -1384,6 +1400,8 @@ export async function runEditDocument(params: {
       storage_path: string;
       download_url: string;
       annotations: EditAnnotation[];
+      applied_count: number;
+      tracked: boolean;
       errors: { index: number; reason: string }[];
     }
   | { ok: false; error: string }
@@ -1392,10 +1410,27 @@ export async function runEditDocument(params: {
 
   const { data: doc } = await db
     .from("documents")
-    .select("id")
+    .select("id, is_replica")
     .eq("id", documentId)
     .single();
   if (!doc) return { ok: false, error: "Document not found." };
+
+  // Decide how the edits land. A copy that has never been edited is a blank
+  // sheet being filled in, so the changes go straight into it; anything else
+  // gets tracked changes to review.
+  let tracked = params.trackChanges ?? true;
+  if (params.trackChanges === undefined && doc.is_replica) {
+    let priorEdits = db
+      .from("document_versions")
+      .select("id", { count: "exact", head: true })
+      .eq("document_id", documentId)
+      .eq("source", "assistant_edit");
+    // The version this same turn already opened is not a prior edit; without
+    // this a second edit call in one response would switch mode mid-draft.
+    if (reuseVersion) priorEdits = priorEdits.neq("id", reuseVersion.versionId);
+    const { count } = await priorEdits;
+    if (!count) tracked = false;
+  }
 
   const activeVersion = await loadActiveVersion(documentId, db);
   let versionFilename =
@@ -1404,11 +1439,32 @@ export async function runEditDocument(params: {
   const current = await loadCurrentVersionBytes(documentId, db);
   if (!current) return { ok: false, error: "Could not load document bytes." };
 
-  const {
-    bytes: editedBytes,
-    changes,
-    errors,
-  } = await applyTrackedEdits(current.bytes, edits, { author: "Mike" });
+  const applied = await applyTrackedEdits(current.bytes, edits, {
+    author: "Mike",
+  });
+  const { changes, errors } = applied;
+  let editedBytes = applied.bytes;
+
+  if (!tracked && changes.length > 0) {
+    // Accept every change as it is written, so the saved file reads as the
+    // finished document rather than as a redline of the one it came from.
+    const allIds = changes
+      .flatMap((c) => [
+        c.delId,
+        c.insId,
+        ...(c.extraInsIds ?? []),
+        ...(c.extraDelIds ?? []),
+      ])
+      .filter((v): v is string => !!v);
+    if (allIds.length > 0) {
+      const { bytes: cleanBytes } = await resolveTrackedChange(
+        editedBytes,
+        allIds,
+        "accept",
+      );
+      editedBytes = cleanBytes;
+    }
+  }
 
   if (changes.length === 0) {
     return {
@@ -1517,6 +1573,28 @@ export async function runEditDocument(params: {
     versionRowId = versionRow.id as string;
   }
 
+  // Written-in edits have nothing to review, so no per-change rows and no
+  // Accept/Reject cards: the document card is the whole result.
+  if (!tracked) {
+    await db
+      .from("documents")
+      .update({ current_version_id: versionRowId })
+      .eq("id", documentId);
+
+    const cleanFilename = versionFilename.trim() || "Untitled document.docx";
+    return {
+      ok: true,
+      version_id: versionRowId,
+      version_number: nextVersionNumber,
+      storage_path: newPath,
+      download_url: buildDownloadUrl(newPath, cleanFilename),
+      annotations: [],
+      applied_count: changes.length,
+      tracked: false,
+      errors,
+    };
+  }
+
   // Insert one row per change
   const editRows = changes.map((c) => ({
     document_id: documentId,
@@ -1593,6 +1671,8 @@ export async function runEditDocument(params: {
     storage_path: newPath,
     download_url: permalink,
     annotations,
+    applied_count: annotations.length,
+    tracked: true,
     errors,
   };
 }

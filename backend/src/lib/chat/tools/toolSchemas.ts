@@ -549,13 +549,18 @@ export const TOOLS = [
     function: {
       name: "edit_document",
       description:
-        "Propose edits to a user-attached .docx as tracked changes. Use read_document first unless this same document/version has already been read in the current response. Anchor each edit with short before/after context so it can be located unambiguously. When revising existing wording, keep each edit a precise, minimal substitution of specific words/characters rather than a whole-line rewrite. You can also write new body text: a blank line in `replace` starts a new paragraph, so one edit can turn a placeholder into several paragraphs, and an edit with an empty `find` inserts new paragraphs at the anchor. To remove a paragraph completely, set `find` to its full text and `replace` to an empty string — the blank line goes too. New paragraphs inherit the formatting of the paragraph they grow out of. Returns per-edit annotations the UI will render as Accept/Reject cards and a download link to the edited document.",
+        "Write edits into a .docx. On a document the user already has, the edits land as tracked changes for them to accept or reject; on a fresh copy made with replicate_document they are written straight in, because a copy being filled in is a new document rather than a marked-up old one (see track_changes). Use read_document first unless this same document/version has already been read in the current response. Anchor each edit with short before/after context so it can be located unambiguously. When revising a document the user already has, keep each edit a precise, minimal substitution of specific words/characters rather than a whole-line rewrite. When filling in a fresh copy, work the other way: replace a whole clause or paragraph in one edit, so a rewrite takes a handful of edits rather than dozens. You can also write new body text: a blank line in `replace` starts a new paragraph, so one edit can turn a placeholder into several paragraphs, and an edit with an empty `find` inserts new paragraphs at the anchor. To remove a paragraph completely, set `find` to its full text and `replace` to an empty string — the blank line goes too. New paragraphs inherit the formatting of the paragraph they grow out of. Returns a download link to the edited document, plus per-edit annotations the UI renders as Accept/Reject cards when the edits are tracked.",
       parameters: {
         type: "object",
         properties: {
           doc_id: {
             type: "string",
             description: "Document slug (e.g. 'doc-0').",
+          },
+          track_changes: {
+            type: "boolean",
+            description:
+              "Whether the edits need the user's review. Leave it out and the right thing happens by default: a copy made with replicate_document that has not been edited yet has the changes written straight into it, and any other document gets tracked changes. Set it to false to write changes straight in — do that when the user asked for a new document rather than a review of this one. Set it to true to force tracked changes on a fresh copy.",
           },
           edits: {
             type: "array",

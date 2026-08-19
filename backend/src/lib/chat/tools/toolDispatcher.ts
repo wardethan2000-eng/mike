@@ -1395,6 +1395,10 @@ export async function runToolCalls(
           edits,
           db,
           reuseVersion,
+          trackChanges:
+            typeof args.track_changes === "boolean"
+              ? (args.track_changes as boolean)
+              : undefined,
         });
 
         if (result.ok) {
@@ -1445,9 +1449,13 @@ export async function runToolCalls(
               document_id: indexed.document_id,
               version_id: result.version_id,
               version_number: result.version_number,
-              applied: result.annotations.length,
+              applied: result.applied_count,
+              tracked_changes: result.tracked,
               errors: result.errors,
               next_required_action: [
+                result.tracked
+                  ? `The edits are tracked changes for the user to accept or reject.`
+                  : `The edits are written into the document; there is nothing for the user to accept. Do not describe them as suggested, proposed or pending changes.`,
                 `The edited document remains available as doc_id "${docId}".`,
                 `Before making factual claims about the edited document's final contents, call read_document with doc_id "${docId}" and base the response on that returned text.`,
                 `Do not include download links or URLs in your prose response; the edited document card is shown automatically by the UI.`,
@@ -1630,6 +1638,10 @@ export async function runToolCalls(
               status: "ready",
               library_kind: "file",
               library_folder_id: null,
+              // Remember that this is a copy. The first edits to a copy that
+              // has never been edited are written straight in, since a fresh
+              // copy is a document being drafted, not one being marked up.
+              is_replica: true,
             }));
             const { data: insertedDocs, error: docErr } = await db
               .from("documents")
