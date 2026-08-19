@@ -74,6 +74,7 @@ import {
     type TableFilterOption,
     type TableSortDirection,
 } from "@/app/components/shared/TablePrimitive";
+import { isExternalFileDrag } from "@/app/lib/fileDrag";
 
 export type DocTableFolder = ProjectFolder | LibraryFolder;
 export type DocTableFolderBreadcrumb = {
@@ -1119,7 +1120,7 @@ export function DocTable({
     }
 
     function hasFilePayload(dt: DataTransfer): boolean {
-        return Array.from(dt.types).includes("Files");
+        return isExternalFileDrag(dt);
     }
 
     function hasDocumentPayload(dt: DataTransfer): boolean {
@@ -1152,7 +1153,7 @@ export function DocTable({
 
     useEffect(() => {
         const hasFiles = (dataTransfer: DataTransfer | null) =>
-            !!dataTransfer && Array.from(dataTransfer.types).includes("Files");
+            isExternalFileDrag(dataTransfer);
 
         function handleDragEnter(event: globalThis.DragEvent) {
             if (!hasFiles(event.dataTransfer)) return;

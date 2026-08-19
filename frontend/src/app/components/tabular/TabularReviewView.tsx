@@ -64,6 +64,7 @@ import { useSidebar } from "@/app/contexts/SidebarContext";
 import { PageHeader } from "../shared/PageHeader";
 import { TableToolbar } from "../shared/TableToolbar";
 import { TabPillButton } from "@/app/components/ui/tab-pill-button";
+import { isExternalFileDrag } from "@/app/lib/fileDrag";
 
 interface Props {
     reviewId: string;
@@ -133,7 +134,7 @@ export function TRView({ reviewId, projectId }: Props) {
     const router = useRouter();
     const { profile } = useUserProfile();
     const apiKeys = profile?.apiKeys;
-    const tabularModel = profile?.tabularModel ?? "gemini-3-flash-preview";
+    const tabularModel = profile?.tabularModel ?? "ollama/glm-5.2";
 
     useEffect(() => {
         const params = new URLSearchParams(window.location.search);
@@ -228,7 +229,7 @@ export function TRView({ reviewId, projectId }: Props) {
     }
 
     function hasFilePayload(dt: DataTransfer): boolean {
-        return Array.from(dt.types).includes("Files");
+        return isExternalFileDrag(dt);
     }
 
     async function handleDropReviewFiles(files: File[]) {

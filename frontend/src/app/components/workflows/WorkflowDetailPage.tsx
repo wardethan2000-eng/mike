@@ -80,6 +80,7 @@ import {
   WorkflowReferenceFiles,
   type WorkflowReferenceFilesHandle,
 } from "./WorkflowReferenceFiles";
+import { isExternalFileDrag } from "@/app/lib/fileDrag";
 // dynamic import keeps Tiptap (browser-only) out of the SSR bundle
 const WorkflowPromptEditor = dynamic(
   () =>
@@ -189,7 +190,7 @@ export function WorkflowDetailPage({ id, workflowType }: Props) {
   }, [assistantTab]);
 
   function hasFilePayload(dataTransfer: DataTransfer) {
-    return Array.from(dataTransfer.types).includes("Files");
+    return isExternalFileDrag(dataTransfer);
   }
 
   function handleReferenceDragOver(event: DragEvent<HTMLDivElement>) {

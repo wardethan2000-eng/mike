@@ -20,6 +20,11 @@ import {
 import { AddDocButton } from "./AddDocButton";
 import { UploadOverlay } from "./UploadOverlay";
 import { FileTypeIcon } from "../shared/FileTypeIcon";
+import {
+    DRAGGED_WITHOUT_A_FILE_MESSAGE,
+    filesFromDrag,
+    isExternalFileDrag,
+} from "@/app/lib/fileDrag";
 import { AddDocumentsModal } from "../modals/AddDocumentsModal";
 import { AssistantWorkflowModal } from "./AssistantWorkflowModal";
 import {
@@ -54,8 +59,18 @@ import {
     partitionSupportedDocumentFiles,
 } from "@/app/lib/documentUploadValidation";
 
+/** A passage the user highlighted in a document and wants to talk about. */
+export interface QuotedPassage {
+    id: string;
+    text: string;
+    documentId: string;
+    documentTitle: string;
+}
+
 export interface ChatInputHandle {
     addDoc: (doc: Document) => void;
+    /** Attach a highlighted passage and put the cursor in the chat box. */
+    addQuote: (quote: Omit<QuotedPassage, "id">) => void;
     startWorkflow: (
         workflow: { id: string; title: string },
         prompt?: string,
@@ -106,6 +121,7 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput(
 ) {
     const [value, setValue] = useState("");
     const [attachedDocs, setAttachedDocs] = useState<Document[]>([]);
+    const [quotes, setQuotes] = useState<QuotedPassage[]>([]);
     const [selectedWorkflow, setSelectedWorkflow] = useState<{
         id: string;
         title: string;
@@ -156,6 +172,24 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput(
                 if (prev.some((d) => d.id === doc.id)) return prev;
                 return [...prev, doc];
             });
+        },
+        addQuote: (quote) => {
+            setQuotes((prev) => {
+                if (
+                    prev.some(
+                        (q) =>
+                            q.documentId === quote.documentId &&
+                            q.text === quote.text,
+                    )
+                ) {
+                    return prev;
+                }
+                return [
+                    ...prev,
+                    { ...quote, id: `${quote.documentId}:${prev.length}:${quote.text.slice(0, 40)}` },
+                ];
+            });
+            requestAnimationFrame(() => textareaRef.current?.focus());
         },
         startWorkflow: (workflow, prompt) => {
             setSelectedWorkflow(workflow);
@@ -273,8 +307,6 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput(
     );
 
     useEffect(() => {
-        const hasFiles = (dataTransfer: DataTransfer | null) =>
-            !!dataTransfer && Array.from(dataTransfer.types).includes("Files");
 
         const inDropZone = (event: DragEvent) => {
             const zone = dropZoneRef?.current;
@@ -283,7 +315,7 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput(
         };
 
         const handleDragEnter = (event: DragEvent) => {
-            if (!hasFiles(event.dataTransfer)) return;
+            if (!isExternalFileDrag(event.dataTransfer)) return;
             event.preventDefault();
             dragDepthRef.current += 1;
             if (!inDropZone(event)) {
@@ -296,18 +328,18 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput(
             setIsDraggingFiles(true);
         };
         const handleDragOver = (event: DragEvent) => {
-            if (!hasFiles(event.dataTransfer)) return;
+            if (!isExternalFileDrag(event.dataTransfer)) return;
             event.preventDefault();
             if (event.dataTransfer) event.dataTransfer.dropEffect = "copy";
             setIsDraggingFiles(inDropZone(event));
         };
         const handleDragLeave = (event: DragEvent) => {
-            if (!hasFiles(event.dataTransfer)) return;
+            if (!isExternalFileDrag(event.dataTransfer)) return;
             dragDepthRef.current = Math.max(0, dragDepthRef.current - 1);
             if (dragDepthRef.current === 0) setIsDraggingFiles(false);
         };
         const handleDrop = (event: DragEvent) => {
-            if (!hasFiles(event.dataTransfer)) return;
+            if (!isExternalFileDrag(event.dataTransfer)) return;
             // Dropped outside the chat — the matter file list, say. Leave
             // it to whatever owns that area so nothing uploads twice.
             if (!inDropZone(event)) {
@@ -319,7 +351,14 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput(
             event.stopPropagation();
             dragDepthRef.current = 0;
             setIsDraggingFiles(false);
-            void handleDroppedFiles(Array.from(event.dataTransfer?.files ?? []));
+            const files = filesFromDrag(event.dataTransfer);
+            // Dragged from another web page, so it arrived as a link with no
+            // file behind it. Say so instead of appearing to ignore the drop.
+            if (files.length === 0) {
+                setUploadWarning(DRAGGED_WITHOUT_A_FILE_MESSAGE);
+                return;
+            }
+            void handleDroppedFiles(files);
         };
 
         window.addEventListener("dragenter", handleDragEnter);
@@ -361,12 +400,33 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput(
             filename: d.filename,
             document_id: d.id,
         }));
+        // A quoted passage brings its document along, so the assistant can
+        // work on the file even if it was never attached by hand.
+        for (const quote of quotes) {
+            if (files.some((f) => f.document_id === quote.documentId)) continue;
+            files.push({
+                filename: quote.documentTitle,
+                document_id: quote.documentId,
+            });
+        }
+        // Put the highlighted passages in front of what the user typed so the
+        // assistant knows exactly which words they mean.
+        const quotedPreamble = quotes
+            .map(
+                (q) =>
+                    `From "${q.documentTitle}", the highlighted text is:\n> ${q.text}`,
+            )
+            .join("\n\n");
+        const content = quotedPreamble
+            ? `${quotedPreamble}\n\n${query}`
+            : query;
         setAttachedDocs([]);
+        setQuotes([]);
         setSelectedWorkflow(null);
 
         onSubmit?.({
             role: "user",
-            content: query,
+            content,
             files: files.length > 0 ? files : undefined,
             workflow: workflow ?? undefined,
             model,
@@ -455,6 +515,44 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput(
                 )}
                 <div className="rounded-[21px] border border-white/65 bg-white/60 shadow-[0_4px_10px_rgba(15,23,42,0.12),inset_0_1px_0_rgba(255,255,255,0.85),inset_0_-6px_14px_rgba(255,255,255,0.18)] backdrop-blur-2xl">
                     {/* Attached chips */}
+                    {quotes.length > 0 && (
+                        <div className="flex flex-col gap-1.5 px-2 pt-2">
+                            {quotes.map((quote) => (
+                                <div
+                                    key={quote.id}
+                                    className="flex items-start gap-2 rounded-[10px] border border-white/70 bg-white/85 px-2 py-1.5 text-xs text-gray-700 shadow-sm backdrop-blur-xl"
+                                >
+                                    <span
+                                        aria-hidden="true"
+                                        className="mt-0.5 h-3.5 w-0.5 shrink-0 rounded-full bg-blue-500"
+                                    />
+                                    <span className="min-w-0 flex-1">
+                                        <span className="block truncate font-medium text-gray-500">
+                                            {quote.documentTitle}
+                                        </span>
+                                        <span className="line-clamp-2 text-gray-700">
+                                            {`\u201C${quote.text}\u201D`}
+                                        </span>
+                                    </span>
+                                    <button
+                                        type="button"
+                                        onClick={() =>
+                                            setQuotes((prev) =>
+                                                prev.filter(
+                                                    (q) => q.id !== quote.id,
+                                                ),
+                                            )
+                                        }
+                                        aria-label="Remove highlighted text"
+                                        className="mt-0.5 shrink-0 rounded-full p-0.5 text-gray-400 transition-colors hover:bg-gray-900/5 hover:text-gray-700"
+                                    >
+                                        <X className="h-2.5 w-2.5" />
+                                    </button>
+                                </div>
+                            ))}
+                        </div>
+                    )}
+
                     {(selectedWorkflow || attachedDocs.length > 0) && (
                         <div className="flex flex-wrap gap-1.5 px-2 pt-2">
                             {selectedWorkflow && (
