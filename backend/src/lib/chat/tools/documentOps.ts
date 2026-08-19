@@ -1415,20 +1415,17 @@ export async function runEditDocument(params: {
     .single();
   if (!doc) return { ok: false, error: "Document not found." };
 
-  // Decide how the edits land. A copy that has never been edited is a blank
-  // sheet being filled in, so the changes go straight into it; anything else
-  // gets tracked changes to review.
+  // Decide how the edits land. A copy is a document being drafted, so changes
+  // go straight into it — and it stays that way until the user starts working
+  // on it themselves, since a draft often takes several passes to finish.
+  // Anything else gets tracked changes to review.
   let tracked = params.trackChanges ?? true;
   if (params.trackChanges === undefined && doc.is_replica) {
-    let priorEdits = db
+    const { count } = await db
       .from("document_versions")
       .select("id", { count: "exact", head: true })
       .eq("document_id", documentId)
-      .eq("source", "assistant_edit");
-    // The version this same turn already opened is not a prior edit; without
-    // this a second edit call in one response would switch mode mid-draft.
-    if (reuseVersion) priorEdits = priorEdits.neq("id", reuseVersion.versionId);
-    const { count } = await priorEdits;
+      .in("source", ["user_upload", "user_accept", "user_reject"]);
     if (!count) tracked = false;
   }
 

@@ -34,6 +34,7 @@ import {
     getUserModelSettings,
 } from "../lib/userSettings";
 import { checkProjectAccess } from "../lib/access";
+import { startSseHeartbeat } from "../lib/chat/routeStreaming";
 import {
     loadProjectContext,
     caseOverviewPromptSection,
@@ -312,6 +313,7 @@ projectChatRouter.post("/", requireAuth, async (req, res) => {
     res.on("close", () => {
         if (!streamFinished) streamAbort.abort();
     });
+    const stopHeartbeat = startSseHeartbeat(res);
 
     try {
         write(`data: ${JSON.stringify({ type: "chat_id", chatId })}\n\n`);
@@ -534,6 +536,7 @@ projectChatRouter.post("/", requireAuth, async (req, res) => {
         }
     } finally {
         streamFinished = true;
+        stopHeartbeat();
         res.end();
     }
 });

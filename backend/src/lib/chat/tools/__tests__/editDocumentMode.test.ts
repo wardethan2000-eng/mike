@@ -237,7 +237,9 @@ describe("runEditDocument edit mode", () => {
         expect(result.annotations).toEqual([]);
     });
 
-    it("goes back to tracked changes once a copy has been filled in", async () => {
+    it("keeps writing straight in while the draft is still being written", async () => {
+        // A long rewrite takes several passes; a second pass must not turn
+        // into a redline of the first.
         const tables = fixtureTables({ is_replica: true });
         tables.document_versions.push({
             id: "ver-2",
@@ -245,6 +247,34 @@ describe("runEditDocument edit mode", () => {
             storage_path: "documents/u/doc-1/edits/ver-2.docx",
             pdf_storage_path: null,
             source: "assistant_edit",
+            version_number: 2,
+            filename: "Agreement.docx",
+            file_type: "docx",
+            deleted_at: null,
+        });
+        tables.documents[0].current_version_id = "ver-2";
+        const db = makeDb(tables);
+
+        const result = await runEditDocument({
+            documentId: "doc-1",
+            userId: "user-1",
+            edits: EDITS,
+            db,
+        });
+
+        expect(result.ok).toBe(true);
+        if (!result.ok) return;
+        expect(result.tracked).toBe(false);
+    });
+
+    it("goes back to tracked changes once the user has worked on the copy", async () => {
+        const tables = fixtureTables({ is_replica: true });
+        tables.document_versions.push({
+            id: "ver-2",
+            document_id: "doc-1",
+            storage_path: "documents/u/doc-1/edits/ver-2.docx",
+            pdf_storage_path: null,
+            source: "user_accept",
             version_number: 2,
             filename: "Agreement.docx",
             file_type: "docx",
