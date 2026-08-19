@@ -118,7 +118,7 @@ export const TOOLS = [
     function: {
       name: "replicate_document",
       description:
-        "Copy an available document, Library Template, or workflow asset without changing the source. In a project chat, copies are saved to Project Documents; otherwise they are saved to Library Files. Always use this before editing or drafting from a Library Template or workflow asset. For an ordinary document, use it only when the user specifically asks for a copy/duplicate or a new document based on that file. Returns new doc_id slugs for read_document and edit_document.",
+        "Copy an available document, Library Template, or workflow asset without changing the source. In a project chat, copies are saved to Project Documents; otherwise they are saved to Library Files. Always use this before editing or drafting from a Library Template or workflow asset. For an ordinary document, use it when the user asks for a copy/duplicate, when they ask for a new document based on that file, and whenever you are asked to draft a new document of the same kind as one that is already available - copying and then editing the copy is the only way to keep the original document's fonts, margins, spacing and layout. Returns new doc_id slugs for read_document and edit_document.",
       parameters: {
         type: "object",
         properties: {
@@ -284,7 +284,7 @@ export const TOOLS = [
     function: {
       name: "generate_docx",
       description:
-        "Generate a Word (.docx) document from structured content. Use this when the user asks you to draft, create, or produce a legal document. Returns a download URL for the generated file.",
+        "Generate a Word (.docx) document from structured content. Use this when the user asks you to draft, create, or produce a legal document AND no existing .docx of the same kind is available to copy. This tool renders with its own fixed fonts, spacing and numbering, so it cannot reproduce the appearance of a document the user has supplied; when such a document exists, call replicate_document and then edit_document instead. Returns a download URL for the generated file.",
       parameters: {
         type: "object",
         properties: {
@@ -296,6 +296,61 @@ export const TOOLS = [
             type: "boolean",
             description:
               "Set to true for landscape page orientation. Default is portrait.",
+          },
+          style: {
+            type: "object",
+            description:
+              "Page-wide appearance. Omit it for a contract or agreement and the long-standing contract look is used: Times New Roman 11pt, single spaced, an all-caps centred title and automatic clause numbering. Set it for anything that is not a contract - a certificate of service, notice, motion, letter, affidavit - so the page matches the court's or the firm's requirements.",
+            properties: {
+              font: {
+                type: "string",
+                description:
+                  "Typeface name, e.g. 'Times New Roman', 'Century Schoolbook', 'Arial'. Defaults to Times New Roman.",
+              },
+              fontSize: {
+                type: "number",
+                description:
+                  "Body text size in points. Defaults to 11. Courts usually require 12.",
+              },
+              lineSpacing: {
+                type: "string",
+                enum: ["single", "1.5", "double"],
+                description:
+                  "Line spacing for the whole document. Defaults to single.",
+              },
+              margins: {
+                type: "object",
+                description:
+                  "Page margins in inches. Defaults to Word's own 1 inch.",
+                properties: {
+                  top: { type: "number" },
+                  bottom: { type: "number" },
+                  left: { type: "number" },
+                  right: { type: "number" },
+                },
+              },
+              pageNumbers: {
+                type: "boolean",
+                description:
+                  "Set to true to centre a page number in the footer.",
+              },
+              numbering: {
+                type: "string",
+                enum: ["legal", "none"],
+                description:
+                  "'legal' (the default) applies automatic 1., 1.1, (a) clause numbering to headings and paragraphs and puts the title in capitals - correct for contracts, wrong for everything else. Set 'none' for any other document: nothing is numbered or capitalised automatically, blank lines you write are kept, and you control numbering by typing it yourself.",
+              },
+              showTitle: {
+                type: "boolean",
+                description:
+                  "Set to false to leave the title out of the page (it is still used as the filename). Use this when the document's own first lines are the heading, such as a court caption.",
+              },
+              titleAlign: {
+                type: "string",
+                enum: ["left", "center", "right", "justify"],
+                description: "Title alignment. Defaults to centred.",
+              },
+            },
           },
           sections: {
             type: "array",
@@ -315,12 +370,42 @@ export const TOOLS = [
                 content: {
                   type: "string",
                   description:
-                    "Prose text content (paragraphs separated by double newlines)",
+                    "Prose text content. Each line becomes its own paragraph. Within a line, **text** is bold, _text_ is underlined and *text* is italic, and a tab character moves to the next tab stop (3.5 inches, then the right margin) - that is how a signature line, a 'Dated: ______' line or a two-column line is set out. With style.numbering set to 'none', blank lines you write are kept as blank lines.",
                 },
                 pageBreak: {
                   type: "boolean",
                   description:
                     "Set to true to start this section on a new page. Use for contract signature pages.",
+                },
+                format: {
+                  type: "object",
+                  description:
+                    "How this section's lines sit on the page. Use it for centred headings, right-hand or indented signature blocks, block quotes and 'Dated:' lines.",
+                  properties: {
+                    align: {
+                      type: "string",
+                      enum: ["left", "center", "right", "justify"],
+                      description: "Alignment for this section's lines.",
+                    },
+                    indent: {
+                      type: "number",
+                      description:
+                        "Left indent in inches for this section. A signature block is usually indented 3.5 inches.",
+                    },
+                    firstLineIndent: {
+                      type: "number",
+                      description:
+                        "First-line indent in inches for each paragraph in this section, e.g. 0.5.",
+                    },
+                    spaceAfter: {
+                      type: "number",
+                      description:
+                        "Space after each line of this section, in points.",
+                    },
+                    bold: { type: "boolean" },
+                    italic: { type: "boolean" },
+                    underline: { type: "boolean" },
+                  },
                 },
                 table: {
                   type: "object",
@@ -329,7 +414,24 @@ export const TOOLS = [
                     headers: {
                       type: "array",
                       items: { type: "string" },
-                      description: "Column header labels",
+                      description:
+                        "Column header labels. With headerRow false these are just the first row's cells.",
+                    },
+                    borders: {
+                      type: "boolean",
+                      description:
+                        "Set to false to draw the table with no rules. A court caption block and a two-column signature block are borderless tables.",
+                    },
+                    headerRow: {
+                      type: "boolean",
+                      description:
+                        "Set to false when the first row is ordinary content rather than column headings, so it is not shaded or bolded.",
+                    },
+                    widths: {
+                      type: "array",
+                      items: { type: "number" },
+                      description:
+                        "Column widths as percentages of the page width, one per column, e.g. [55, 45].",
                     },
                     rows: {
                       type: "array",

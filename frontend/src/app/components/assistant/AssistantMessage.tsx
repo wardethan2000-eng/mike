@@ -1121,6 +1121,78 @@ export function AssistantMessage({
                         </div>
                     )}
 
+                {/* Download cards for copied docs. A copy is a real new
+                    document, so it gets the same card a generated one gets
+                    rather than living only inside the collapsed activity
+                    panel. Skipped when the copy was then edited, because the
+                    edit card above already shows that document. */}
+                {events &&
+                    !isStreaming &&
+                    (() => {
+                        const editedIds = new Set(
+                            events
+                                .filter(
+                                    (e) =>
+                                        e.type === "doc_edited" &&
+                                        !!e.document_id,
+                                )
+                                .map(
+                                    (e) =>
+                                        (
+                                            e as Extract<
+                                                AssistantEvent,
+                                                { type: "doc_edited" }
+                                            >
+                                        ).document_id,
+                                ),
+                        );
+                        const copies = events
+                            .filter(
+                                (
+                                    e,
+                                ): e is Extract<
+                                    AssistantEvent,
+                                    { type: "doc_replicated" }
+                                > =>
+                                    e.type === "doc_replicated" &&
+                                    !e.isStreaming &&
+                                    !e.error,
+                            )
+                            .flatMap((e) => e.copies ?? [])
+                            .filter(
+                                (copy) =>
+                                    !!copy.download_url &&
+                                    !editedIds.has(copy.document_id),
+                            );
+                        if (copies.length === 0) return null;
+                        return (
+                            <div className="flex flex-col gap-2 mt-2 mb-3">
+                                {copies.map((copy) => (
+                                    <DocDownloadBlock
+                                        key={`copy-download-${copy.document_id}`}
+                                        filename={copy.new_filename}
+                                        download_url={copy.download_url!}
+                                        versionNumber={1}
+                                        onOpen={
+                                            onOpenDocument
+                                                ? () =>
+                                                      onOpenDocument({
+                                                          documentId:
+                                                              copy.document_id,
+                                                          filename:
+                                                              copy.new_filename,
+                                                          versionId:
+                                                              copy.version_id,
+                                                          versionNumber: 1,
+                                                      })
+                                                : undefined
+                                        }
+                                    />
+                                ))}
+                            </div>
+                        );
+                    })()}
+
                 {showCitationBlock && (
                     <CitationsBlock
                         citations={citations}

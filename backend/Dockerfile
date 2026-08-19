@@ -19,7 +19,20 @@ RUN apt-get update \
     img2pdf \
     imagemagick \
     libheif-examples \
+    fonts-liberation \
+    fonts-crosextra-caladea \
+    fonts-crosextra-carlito \
+    fonts-ebgaramond \
   && rm -rf /var/lib/apt/lists/*
+
+# Document previews are LibreOffice PDF conversions. A font the document asks
+# for but the image does not have gets substituted, the different letter
+# widths re-wrap every line, and justified paragraphs stretch to fill - the
+# preview looks mangled next to the same file opened in Word. The packages
+# above are metric-compatible stand-ins for the fonts legal documents use;
+# this file points the ones fontconfig does not already cover at them.
+COPY docker/fonts/99-legal-font-aliases.conf /etc/fonts/conf.d/
+RUN fc-cache -f
 
 WORKDIR /app
 COPY package*.json ./

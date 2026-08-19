@@ -37,6 +37,7 @@ import { type EditInput } from "../../docxTrackedChanges";
 import {
   citationReminder,
   generateDocx,
+  type DocxStyle,
   generateExcel,
   generatePpt,
   getTurnReadIdentity,
@@ -1740,6 +1741,7 @@ export async function runToolCalls(
                   new_filename: string;
                   document_id: string;
                   version_id: string;
+                  download_url: string;
                 }[] = [];
                 const toolPayloadCopies: {
                   doc_id: string;
@@ -1771,6 +1773,7 @@ export async function runToolCalls(
                     new_filename: d.filename,
                     document_id: d.id,
                     version_id: versionId,
+                    download_url: buildDownloadUrl(newKey, d.filename),
                   });
                   toolPayloadCopies.push({
                     doc_id: slug,
@@ -1840,7 +1843,11 @@ export async function runToolCalls(
         args.sections as unknown[],
         userId,
         db,
-        { landscape, projectId: projectId ?? null },
+        {
+          landscape,
+          projectId: projectId ?? null,
+          style: (args.style ?? undefined) as DocxStyle | undefined,
+        },
       );
       registerGeneratedDocument(
         tc,

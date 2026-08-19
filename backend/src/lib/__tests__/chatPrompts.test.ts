@@ -50,6 +50,41 @@ describe("buildSystemPrompt", () => {
         }
     });
 
+    it("tells the model to copy an existing document of the same kind instead of generating one", () => {
+        for (const prompt of [buildSystemPrompt(true), buildSystemPrompt(false)]) {
+            expect(prompt).toContain("DRAFTING FROM AN EXAMPLE:");
+            // The whole point: a same-kind document already in the chat or
+            // matter is a model to copy, even when the user never calls it a
+            // template. Copying is the only way to keep the original's
+            // fonts, margins, spacing and layout.
+            expect(prompt).toContain(
+                "A document counts as a model whenever it is the same kind of document as the one being asked for",
+            );
+            expect(prompt).toContain(
+                "When a model .docx exists, do not generate a new file.",
+            );
+            // Copying alone is the failure Ethan hit: Mike duplicated his
+            // certificate of service, filled in nothing, and asked him for
+            // the details instead of drafting.
+            expect(prompt).toContain(
+                "The copy on its own is never the finished answer.",
+            );
+            expect(prompt).toContain(
+                "Do not stop and ask for the case details before drafting.",
+            );
+            expect(prompt).toContain(
+                "generate_docx renders with its own fixed fonts, spacing and numbering and cannot reproduce another document's appearance.",
+            );
+            // ...and the generate_docx instruction must not contradict it.
+            expect(prompt).toContain(
+                "If the user asks you to create or draft a document and no model .docx is available to copy, call generate_docx",
+            );
+            expect(prompt).not.toContain(
+                "call replicate_document only when the user specifically asks",
+            );
+        }
+    });
+
     it("separates workflows and Library Templates with copy-before-edit rules", () => {
         for (const prompt of [buildSystemPrompt(true), buildSystemPrompt(false)]) {
             expect(prompt).toContain("WORKFLOWS:");

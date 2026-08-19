@@ -137,6 +137,85 @@ describe("AssistantMessage document events", () => {
         ]);
     });
 
+    it("shows a copied document as a card in the chat, not only in the activity panel", () => {
+        const onOpenDocument = vi.fn();
+        const events: AssistantEvent[] = [
+            {
+                type: "doc_replicated",
+                filename: "Certificate of Service.docx",
+                count: 1,
+                copies: [
+                    {
+                        new_filename: "Certificate of Service (new).docx",
+                        document_id: "document-copy",
+                        version_id: "version-copy",
+                        download_url: "/documents/copy/download",
+                    },
+                ],
+            },
+        ];
+
+        render(
+            <AssistantMessage
+                events={events}
+                onOpenDocument={onOpenDocument}
+            />,
+        );
+
+        // Two places now name the copy: the activity row inside the panel
+        // and the card under the answer. The card is the one with a
+        // download button beside it.
+        expect(
+            screen.getAllByText("Certificate of Service (new)").length,
+        ).toBeGreaterThan(0);
+
+        const cards = screen.getAllByRole("button", {
+            name: /Certificate of Service \(new\)/,
+        });
+        fireEvent.click(cards[cards.length - 1]);
+        expect(onOpenDocument).toHaveBeenCalledWith({
+            documentId: "document-copy",
+            filename: "Certificate of Service (new).docx",
+            versionId: "version-copy",
+            versionNumber: 1,
+        });
+    });
+
+    it("does not show a copy card when the copy was then filled in", () => {
+        const events: AssistantEvent[] = [
+            {
+                type: "doc_replicated",
+                filename: "Certificate of Service.docx",
+                count: 1,
+                copies: [
+                    {
+                        new_filename: "Certificate of Service (new).docx",
+                        document_id: "document-copy",
+                        version_id: "version-copy",
+                        download_url: "/documents/copy/download",
+                    },
+                ],
+            },
+            {
+                type: "doc_edited",
+                filename: "Certificate of Service (new).docx",
+                document_id: "document-copy",
+                version_id: "version-2",
+                version_number: 2,
+                download_url: "/documents/copy/download-v2",
+                annotations: [],
+            },
+        ];
+
+        render(<AssistantMessage events={events} />);
+
+        // The edited card already stands for that document; a second card
+        // for the untouched copy would just be noise.
+        expect(screen.getAllByText("Certificate of Service (new)")).toHaveLength(
+            1,
+        );
+    });
+
     it("opens the edit wrapper as a plain document but keeps individual edit context", () => {
         const onOpenDocument = vi.fn();
         const onEditViewClick = vi.fn();

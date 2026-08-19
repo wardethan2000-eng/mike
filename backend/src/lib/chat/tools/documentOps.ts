@@ -93,12 +93,62 @@ export async function extractPdfText(buf: ArrayBuffer): Promise<string> {
   }
 }
 
+export type DocxStyle = {
+  font?: string;
+  fontSize?: number;
+  lineSpacing?: string;
+  margins?: {
+    top?: number;
+    bottom?: number;
+    left?: number;
+    right?: number;
+  };
+  pageNumbers?: boolean;
+  numbering?: string;
+  showTitle?: boolean;
+  titleAlign?: string;
+};
+
+export type DocxSectionFormat = {
+  align?: string;
+  indent?: number;
+  firstLineIndent?: number;
+  spaceAfter?: number;
+  bold?: boolean;
+  italic?: boolean;
+  underline?: boolean;
+};
+
+const clampNumber = (
+  value: unknown,
+  min: number,
+  max: number,
+  fallback: number,
+) => {
+  if (typeof value !== "number" || !Number.isFinite(value)) return fallback;
+  return Math.max(min, Math.min(max, value));
+};
+
+// Word stores line spacing in twentieths of a point; 240 is single spacing
+// at the usual 12pt line. Returning null leaves Word's own default alone.
+const lineSpacingTwips = (value: unknown): number | null => {
+  const key = typeof value === "string" ? value.trim().toLowerCase() : "";
+  if (key === "double" || key === "2" || key === "2.0") return 480;
+  if (key === "1.5" || key === "one and a half") return 360;
+  if (key === "single" || key === "1" || key === "1.0") return 240;
+  return null;
+};
+
 export async function generateDocx(
   title: string,
   sections: unknown[],
   userId: string,
   db: ReturnType<typeof createServerSupabase>,
-  options?: { landscape?: boolean; projectId?: string | null },
+  options?: {
+    landscape?: boolean;
+    projectId?: string | null;
+    style?: DocxStyle;
+  },
 ) {
   try {
     const {
@@ -117,35 +167,160 @@ export async function generateDocx(
       LevelSuffix,
       PageOrientation,
       PageBreak,
+      Footer,
+      PageNumber,
+      Tab,
+      TabStopType,
+      TabStopPosition,
+      convertInchesToTwip,
     } = await import("docx");
 
-    const FONT = "Times New Roman";
-    const SIZE = 22; // 11pt in half-points
+    const style = options?.style ?? {};
+    const FONT =
+      typeof style.font === "string" && style.font.trim()
+        ? style.font.trim()
+        : "Times New Roman";
+    // docx sizes are half-points; 11pt stays the default so existing
+    // contract output is unchanged.
+    const SIZE = Math.round(clampNumber(style.fontSize, 6, 72, 11) * 2);
+    const LINE = lineSpacingTwips(style.lineSpacing);
+    const numberingMode = style.numbering === "none" ? "none" : "legal";
+    const showTitle = style.showTitle !== false;
+
+    // Inline markers so a line can carry emphasis: **bold**, _underline_,
+    // *italic*. Underline has no markdown equivalent but legal drafting
+    // needs it constantly (case captions, defined terms, signature rules).
+    const inlineRuns = (
+      text: string,
+      base?: { bold?: boolean; italics?: boolean; underline?: boolean },
+    ): InstanceType<typeof TextRun>[] => {
+      const runs: InstanceType<typeof TextRun>[] = [];
+      const pattern = /(\*\*[^*]+\*\*|_[^_\n]+_|\*[^*\n]+\*)/g;
+      const pushRun = (
+        value: string,
+        extra: { bold?: boolean; italics?: boolean; underline?: boolean },
+      ) => {
+        if (!value) return;
+        for (const [i, piece] of value.split("\t").entries()) {
+          if (i > 0) {
+            runs.push(new TextRun({ children: [new Tab()], font: FONT, size: SIZE }));
+          }
+          if (!piece) continue;
+          runs.push(
+            new TextRun({
+              text: piece,
+              font: FONT,
+              size: SIZE,
+              color: "000000",
+              bold: extra.bold ?? base?.bold,
+              italics: extra.italics ?? base?.italics,
+              underline:
+                (extra.underline ?? base?.underline) ? {} : undefined,
+            }),
+          );
+        }
+      };
+      let last = 0;
+      for (const match of text.matchAll(pattern)) {
+        const at = match.index ?? 0;
+        pushRun(text.slice(last, at), {});
+        const token = match[0];
+        if (token.startsWith("**")) pushRun(token.slice(2, -2), { bold: true });
+        else if (token.startsWith("_"))
+          pushRun(token.slice(1, -1), { underline: true });
+        else pushRun(token.slice(1, -1), { italics: true });
+        last = at + token.length;
+      }
+      pushRun(text.slice(last), {});
+      if (runs.length === 0) {
+        runs.push(new TextRun({ text: "", font: FONT, size: SIZE }));
+      }
+      return runs;
+    };
+
+    // A tab in the text advances to the next stop. Two stops cover the
+    // shapes legal documents actually use: a centre stop for signature
+    // blocks and "Dated:" lines, and a right stop at the margin.
+    const TAB_STOPS = [
+      { type: TabStopType.LEFT, position: convertInchesToTwip(3.5) },
+      { type: TabStopType.RIGHT, position: TabStopPosition.MAX },
+    ];
+
+    const alignOf = (value: unknown, fallback?: unknown) => {
+      const key = typeof value === "string" ? value.trim().toLowerCase() : "";
+      if (key === "center" || key === "centre") return AlignmentType.CENTER;
+      if (key === "right") return AlignmentType.RIGHT;
+      if (key === "justify" || key === "justified")
+        return AlignmentType.JUSTIFIED;
+      if (key === "left") return AlignmentType.LEFT;
+      return fallback;
+    };
+
+    // Shared paragraph shape: the caller's alignment, indent and spacing if
+    // it asked for any, otherwise the defaults this generator has always
+    // used, so existing contract output is byte-for-byte unchanged.
+    const paraProps = (
+      fmt: DocxSectionFormat | undefined,
+      defaults: { after: number; align?: unknown },
+    ) => {
+      const spacing: { after: number; line?: number } = {
+        after: Math.round(
+          clampNumber(fmt?.spaceAfter, 0, 72, defaults.after / 20) * 20,
+        ),
+      };
+      if (LINE !== null) spacing.line = LINE;
+      const left = clampNumber(fmt?.indent, 0, 8, 0);
+      const first = clampNumber(fmt?.firstLineIndent, 0, 8, 0);
+      const props: Record<string, unknown> = {
+        spacing,
+        alignment: alignOf(fmt?.align, defaults.align),
+        tabStops: TAB_STOPS,
+      };
+      if (left > 0 || first > 0) {
+        props.indent = {
+          left: convertInchesToTwip(left),
+          firstLine: first > 0 ? convertInchesToTwip(first) : undefined,
+        };
+      }
+      return props;
+    };
 
     type DocChild = InstanceType<typeof Paragraph> | InstanceType<typeof Table>;
     const children: DocChild[] = [];
-    children.push(
-      new Paragraph({
-        heading: HeadingLevel.TITLE,
-        spacing: { after: 200 },
-        alignment: AlignmentType.CENTER,
-        children: [
-          new TextRun({
-            text: title.toUpperCase(),
-            color: "000000",
-            font: FONT,
-            size: SIZE,
-            bold: true,
-          }),
-        ],
-      }),
-    );
+    if (showTitle) {
+      children.push(
+        new Paragraph({
+          heading: HeadingLevel.TITLE,
+          ...paraProps(
+            { align: style.titleAlign, spaceAfter: undefined },
+            { after: 200, align: AlignmentType.CENTER },
+          ),
+          children: inlineRuns(
+            numberingMode === "none" ? title : title.toUpperCase(),
+            { bold: true },
+          ),
+        }),
+      );
+    }
 
     const cellBorder = {
       top: { style: BorderStyle.SINGLE, size: 1, color: "CCCCCC" },
       bottom: { style: BorderStyle.SINGLE, size: 1, color: "CCCCCC" },
       left: { style: BorderStyle.SINGLE, size: 1, color: "CCCCCC" },
       right: { style: BorderStyle.SINGLE, size: 1, color: "CCCCCC" },
+    };
+    const noBorder = {
+      top: { style: BorderStyle.NONE, size: 0, color: "FFFFFF" },
+      bottom: { style: BorderStyle.NONE, size: 0, color: "FFFFFF" },
+      left: { style: BorderStyle.NONE, size: 0, color: "FFFFFF" },
+      right: { style: BorderStyle.NONE, size: 0, color: "FFFFFF" },
+    };
+    // Word draws its own single-line grid around a table unless the table
+    // itself is told otherwise, so clearing the cell borders is not enough.
+    const noTableBorder = {
+      ...noBorder,
+      insideHorizontal: { style: BorderStyle.NONE, size: 0, color: "FFFFFF" },
+      insideVertical: { style: BorderStyle.NONE, size: 0, color: "FFFFFF" },
     };
 
     const headingLevels = [
@@ -328,7 +503,14 @@ export async function generateDocx(
         content?: string;
         level?: number;
         pageBreak?: boolean;
-        table?: { headers: string[]; rows: string[][] };
+        format?: DocxSectionFormat;
+        table?: {
+          headers: string[];
+          rows: string[][];
+          borders?: boolean;
+          headerRow?: boolean;
+          widths?: number[];
+        };
       }[]
     ).entries()) {
       if (section.pageBreak) {
@@ -345,26 +527,26 @@ export async function generateDocx(
           stripped.levelFromPrefix ?? (section.level ?? 1) - 1,
           3,
         );
-        currentClauseLevel = isUnnumbered || skipHeading ? null : idx;
+        currentClauseLevel =
+          numberingMode === "none" || isUnnumbered || skipHeading ? null : idx;
         const headingText =
-          idx === 0 && !isUnnumbered
+          numberingMode === "legal" && idx === 0 && !isUnnumbered
             ? stripped.text.toUpperCase()
             : stripped.text;
         if (!skipHeading) {
           children.push(
             new Paragraph({
               heading: headingLevels[idx],
-              numbering: isUnnumbered ? undefined : legalNumbering(idx),
-              spacing: { after: 160 },
-              children: [
-                new TextRun({
-                  text: headingText,
-                  color: "000000",
-                  font: FONT,
-                  size: SIZE,
-                  bold: true,
-                }),
-              ],
+              numbering:
+                numberingMode === "none" || isUnnumbered
+                  ? undefined
+                  : legalNumbering(idx),
+              ...paraProps(section.format, { after: 160 }),
+              children: inlineRuns(headingText, {
+                bold: section.format?.bold ?? true,
+                italics: section.format?.italic,
+                underline: section.format?.underline,
+              }),
             }),
           );
         }
@@ -372,29 +554,46 @@ export async function generateDocx(
       const normalizedTable = normalizeTable(section.table);
       if (normalizedTable) {
         const { headers, rows } = normalizedTable;
+        // A court caption or a two-column signature block is a table with
+        // no rules and no header styling, so both are switchable.
+        const showBorders = section.table?.borders !== false;
+        const isHeaderRow = section.table?.headerRow !== false;
+        const tableBorders = showBorders ? cellBorder : noBorder;
+        const rawWidths = Array.isArray(section.table?.widths)
+          ? section.table.widths
+          : [];
+        const cellWidth = (i: number) => {
+          const pct = clampNumber(rawWidths[i], 1, 100, 0);
+          return pct > 0
+            ? { width: { size: pct, type: WidthType.PERCENTAGE } }
+            : {};
+        };
+        const cellParagraphs = (
+          value: string,
+          opts: { bold?: boolean; align?: unknown },
+        ) =>
+          value.split("\n").map(
+            (line) =>
+              new Paragraph({
+                children: inlineRuns(line, { bold: opts.bold }),
+                alignment: opts.align as never,
+              }),
+          );
         const tableRows: InstanceType<typeof TableRow>[] = [];
         // Header row
         tableRows.push(
           new TableRow({
-            tableHeader: true,
+            tableHeader: isHeaderRow,
             children: headers.map(
-              (h) =>
+              (h, i) =>
                 new TableCell({
-                  borders: cellBorder,
-                  shading: { fill: "F2F2F2" },
-                  children: [
-                    new Paragraph({
-                      children: [
-                        new TextRun({
-                          text: h,
-                          bold: true,
-                          font: FONT,
-                          size: SIZE,
-                        }),
-                      ],
-                      alignment: AlignmentType.LEFT,
-                    }),
-                  ],
+                  borders: tableBorders,
+                  ...(isHeaderRow ? { shading: { fill: "F2F2F2" } } : {}),
+                  ...cellWidth(i),
+                  children: cellParagraphs(h, {
+                    bold: isHeaderRow,
+                    align: AlignmentType.LEFT,
+                  }),
                 }),
             ),
           }),
@@ -407,20 +606,11 @@ export async function generateDocx(
           tableRows.push(
             new TableRow({
               children: normalized.map(
-                (cell) =>
+                (cell, i) =>
                   new TableCell({
-                    borders: cellBorder,
-                    children: [
-                      new Paragraph({
-                        children: [
-                          new TextRun({
-                            text: cell,
-                            font: FONT,
-                            size: SIZE,
-                          }),
-                        ],
-                      }),
-                    ],
+                    borders: tableBorders,
+                    ...cellWidth(i),
+                    children: cellParagraphs(cell, {}),
                   }),
               ),
             }),
@@ -429,6 +619,7 @@ export async function generateDocx(
         children.push(
           new Table({
             width: { size: 100, type: WidthType.PERCENTAGE },
+            ...(showBorders ? {} : { borders: noTableBorder }),
             rows: tableRows,
           }),
         );
@@ -443,7 +634,21 @@ export async function generateDocx(
             : looksLikeSignatureBlock(section.content);
         for (const line of section.content.split("\n")) {
           const trimmed = line.trim();
-          if (!trimmed) continue;
+          if (!trimmed) {
+            // Contracts have always dropped blank lines and rely on
+            // paragraph spacing. Free-form documents (numbering: "none")
+            // need the blank line kept, because that is how a drafter
+            // controls white space on the page.
+            if (numberingMode === "none") {
+              children.push(
+                new Paragraph({
+                  ...paraProps(section.format, { after: 0 }),
+                  children: inlineRuns(""),
+                }),
+              );
+            }
+            continue;
+          }
           const bulletMatch = trimmed.match(/^[-•*]\s+(.+)/);
           const rawText = bulletMatch ? bulletMatch[1].trim() : trimmed;
           const manualList = parseManualListMarker(rawText);
@@ -472,23 +677,53 @@ export async function generateDocx(
                 inferredLevel === undefined
                   ? undefined
                   : legalNumbering(inferredLevel),
-              spacing: { after: 120 },
-              children: [
-                new TextRun({
-                  text,
-                  font: FONT,
-                  size: SIZE,
-                }),
-              ],
+              ...paraProps(section.format, { after: 120 }),
+              children: inlineRuns(text, {
+                bold: section.format?.bold,
+                italics: section.format?.italic,
+                underline: section.format?.underline,
+              }),
             }),
           );
         }
       }
     }
 
-    const pageSetup = options?.landscape
-      ? { page: { size: { orientation: PageOrientation.LANDSCAPE } } }
-      : {};
+    const page: Record<string, unknown> = {};
+    if (options?.landscape) {
+      page.size = { orientation: PageOrientation.LANDSCAPE };
+    }
+    const m = style.margins;
+    if (m && typeof m === "object") {
+      const side = (value: unknown) =>
+        convertInchesToTwip(clampNumber(value, 0.25, 3, 1));
+      page.margin = {
+        top: side(m.top),
+        bottom: side(m.bottom),
+        left: side(m.left),
+        right: side(m.right),
+      };
+    }
+    const pageSetup = Object.keys(page).length ? { page } : {};
+
+    const footers = style.pageNumbers
+      ? {
+          default: new Footer({
+            children: [
+              new Paragraph({
+                alignment: AlignmentType.CENTER,
+                children: [
+                  new TextRun({
+                    children: [PageNumber.CURRENT],
+                    font: FONT,
+                    size: SIZE,
+                  }),
+                ],
+              }),
+            ],
+          }),
+        }
+      : undefined;
 
     const doc = new Document({
       numbering: {
@@ -499,7 +734,13 @@ export async function generateDocx(
           },
         ],
       },
-      sections: [{ properties: pageSetup, children }],
+      sections: [
+        {
+          properties: pageSetup,
+          ...(footers ? { footers } : {}),
+          children,
+        },
+      ],
     });
     const buf = await Packer.toBuffer(doc);
     const zip = await import("jszip");

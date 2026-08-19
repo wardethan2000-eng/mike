@@ -242,6 +242,8 @@ export type AssistantEvent =
               new_filename: string;
               document_id: string;
               version_id: string;
+              /** Present on copies made after 2026-08-19; older chats lack it. */
+              download_url?: string;
           }[];
           error?: string;
           isStreaming?: boolean;
