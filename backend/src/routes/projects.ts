@@ -1257,6 +1257,44 @@ projectsRouter.post(
   },
 );
 
+// GET /projects/:projectId/legal-sources — which cases and statutes are
+// already in this matter. The save button asks for this so it can show a
+// source as already filed after a page reload, instead of looking unsaved.
+projectsRouter.get(
+  "/:projectId/legal-sources",
+  requireAuth,
+  async (req, res) => {
+    const userId = res.locals.userId as string;
+    const userEmail = res.locals.userEmail as string | undefined;
+    const { projectId } = req.params;
+    const db = createServerSupabase();
+
+    const access = await checkProjectAccess(projectId, userId, userEmail, db);
+    if (!access.ok)
+      return void res.status(404).json({ detail: "Matter not found" });
+
+    const { data, error } = await db
+      .from("documents")
+      .select("source_kind, source_ref")
+      .eq("project_id", projectId)
+      .not("source_kind", "is", null)
+      .not("source_ref", "is", null);
+    if (error) {
+      console.error("[projects/legal-sources] list failed", {
+        projectId,
+        error: safeErrorLog(error),
+      });
+      return void res.status(500).json({ detail: "Could not read this matter" });
+    }
+    res.json({
+      sources: (data ?? []).map((row) => ({
+        kind: row.source_kind as string,
+        ref: row.source_ref as string,
+      })),
+    });
+  },
+);
+
 // POST /projects/:projectId/legal-sources — file a case or statute the
 // assistant pulled into this matter's Law folder. The body says which source;
 // the text itself is fetched or read back server-side, never taken from the

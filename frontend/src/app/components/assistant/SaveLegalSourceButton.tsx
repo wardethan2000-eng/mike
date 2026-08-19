@@ -5,7 +5,11 @@ import { usePathname } from "next/navigation";
 import { BookmarkPlus, Check, Loader2, X } from "lucide-react";
 import { PillButton } from "@/app/components/ui/pill-button";
 import { ProjectPickerModal } from "@/app/components/modals/ProjectPickerModal";
-import { listProjects, saveLegalSource } from "@/app/lib/mikeApi";
+import {
+    listProjects,
+    listSavedLegalSources,
+    saveLegalSource,
+} from "@/app/lib/mikeApi";
 import type { Project } from "../shared/types";
 
 /** A case or statute the assistant pulled, in the shape the save API wants. */
@@ -22,6 +26,37 @@ export type LegalSourceRef =
     | { kind: "legislation"; legId: string };
 
 const LAST_MATTER_KEY = "mike.legalSource.lastProjectId";
+
+/** What each matter already has filed, so a page full of sources asks once
+ *  rather than once per button. Cleared whenever something new is saved. */
+const savedByMatter = new Map<string, Promise<Set<string>>>();
+
+function savedKey(kind: string, ref: string) {
+    return `${kind}:${ref}`;
+}
+
+/** Must match the server's normalizeLegId, or the lookup never matches. */
+function normalizeLegId(label: string) {
+    return label.trim().replace(/\s+/g, " ").toUpperCase();
+}
+
+function loadSaved(projectId: string): Promise<Set<string>> {
+    const cached = savedByMatter.get(projectId);
+    if (cached) return cached;
+    const pending = listSavedLegalSources(projectId)
+        .then(
+            (rows) =>
+                new Set(rows.map((row) => savedKey(row.kind, row.ref))),
+        )
+        .catch(() => {
+            // Not knowing is harmless: the button just offers to save, and
+            // saving something already filed is handled server-side.
+            savedByMatter.delete(projectId);
+            return new Set<string>();
+        });
+    savedByMatter.set(projectId, pending);
+    return pending;
+}
 
 /** Which matter and chat the user is looking at, read off the address bar so
  *  no chat component has to pass it down. */
@@ -65,12 +100,30 @@ export function SaveLegalSourceButton({
     // state.
     const sourceKey =
         source.kind === "case" ? `case:${source.clusterId}` : `leg:${source.legId}`;
+    const savedLookupKey =
+        source.kind === "case"
+            ? savedKey("case", String(Math.floor(source.clusterId)))
+            : savedKey("legislation", normalizeLegId(source.legId));
     const [trackedKey, setTrackedKey] = useState(sourceKey);
     if (trackedKey !== sourceKey) {
         setTrackedKey(sourceKey);
         setState("idle");
         setError(null);
     }
+
+    // Show a source that is already in the matter as filed, including after
+    // a reload — otherwise it looks unsaved and invites a pointless click.
+    useEffect(() => {
+        if (!projectId) return;
+        let cancelled = false;
+        void loadSaved(projectId).then((saved) => {
+            if (cancelled) return;
+            if (saved.has(savedLookupKey)) setState("exists");
+        });
+        return () => {
+            cancelled = true;
+        };
+    }, [projectId, savedLookupKey]);
 
     // Low-impact failures shouldn't stick around.
     useEffect(() => {
@@ -108,6 +161,7 @@ export function SaveLegalSourceButton({
                           }),
                 });
                 setState(result.status === "exists" ? "exists" : "saved");
+                savedByMatter.delete(targetProjectId);
                 try {
                     window.localStorage.setItem(
                         LAST_MATTER_KEY,

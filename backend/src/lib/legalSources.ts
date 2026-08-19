@@ -137,17 +137,32 @@ export async function saveLegalSourceToProject(args: {
     };
   }
 
-  const folderId = await ensureLawFolder(db, projectId, userId);
+  const folder = await ensureLawFolder(db, projectId, userId);
+  const folderId = folder.id;
 
-  const documentId = await storeSourceDocument(db, {
-    userId,
-    userEmail,
-    projectId,
-    folderId,
-    sourceKind,
-    sourceRef,
-    resolved,
-  });
+  let documentId: string;
+  try {
+    documentId = await storeSourceDocument(db, {
+      userId,
+      userEmail,
+      projectId,
+      folderId,
+      sourceKind,
+      sourceRef,
+      resolved,
+    });
+  } catch (err) {
+    // Nothing was filed, so a Law folder made a moment ago for this save would
+    // be left sitting empty in the matter. Take it back out.
+    if (folder.created && folderId) {
+      await db
+        .from("project_subfolders")
+        .delete()
+        .eq("id", folderId)
+        .eq("project_id", projectId);
+    }
+    throw err;
+  }
 
   return {
     status: "saved",
@@ -167,7 +182,7 @@ async function ensureLawFolder(
   db: Db,
   projectId: string,
   userId: string,
-): Promise<string | null> {
+): Promise<{ id: string | null; created: boolean }> {
   const { data: folders } = await db
     .from("project_subfolders")
     .select("id, name, parent_folder_id")
@@ -178,7 +193,7 @@ async function ensureLawFolder(
       String(folder.name ?? "").trim().toLowerCase() ===
       LAW_FOLDER_NAME.toLowerCase(),
   );
-  if (match) return match.id as string;
+  if (match) return { id: match.id as string, created: false };
 
   const { data, error } = await db
     .from("project_subfolders")
@@ -194,9 +209,9 @@ async function ensureLawFolder(
     console.error("[legal-source] could not create the Law folder", error);
     // A missing folder is not worth failing the save over — the document still
     // belongs to the matter, it just sits at the top level.
-    return null;
+    return { id: null, created: false };
   }
-  return data.id as string;
+  return { id: data.id as string, created: true };
 }
 
 // ---------------------------------------------------------------------------

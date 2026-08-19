@@ -2128,6 +2128,16 @@ export type SavedLegalSource = {
 };
 
 /** File a case or statute into a matter's Law folder. */
+/** Which cases and statutes are already in a matter's Law folder. */
+export async function listSavedLegalSources(
+    projectId: string,
+): Promise<{ kind: string; ref: string }[]> {
+    const result = await apiRequest<{
+        sources?: { kind: string; ref: string }[];
+    }>(`/projects/${projectId}/legal-sources`);
+    return result.sources ?? [];
+}
+
 export async function saveLegalSource(
     projectId: string,
     body: SaveLegalSourceBody,

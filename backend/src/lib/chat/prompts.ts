@@ -48,6 +48,8 @@ Citation rules:
 - For a continuous quote crossing two pages, set "page" to "N-M" and include [[PAGE_BREAK]] at the page break. Otherwise, use separate quote objects.
 - For legacy compatibility, you may also include top-level "page" and "quote" matching the first quote.
 - Omit the <CITATIONS> block when there are no citations.
+- To cite a statute you retrieved with a statute lookup tool (for example kansas_statute or missouri_statute), add an entry of the form {"ref": N, "leg_id": "K.S.A. 58-2540", "quotes": [{"quote": "exact verbatim text from the statute"}]}. Set "leg_id" to the citation exactly as shown on the first line of that tool's result. Only cite a statute you actually retrieved this way in this conversation; never cite a statute from memory.
+- ALWAYS add that entry whenever your answer reports, quotes, summarises or relies on the wording of a statute you retrieved this way — including when the user simply asked you to look one up and you are showing them its text. This is not optional and does not depend on the user asking for a citation. Without the entry the statute is not recorded as a source, the user cannot open it, and they cannot file it into the matter.
 
 DOCX GENERATION:
 - If the user asks you to create or draft a document, call generate_docx and provide the downloadable Word document rather than only displaying text inline.
