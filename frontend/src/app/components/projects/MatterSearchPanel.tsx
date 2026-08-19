@@ -12,6 +12,8 @@ import { SearchBar } from "@/app/components/ui/search-bar";
 import { TabPillButton } from "@/app/components/ui/tab-pill-button";
 import { Button } from "@/app/components/ui/button";
 import { useSelectedModel } from "@/app/hooks/useSelectedModel";
+import ReactMarkdown from "react-markdown";
+import remarkGfm from "remark-gfm";
 
 type Mode = "find" | "ask";
 
@@ -179,9 +181,11 @@ export function MatterSearchPanel({ projectId }: Props) {
 
             {mode === "ask" && answer && !loading && (
                 <div className="mt-3">
-                    <p className="whitespace-pre-wrap text-sm text-gray-800">
-                        {answer.answer}
-                    </p>
+                    <div className="text-sm text-gray-800 [&_p]:mb-2 [&_p:last-child]:mb-0 [&_ul]:my-1 [&_ul]:list-disc [&_ul]:pl-5 [&_ol]:my-1 [&_ol]:list-decimal [&_ol]:pl-5 [&_li]:mb-0.5 [&_strong]:font-semibold [&_h1]:text-base [&_h1]:font-semibold [&_h2]:font-semibold [&_h3]:font-semibold [&_a]:underline">
+                        <ReactMarkdown remarkPlugins={[remarkGfm]}>
+                            {answer.answer}
+                        </ReactMarkdown>
+                    </div>
                     {answer.sources.length > 0 && (
                         <div className="mt-2">
                             <p className="text-[11px] font-medium uppercase tracking-wide text-gray-400">
