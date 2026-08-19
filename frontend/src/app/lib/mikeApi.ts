@@ -769,6 +769,118 @@ export async function deleteProject(projectId: string): Promise<void> {
     await apiRequest(`/projects/${projectId}`, { method: "DELETE" });
 }
 
+/**
+ * Case memory — the short facts a matter picks up as work goes on. They are
+ * sent to the assistant with every question asked in that matter.
+ */
+export type MemoryCategory =
+    | "parties"
+    | "dates"
+    | "position"
+    | "decisions"
+    | "questions"
+    | "drafting";
+
+export interface ProjectMemory {
+    id: string;
+    project_id: string;
+    user_id: string;
+    category: MemoryCategory;
+    body: string;
+    pinned: boolean;
+    /** Where the fact came from, when it came from somewhere checkable. */
+    source_document_id: string | null;
+    source_page: number | null;
+    source_chat_id: string | null;
+    /** Set once a newer wording replaces this one. */
+    superseded_by: string | null;
+    superseded_at: string | null;
+    created_at: string;
+    updated_at: string;
+}
+
+export async function listProjectMemories(
+    projectId: string,
+    options?: { includeReplaced?: boolean },
+): Promise<ProjectMemory[]> {
+    const query = options?.includeReplaced ? "?include=replaced" : "";
+    return apiRequest<ProjectMemory[]>(
+        `/projects/${projectId}/memories${query}`,
+    );
+}
+
+export async function createProjectMemory(
+    projectId: string,
+    payload: {
+        body: string;
+        category: MemoryCategory;
+        pinned?: boolean;
+        source_document_id?: string | null;
+        source_page?: number | null;
+    },
+): Promise<ProjectMemory> {
+    return apiRequest<ProjectMemory>(`/projects/${projectId}/memories`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(payload),
+    });
+}
+
+/** Small corrections — a typo, the wrong grouping, pinning. */
+export async function updateProjectMemory(
+    projectId: string,
+    memoryId: string,
+    payload: {
+        body?: string;
+        category?: MemoryCategory;
+        pinned?: boolean;
+        source_document_id?: string | null;
+        source_page?: number | null;
+    },
+): Promise<ProjectMemory> {
+    return apiRequest<ProjectMemory>(
+        `/projects/${projectId}/memories/${memoryId}`,
+        {
+            method: "PATCH",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify(payload),
+        },
+    );
+}
+
+/**
+ * The fact itself has changed — a date moved, a position shifted. Writes the
+ * new wording and keeps the old one readable behind it.
+ */
+export async function supersedeProjectMemory(
+    projectId: string,
+    memoryId: string,
+    payload: {
+        body: string;
+        category?: MemoryCategory;
+        source_document_id?: string | null;
+        source_page?: number | null;
+    },
+): Promise<ProjectMemory> {
+    return apiRequest<ProjectMemory>(
+        `/projects/${projectId}/memories/${memoryId}/supersede`,
+        {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify(payload),
+        },
+    );
+}
+
+export async function deleteProjectMemory(
+    projectId: string,
+    memoryId: string,
+): Promise<void> {
+    await apiRequest(`/projects/${projectId}/memories/${memoryId}`, {
+        method: "DELETE",
+    });
+}
+
 export interface ProjectPeople {
     owner: {
         user_id: string;

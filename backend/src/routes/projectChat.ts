@@ -35,7 +35,7 @@ import {
 } from "../lib/userSettings";
 import { checkProjectAccess } from "../lib/access";
 import {
-    loadProjectOverview,
+    loadProjectContext,
     caseOverviewPromptSection,
 } from "../lib/projectOverview";
 import { safeErrorLog, safeErrorMessage } from "../lib/safeError";
@@ -234,11 +234,13 @@ projectChatRouter.post("/", requireAuth, async (req, res) => {
     // The matter's standing instructions — who we act for, what we are
     // trying to achieve, how this firm wants things done — go in ahead of the
     // per-turn detail, so they apply to answering and drafting alike.
+    const caseContext = await loadProjectContext(db, projectId);
     let systemPromptExtra =
         PROJECT_SYSTEM_PROMPT_EXTRA +
         caseOverviewPromptSection(
-            await loadProjectOverview(db, projectId),
+            caseContext.overview,
             nonce,
+            caseContext.memories,
         );
     if (attached_documents?.length) {
         const lines = attached_documents.map((d) => {

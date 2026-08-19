@@ -1023,10 +1023,14 @@ export default function ProjectAssistantChatPage({ params }: Props) {
                         projectId={projectId}
                         overview={project ? (project.overview ?? null) : undefined}
                         canEdit={project?.is_owner !== false}
+                        documents={project?.documents ?? []}
                         onSaved={(overview) =>
                             setProject((prev) =>
                                 prev ? { ...prev, overview } : prev,
                             )
+                        }
+                        onOpenDocument={(documentId, filename) =>
+                            openTab(documentId, filename)
                         }
                     />
                 </div>

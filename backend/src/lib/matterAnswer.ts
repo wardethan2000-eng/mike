@@ -8,7 +8,7 @@
 import { completeText, resolveModel, DEFAULT_MAIN_MODEL, type UserApiKeys } from "./llm";
 import { searchMatter, formatForAssistant, type MatterSearchHit } from "./matterSearch";
 import { linkAnswerCitations, type AnswerCitation } from "./matterCitations";
-import { loadProjectOverview, caseOverviewBackground } from "./projectOverview";
+import { loadProjectContext, caseOverviewBackground } from "./projectOverview";
 import type { createServerSupabase } from "./supabase";
 
 type Db = ReturnType<typeof createServerSupabase>;
@@ -79,8 +79,10 @@ export async function answerMatter(
   // The matter's standing instructions, so the answer knows which side the
   // reader is on. It shapes how the passages are read; it is never a source
   // in its own right.
+  const caseContext = await loadProjectContext(db, params.projectId);
   const background = caseOverviewBackground(
-    await loadProjectOverview(db, params.projectId),
+    caseContext.overview,
+    caseContext.memories,
   );
   const model = resolveModel(params.model, DEFAULT_MAIN_MODEL);
   const answer = await completeText({
