@@ -29,6 +29,7 @@ import {
     deleteDocument,
     getChat,
     getProject,
+    updateProject,
     uploadProjectDocument,
     createProjectFolder,
     renameProjectFolder,
@@ -273,6 +274,27 @@ export default function ProjectAssistantChatPage({ params }: Props) {
 
     const activeTab = tabs.find((t) => t.documentId === activeTabId) ?? null;
 
+    // Mike writes down what it thinks is worth remembering only after an answer
+    // has gone out, so the case overview panel is told each time one finishes
+    // and looks again for suggestions a moment later.
+    const [answersFinished, setAnswersFinished] = useState(0);
+
+    const handleAutoRememberChange = useCallback(
+        async (autoRemember: boolean) => {
+            setProject((prev) => (prev ? { ...prev, auto_remember: autoRemember } : prev));
+            try {
+                await updateProject(projectId, { auto_remember: autoRemember });
+            } catch {
+                // Put the switch back where it was rather than showing it in a
+                // state the matter is not actually in.
+                setProject((prev) =>
+                    prev ? { ...prev, auto_remember: !autoRemember } : prev,
+                );
+            }
+        },
+        [projectId],
+    );
+
     const {
         layout,
         laidOut,
@@ -312,6 +334,14 @@ export default function ProjectAssistantChatPage({ params }: Props) {
         setMessages,
         cancel,
     } = useAssistantChat({ initialMessages, chatId, projectId });
+
+    const wasRespondingRef = useRef(false);
+    useEffect(() => {
+        if (wasRespondingRef.current && !isResponseLoading) {
+            setAnswersFinished((count) => count + 1);
+        }
+        wasRespondingRef.current = isResponseLoading;
+    }, [isResponseLoading]);
     const pendingInitialUserMessageRef = useRef<Message | null>(
         initialMessages.length === 1 && initialMessages[0].role === "user"
             ? initialMessages[0]
@@ -1024,11 +1054,14 @@ export default function ProjectAssistantChatPage({ params }: Props) {
                         overview={project ? (project.overview ?? null) : undefined}
                         canEdit={project?.is_owner !== false}
                         documents={project?.documents ?? []}
+                        autoRemember={project?.auto_remember === true}
+                        refreshSignal={answersFinished}
                         onSaved={(overview) =>
                             setProject((prev) =>
                                 prev ? { ...prev, overview } : prev,
                             )
                         }
+                        onAutoRememberChange={handleAutoRememberChange}
                         onOpenDocument={(documentId, filename) =>
                             openTab(documentId, filename)
                         }

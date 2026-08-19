@@ -40,6 +40,8 @@ export interface Project {
     practice: string | null;
     /** Standing instructions for the matter, sent with every question. */
     overview?: string | null;
+    /** Whether Mike saves the facts it finds without asking first. */
+    auto_remember?: boolean;
     shared_with: string[];
     created_at: string;
     updated_at: string;

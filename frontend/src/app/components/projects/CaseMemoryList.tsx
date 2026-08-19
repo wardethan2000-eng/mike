@@ -1,10 +1,21 @@
 "use client";
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { Pin, Pencil, History, Trash2, Plus, X, Check } from "lucide-react";
 import {
+    Pin,
+    Pencil,
+    History,
+    Trash2,
+    Plus,
+    X,
+    Check,
+    Sparkles,
+} from "lucide-react";
+import {
+    acceptProjectMemory,
     createProjectMemory,
     deleteProjectMemory,
+    dismissProjectMemory,
     listProjectMemories,
     supersedeProjectMemory,
     updateProjectMemory,
@@ -22,6 +33,11 @@ import type { Document } from "@/app/components/shared/types";
  * they are short by design. Each one can point back at the document and page
  * it came from, so it can be checked rather than taken on trust.
  *
+ * After a conversation, Mike suggests facts of its own. A suggestion is not in
+ * force: it waits at the top of this list until someone keeps it, corrects it
+ * or turns it down. A matter can be set to keep them without asking, in which
+ * case they are still marked as Mike's own and can be removed like any other.
+ *
  * A fact that has changed is replaced rather than overwritten: the old wording
  * stays behind the new one, so a deadline that moved twice still reads as a
  * history rather than as a single number that was quietly edited.
@@ -32,6 +48,12 @@ const BODY_MAX_CHARS = 500;
 
 /** How long a "could not save" note stays up before it takes itself away. */
 const NOTICE_TIMEOUT_MS = 6000;
+
+/**
+ * Suggestions are written after the answer has been sent, so a look straight
+ * away would find nothing. Look again a moment later, and once more after that.
+ */
+const SUGGESTION_CHECK_DELAYS_MS = [2500, 9000];
 
 const CATEGORIES: { id: MemoryCategory; label: string; hint: string }[] = [
     { id: "parties", label: "Parties", hint: "Who is who, and what they do" },
@@ -49,6 +71,15 @@ const CATEGORY_HEADINGS: Record<MemoryCategory, string> = {
     decisions: "Decisions made",
     questions: "Open questions",
     drafting: "Drafting preferences",
+};
+
+const CATEGORY_LABELS: Record<MemoryCategory, string> = {
+    parties: "Parties",
+    dates: "Dates",
+    position: "Position",
+    decisions: "Decisions",
+    questions: "Open",
+    drafting: "Drafting",
 };
 
 function CategoryPicker({
@@ -234,23 +265,34 @@ export function CaseMemoryList({
     projectId,
     documents,
     canEdit,
+    autoRemember = false,
+    canChangeAutoRemember = false,
     onOpenDocument,
+    onAutoRememberChange,
+    /** Bumped when a chat answer finishes, so new suggestions are picked up. */
+    refreshSignal = 0,
 }: {
     projectId: string;
     /** The matter's files, so a fact can point at the one it came from. */
     documents: Document[];
     canEdit: boolean;
+    autoRemember?: boolean;
+    canChangeAutoRemember?: boolean;
     onOpenDocument?: (documentId: string, filename: string) => void;
+    onAutoRememberChange?: (autoRemember: boolean) => void;
+    refreshSignal?: number;
 }) {
     const [memories, setMemories] = useState<ProjectMemory[] | null>(null);
+    const [proposals, setProposals] = useState<ProjectMemory[]>([]);
     const [adding, setAdding] = useState(false);
     /** The fact being changed, and whether that change replaces or corrects it. */
     const [editing, setEditing] = useState<{
         id: string;
-        mode: "correct" | "replace";
+        mode: "correct" | "replace" | "accept";
     } | null>(null);
     const [busyId, setBusyId] = useState<string | null>(null);
     const [notice, setNotice] = useState<string | null>(null);
+    const [savingSwitch, setSavingSwitch] = useState(false);
     const noticeTimerRef = useRef<number | null>(null);
 
     // A note about something the reader can simply try again should take
@@ -266,19 +308,40 @@ export function CaseMemoryList({
         );
     }, []);
 
+    // Once on opening, and again shortly after each answer. What Mike writes
+    // down is written after the answer has gone out, so looking straight away
+    // would find nothing — and on a matter set to keep suggestions without
+    // asking, the new fact lands in the list itself rather than in the
+    // suggestions, so both have to be looked at again.
     useEffect(() => {
         let cancelled = false;
-        listProjectMemories(projectId)
-            .then((loaded) => {
-                if (!cancelled) setMemories(loaded);
-            })
-            .catch(() => {
-                if (!cancelled) setMemories([]);
-            });
+        const load = () => {
+            listProjectMemories(projectId)
+                .then((loaded) => {
+                    if (!cancelled) setMemories(loaded);
+                })
+                .catch(() => {
+                    if (!cancelled) setMemories((prev) => prev ?? []);
+                });
+            listProjectMemories(projectId, { status: "proposed" })
+                .then((loaded) => {
+                    if (!cancelled) setProposals(loaded);
+                })
+                .catch(() => {
+                    // No suggestions to show is a perfectly good outcome.
+                });
+        };
+        load();
+        const timers = refreshSignal
+            ? SUGGESTION_CHECK_DELAYS_MS.map((delay) =>
+                  window.setTimeout(load, delay),
+              )
+            : [];
         return () => {
             cancelled = true;
+            for (const timer of timers) window.clearTimeout(timer);
         };
-    }, [projectId]);
+    }, [projectId, refreshSignal]);
 
     const documentsById = useMemo(() => {
         const byId = new Map<string, Document>();
@@ -329,7 +392,7 @@ export function CaseMemoryList({
 
     async function handleSaveEdit(
         memory: ProjectMemory,
-        mode: "correct" | "replace",
+        mode: "correct" | "replace" | "accept",
         values: {
             body: string;
             category: MemoryCategory;
@@ -339,7 +402,15 @@ export function CaseMemoryList({
     ) {
         setBusyId(memory.id);
         try {
-            if (mode === "correct") {
+            if (mode === "accept") {
+                const accepted = await acceptProjectMemory(
+                    projectId,
+                    memory.id,
+                    { body: values.body, category: values.category },
+                );
+                setProposals((prev) => prev.filter((p) => p.id !== memory.id));
+                setMemories((prev) => [...(prev ?? []), accepted]);
+            } else if (mode === "correct") {
                 const updated = await updateProjectMemory(projectId, memory.id, {
                     body: values.body,
                     category: values.category,
@@ -369,6 +440,31 @@ export function CaseMemoryList({
             setEditing(null);
         } catch {
             showNotice("That change could not be saved. Try again.");
+        } finally {
+            setBusyId(null);
+        }
+    }
+
+    async function handleKeepSuggestion(memory: ProjectMemory) {
+        setBusyId(memory.id);
+        try {
+            const accepted = await acceptProjectMemory(projectId, memory.id);
+            setProposals((prev) => prev.filter((p) => p.id !== memory.id));
+            setMemories((prev) => [...(prev ?? []), accepted]);
+        } catch {
+            showNotice("That suggestion could not be kept. Try again.");
+        } finally {
+            setBusyId(null);
+        }
+    }
+
+    async function handleDismissSuggestion(memory: ProjectMemory) {
+        setBusyId(memory.id);
+        try {
+            await dismissProjectMemory(projectId, memory.id);
+            setProposals((prev) => prev.filter((p) => p.id !== memory.id));
+        } catch {
+            showNotice("That suggestion could not be turned down. Try again.");
         } finally {
             setBusyId(null);
         }
@@ -404,10 +500,19 @@ export function CaseMemoryList({
         }
     }
 
+    async function handleAutoRemember(next: boolean) {
+        setSavingSwitch(true);
+        try {
+            await onAutoRememberChange?.(next);
+        } finally {
+            setSavingSwitch(false);
+        }
+    }
+
     const total = memories?.length ?? 0;
 
     return (
-        <div className="flex min-h-0 flex-col">
+        <div className="flex h-full min-h-0 flex-col">
             <div className="flex items-center justify-between gap-2 px-3 pt-3">
                 <h3 className="text-xs font-medium text-gray-700">
                     Remembered facts{total > 0 ? ` (${total})` : ""}
@@ -444,6 +549,90 @@ export function CaseMemoryList({
             )}
 
             <div className="min-h-0 flex-1 space-y-3 overflow-y-auto px-3 pb-3">
+                {proposals.length > 0 && (
+                    <div className="space-y-1.5 rounded border border-blue-100 bg-blue-50/60 p-2">
+                        <h4 className="flex items-center gap-1 text-[11px] font-medium uppercase tracking-wide text-blue-700">
+                            <Sparkles className="h-3 w-3" />
+                            Mike suggests remembering
+                        </h4>
+                        {proposals.map((proposal) =>
+                            editing?.id === proposal.id ? (
+                                <FactEditor
+                                    key={proposal.id}
+                                    initialBody={proposal.body}
+                                    initialCategory={proposal.category}
+                                    initialDocumentId={null}
+                                    initialPage={null}
+                                    documents={documents}
+                                    saveLabel="Keep"
+                                    busy={busyId === proposal.id}
+                                    onCancel={() => setEditing(null)}
+                                    onSave={(values) =>
+                                        void handleSaveEdit(
+                                            proposal,
+                                            "accept",
+                                            values,
+                                        )
+                                    }
+                                />
+                            ) : (
+                                <div
+                                    key={proposal.id}
+                                    className="rounded border border-blue-100 bg-white px-2 py-1.5"
+                                >
+                                    <p className="text-sm leading-relaxed text-gray-800">
+                                        {proposal.body}
+                                    </p>
+                                    <div className="mt-1 flex items-center justify-between gap-2">
+                                        <span className="text-[11px] text-gray-400">
+                                            {CATEGORY_LABELS[proposal.category]}
+                                        </span>
+                                        <div className="flex shrink-0 items-center gap-1">
+                                            <button
+                                                type="button"
+                                                disabled={busyId === proposal.id}
+                                                onClick={() =>
+                                                    void handleDismissSuggestion(
+                                                        proposal,
+                                                    )
+                                                }
+                                                className="rounded px-1.5 py-0.5 text-xs text-gray-500 hover:bg-gray-100 disabled:opacity-40"
+                                            >
+                                                No thanks
+                                            </button>
+                                            <button
+                                                type="button"
+                                                disabled={busyId === proposal.id}
+                                                onClick={() =>
+                                                    setEditing({
+                                                        id: proposal.id,
+                                                        mode: "accept",
+                                                    })
+                                                }
+                                                className="rounded px-1.5 py-0.5 text-xs text-gray-600 hover:bg-gray-100 disabled:opacity-40"
+                                            >
+                                                Edit
+                                            </button>
+                                            <button
+                                                type="button"
+                                                disabled={busyId === proposal.id}
+                                                onClick={() =>
+                                                    void handleKeepSuggestion(
+                                                        proposal,
+                                                    )
+                                                }
+                                                className="rounded bg-gray-800 px-2 py-0.5 text-xs text-white hover:bg-gray-700 disabled:opacity-40"
+                                            >
+                                                Keep
+                                            </button>
+                                        </div>
+                                    </div>
+                                </div>
+                            ),
+                        )}
+                    </div>
+                )}
+
                 {adding && (
                     <FactEditor
                         initialBody=""
@@ -473,16 +662,11 @@ export function CaseMemoryList({
                                 {group.heading}
                             </h4>
                             {group.items.map((memory) => {
-                                const isEditing = editing?.id === memory.id;
-                                if (isEditing) {
+                                if (editing?.id === memory.id) {
                                     return (
                                         <FactEditor
                                             key={memory.id}
-                                            initialBody={
-                                                editing.mode === "replace"
-                                                    ? memory.body
-                                                    : memory.body
-                                            }
+                                            initialBody={memory.body}
                                             initialCategory={memory.category}
                                             initialDocumentId={
                                                 memory.source_document_id
@@ -528,27 +712,39 @@ export function CaseMemoryList({
                                         </div>
 
                                         <div className="mt-0.5 flex items-center justify-between gap-2">
-                                            {source ? (
-                                                <button
-                                                    type="button"
-                                                    onClick={() =>
-                                                        onOpenDocument?.(
-                                                            source.id,
-                                                            source.filename,
-                                                        )
-                                                    }
-                                                    className="min-w-0 truncate text-left text-[11px] text-blue-600 hover:underline"
-                                                >
-                                                    {source.filename}
-                                                    {memory.source_page
-                                                        ? `, p. ${memory.source_page}`
-                                                        : ""}
-                                                </button>
-                                            ) : (
-                                                <span className="text-[11px] text-gray-300">
-                                                    No source
-                                                </span>
-                                            )}
+                                            <span className="flex min-w-0 items-center gap-1.5">
+                                                {source ? (
+                                                    <button
+                                                        type="button"
+                                                        onClick={() =>
+                                                            onOpenDocument?.(
+                                                                source.id,
+                                                                source.filename,
+                                                            )
+                                                        }
+                                                        className="min-w-0 truncate text-left text-[11px] text-blue-600 hover:underline"
+                                                    >
+                                                        {source.filename}
+                                                        {memory.source_page
+                                                            ? `, p. ${memory.source_page}`
+                                                            : ""}
+                                                    </button>
+                                                ) : (
+                                                    <span className="text-[11px] text-gray-300">
+                                                        No source
+                                                    </span>
+                                                )}
+                                                {memory.origin ===
+                                                    "assistant" && (
+                                                    <span
+                                                        title="Mike wrote this one down"
+                                                        className="flex shrink-0 items-center gap-0.5 text-[11px] text-gray-400"
+                                                    >
+                                                        <Sparkles className="h-2.5 w-2.5" />
+                                                        Added by Mike
+                                                    </span>
+                                                )}
+                                            </span>
 
                                             {canEdit && (
                                                 <div className="flex shrink-0 items-center gap-0.5 opacity-0 transition-opacity group-hover:opacity-100 focus-within:opacity-100">
@@ -632,6 +828,30 @@ export function CaseMemoryList({
                     ))
                 )}
             </div>
+
+            {/* Almost everyone wants to see a suggestion before it counts, so
+                asking first is simply how this works. The alternative is here
+                for a matter where that has become a chore, kept small and out
+                of the way with its consequence written out. */}
+            {canChangeAutoRemember && (
+                <label className="flex shrink-0 cursor-pointer items-start gap-2 border-t border-gray-100 px-3 py-2 text-[11px] leading-relaxed text-gray-400 hover:text-gray-600">
+                    <input
+                        type="checkbox"
+                        checked={autoRemember}
+                        disabled={savingSwitch}
+                        onChange={(e) =>
+                            void handleAutoRemember(e.target.checked)
+                        }
+                        className="mt-0.5 h-3 w-3 shrink-0 accent-gray-600"
+                    />
+                    <span>
+                        Keep what Mike suggests without asking me. Facts are
+                        saved straight into the list, marked as Mike&apos;s own,
+                        and nobody checks them before the assistant starts using
+                        them.
+                    </span>
+                </label>
+            )}
         </div>
     );
 }

@@ -44,8 +44,11 @@ export function CaseOverviewPanel({
     overview,
     canEdit,
     documents = [],
+    autoRemember = false,
     onSaved,
+    onAutoRememberChange,
     onOpenDocument,
+    refreshSignal = 0,
 }: {
     projectId: string;
     /** The saved instructions, or null. Undefined while the matter is loading. */
@@ -53,9 +56,14 @@ export function CaseOverviewPanel({
     canEdit: boolean;
     /** The matter's files, so a remembered fact can point at one. */
     documents?: Document[];
+    /** Whether Mike keeps the facts it suggests without asking first. */
+    autoRemember?: boolean;
     /** Keeps the rest of the page in step with what was just saved. */
     onSaved?: (overview: string | null) => void;
+    onAutoRememberChange?: (autoRemember: boolean) => Promise<void> | void;
     onOpenDocument?: (documentId: string, filename: string) => void;
+    /** Bumped when a chat answer finishes, so new suggestions are picked up. */
+    refreshSignal?: number;
 }) {
     const [draft, setDraft] = useState("");
     const [saveState, setSaveState] = useState<SaveState>("idle");
@@ -229,7 +237,11 @@ export function CaseOverviewPanel({
                     projectId={projectId}
                     documents={documents}
                     canEdit
+                    autoRemember={autoRemember}
+                    canChangeAutoRemember={canEdit}
                     onOpenDocument={onOpenDocument}
+                    onAutoRememberChange={onAutoRememberChange}
+                    refreshSignal={refreshSignal}
                 />
             </div>
         </div>

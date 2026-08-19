@@ -752,6 +752,9 @@ projectsRouter.patch("/:projectId", requireAuth, async (req, res) => {
   if ("overview" in req.body) {
     updates.overview = normalizeOverview(req.body.overview);
   }
+  if ("auto_remember" in req.body) {
+    updates.auto_remember = req.body.auto_remember === true;
+  }
   if (Array.isArray(req.body.shared_with)) {
     // Normalise: lowercase + dedupe + drop empties.
     const normalizedUserEmail = userEmail?.trim().toLowerCase();

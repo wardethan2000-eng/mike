@@ -755,6 +755,8 @@ export async function updateProject(
         cm_number?: string;
         practice?: string | null;
         overview?: string | null;
+        /** Let Mike save the facts it finds without asking first. */
+        auto_remember?: boolean;
         shared_with?: string[];
     },
 ): Promise<Project> {
@@ -788,6 +790,14 @@ export interface ProjectMemory {
     category: MemoryCategory;
     body: string;
     pinned: boolean;
+    /**
+     * accepted — in force, and sent with every question.
+     * proposed — Mike suggested it and nobody has looked at it yet.
+     * dismissed — turned down. Kept only so it is not suggested again.
+     */
+    status: "accepted" | "proposed" | "dismissed";
+    /** Whether someone typed this fact or Mike suggested it. */
+    origin: "manual" | "assistant";
     /** Where the fact came from, when it came from somewhere checkable. */
     source_document_id: string | null;
     source_page: number | null;
@@ -801,12 +811,41 @@ export interface ProjectMemory {
 
 export async function listProjectMemories(
     projectId: string,
-    options?: { includeReplaced?: boolean },
+    options?: { status?: "accepted" | "proposed"; includeReplaced?: boolean },
 ): Promise<ProjectMemory[]> {
-    const query = options?.includeReplaced ? "?include=replaced" : "";
+    const params = new URLSearchParams();
+    if (options?.status) params.set("status", options.status);
+    if (options?.includeReplaced) params.set("include", "replaced");
+    const query = params.toString() ? `?${params}` : "";
     return apiRequest<ProjectMemory[]>(
         `/projects/${projectId}/memories${query}`,
     );
+}
+
+/** Keep a suggested fact, optionally tidying its wording on the way through. */
+export async function acceptProjectMemory(
+    projectId: string,
+    memoryId: string,
+    payload?: { body?: string; category?: MemoryCategory },
+): Promise<ProjectMemory> {
+    return apiRequest<ProjectMemory>(
+        `/projects/${projectId}/memories/${memoryId}/accept`,
+        {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify(payload ?? {}),
+        },
+    );
+}
+
+/** Turn a suggested fact down. It is never sent to the assistant. */
+export async function dismissProjectMemory(
+    projectId: string,
+    memoryId: string,
+): Promise<void> {
+    await apiRequest(`/projects/${projectId}/memories/${memoryId}/dismiss`, {
+        method: "POST",
+    });
 }
 
 export async function createProjectMemory(

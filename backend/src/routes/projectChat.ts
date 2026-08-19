@@ -38,6 +38,7 @@ import {
     loadProjectContext,
     caseOverviewPromptSection,
 } from "../lib/projectOverview";
+import { proposeMemoriesForTurn } from "../lib/memoryProposals";
 import { safeErrorLog, safeErrorMessage } from "../lib/safeError";
 import { generateAssistantChatTitle } from "../lib/chatTitle";
 
@@ -425,6 +426,24 @@ projectChatRouter.post("/", requireAuth, async (req, res) => {
             },
             persistedEvents,
         );
+
+        // Look back over what was just said for anything worth remembering
+        // about the case. This happens after the answer has gone out, so a
+        // slow or failed suggestion never holds up a reply.
+        void proposeMemoriesForTurn({
+            db,
+            projectId,
+            userId,
+            chatId,
+            userMessage: lastUser?.content ?? "",
+            assistantMessage: persistedEvents
+                .filter((event) => event.type === "content")
+                .map((event) => (event as { text: string }).text)
+                .join("\n"),
+            model: titleModel,
+            apiKeys,
+        });
+
         write("data: [DONE]\n\n");
     } catch (err) {
         if (isAbortError(err)) {

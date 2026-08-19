@@ -29,14 +29,18 @@ type MemoryRow = {
     source_page: number | null;
     source_chat_id: string | null;
     superseded_by: string | null;
+    /** accepted = in force; proposed = Mike suggested it; dismissed = turned down. */
+    status: "accepted" | "proposed" | "dismissed";
+    origin: "manual" | "assistant";
 };
 
 export const projectMemoriesRouter = Router({ mergeParams: true });
 
 /** Everything the client is shown about a fact. */
 const SELECT_COLUMNS =
-    "id, project_id, user_id, category, body, pinned, source_document_id, " +
-    "source_page, source_chat_id, superseded_by, superseded_at, created_at, updated_at";
+    "id, project_id, user_id, category, body, pinned, status, origin, " +
+    "source_document_id, source_page, source_chat_id, superseded_by, " +
+    "superseded_at, created_at, updated_at";
 
 function normalizeCategory(value: unknown): MemoryCategory {
     return typeof value === "string" &&
@@ -89,16 +93,20 @@ async function requireProjectAccess(
 }
 
 // GET /projects/:projectId/memories
-// The facts in force. Add ?include=replaced to see the ones they replaced too.
+// The facts in force. ?status=proposed returns the ones Mike has suggested and
+// nobody has looked at yet; ?include=replaced also returns the wordings that
+// newer facts have replaced.
 projectMemoriesRouter.get("/", requireAuth, async (req, res) => {
     const context = await requireProjectAccess(req, res);
     if (!context) return;
     const { db, projectId } = context;
 
+    const status = req.query.status === "proposed" ? "proposed" : "accepted";
     let query = db
         .from("project_memories")
         .select(SELECT_COLUMNS)
-        .eq("project_id", projectId);
+        .eq("project_id", projectId)
+        .eq("status", status);
     if (req.query.include !== "replaced") {
         query = query.is("superseded_by", null);
     }
@@ -251,6 +259,71 @@ projectMemoriesRouter.post("/:memoryId/supersede", requireAuth, async (req, res)
     }
 
     res.status(201).json(replacement);
+});
+
+// POST /projects/:projectId/memories/:memoryId/accept
+// A suggestion the lawyer is happy with. From here on it is a fact like any
+// other and goes out with every question asked in the matter.
+projectMemoriesRouter.post("/:memoryId/accept", requireAuth, async (req, res) => {
+    const context = await requireProjectAccess(req, res);
+    if (!context) return;
+    const { db, projectId } = context;
+    const { memoryId } = req.params;
+
+    // Accepting is often the moment a wording gets tidied, so take an edited
+    // body and grouping in the same breath.
+    const updates: Record<string, unknown> = {
+        status: "accepted",
+        updated_at: new Date().toISOString(),
+    };
+    if ("body" in req.body) {
+        const body = normalizeBody(req.body.body);
+        if (!body) return void res.status(400).json({ detail: "Write the fact first." });
+        updates.body = body;
+    }
+    if ("category" in req.body) {
+        updates.category = normalizeCategory(req.body.category);
+    }
+
+    const { data, error } = await db
+        .from("project_memories")
+        .update(updates)
+        .eq("id", memoryId)
+        .eq("project_id", projectId)
+        .eq("status", "proposed")
+        .select(SELECT_COLUMNS)
+        .single();
+    if (error || !data) {
+        console.error("[project-memories] accept project memory", safeErrorLog(error));
+        return void res
+            .status(404)
+            .json({ detail: "That suggestion is no longer there." });
+    }
+    res.json(data);
+});
+
+// POST /projects/:projectId/memories/:memoryId/dismiss
+// Turned down. The row stays so the same suggestion does not come round again,
+// but it is never sent to the assistant.
+projectMemoriesRouter.post("/:memoryId/dismiss", requireAuth, async (req, res) => {
+    const context = await requireProjectAccess(req, res);
+    if (!context) return;
+    const { db, projectId } = context;
+    const { memoryId } = req.params;
+
+    const { error } = await db
+        .from("project_memories")
+        .update({ status: "dismissed", updated_at: new Date().toISOString() })
+        .eq("id", memoryId)
+        .eq("project_id", projectId)
+        .eq("status", "proposed");
+    if (error) {
+        console.error("[project-memories] dismiss project memory", safeErrorLog(error));
+        return void res
+            .status(500)
+            .json({ detail: "That suggestion could not be turned down." });
+    }
+    res.status(204).end();
 });
 
 // DELETE /projects/:projectId/memories/:memoryId

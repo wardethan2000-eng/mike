@@ -89,8 +89,10 @@ export async function loadProjectOverview(
 }
 
 /**
- * The facts in force for a matter — everything that has not been replaced by a
- * newer wording. Pinned facts come first so that, if a very long list has to be
+ * The facts in force for a matter — everything accepted that has not been
+ * replaced by a newer wording. Facts Mike has suggested but nobody has looked
+ * at yet are deliberately left out: a suggestion is not a fact until someone
+ * says it is. Pinned facts come first so that, if a very long list has to be
  * cut, the ones marked as always-relevant are the ones that survive.
  */
 export async function loadProjectMemories(
@@ -103,6 +105,7 @@ export async function loadProjectMemories(
       .from("project_memories")
       .select("id, category, body, pinned, source_document_id, source_page")
       .eq("project_id", projectId)
+      .eq("status", "accepted")
       .is("superseded_by", null)
       .order("pinned", { ascending: false })
       .order("created_at", { ascending: false })
