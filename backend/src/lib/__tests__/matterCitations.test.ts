@@ -69,6 +69,83 @@ describe("linkAnswerCitations", () => {
         ).toEqual([]);
     });
 
+    it("picks the passage the answer actually quoted, not the first one", () => {
+        const found = linkAnswerCitations(
+            'The letter says "All three sets were served via first-class mail and electronic mail on July 17, 2026." (Golden Rule Letter.docx)',
+            [
+                hit({
+                    documentId: "doc-9",
+                    filename: "Golden Rule Letter.docx",
+                    page: null,
+                    content:
+                        "the party whose conduct necessitated the motion must pay the reasonable expenses, including attorney fees.",
+                }),
+                hit({
+                    documentId: "doc-9",
+                    filename: "Golden Rule Letter.docx",
+                    page: null,
+                    content:
+                        "All three sets were served via first-class mail and electronic mail on July 17, 2026. Despite the passage of the statutory response deadlines, no responses have been received.",
+                }),
+            ],
+        );
+        expect(found).toHaveLength(1);
+        // The words the answer quoted are what gets marked in the document.
+        expect(found[0].quote).toBe(
+            "All three sets were served via first-class mail and electronic mail on July 17, 2026.",
+        );
+    });
+
+    it("uses the words around the citation when nothing was quoted", () => {
+        const found = linkAnswerCitations(
+            "The pretrial conference is scheduled before Judge Commer in Division 28 (Golden Rule Letter.docx).",
+            [
+                hit({
+                    documentId: "doc-9",
+                    filename: "Golden Rule Letter.docx",
+                    page: null,
+                    content: "All three sets were served via first-class mail.",
+                }),
+                hit({
+                    documentId: "doc-9",
+                    filename: "Golden Rule Letter.docx",
+                    page: null,
+                    content:
+                        "The upcoming Pretrial Conference is scheduled for August 27, 2026, before Judge Commer in Division 28.",
+                }),
+            ],
+        );
+        expect(found[0].quote).toContain("Judge Commer");
+    });
+
+    it("marks the sentence that carries the fact, not the whole letter", () => {
+        const found = linkAnswerCitations(
+            "Discovery was served on July 17, 2026 (Golden Rule Letter.docx).",
+            [
+                hit({
+                    documentId: "doc-9",
+                    filename: "Golden Rule Letter.docx",
+                    page: null,
+                    content:
+                        "This letter is a good faith attempt to obtain responses from Plaintiff before seeking the Court's intervention. If Plaintiff chooses not to respond, we will file a motion to compel and ask the Court to intervene, including an award of reasonable expenses caused by the failure to respond to the discovery requests.",
+                }),
+                hit({
+                    documentId: "doc-9",
+                    filename: "Golden Rule Letter.docx",
+                    page: null,
+                    content:
+                        "Ms. Hartung, On July 17, 2026, Defendant Amani LLC served three sets of discovery requests upon you as counsel for Plaintiff. All three sets were served by first-class mail and electronic mail.",
+                }),
+            ],
+        );
+        expect(found).toHaveLength(1);
+        expect(found[0].quote).toContain(
+            "On July 17, 2026, Defendant Amani LLC served three sets of discovery requests",
+        );
+        // Not the paragraph about motions to compel further down the letter.
+        expect(found[0].quote).not.toContain("motion to compel");
+    });
+
     it("returns nothing when there are no passages", () => {
         expect(linkAnswerCitations("Anything (Lease.pdf, page 1).", [])).toEqual([]);
     });

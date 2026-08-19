@@ -38,6 +38,22 @@ function collectTextNodes(root: HTMLElement): Text[] {
     return out;
 }
 
+/**
+ * How far the document's text keeps matching the quote from `start`. The quote
+ * and the document rarely line up to the last letter — a header, a page number
+ * or a stray character in between would otherwise let a highlight run on far
+ * past the words it matched.
+ */
+function matchedLength(
+    haystack: string,
+    start: number,
+    needle: string,
+): number {
+    let i = 0;
+    while (i < needle.length && haystack[start + i] === needle[i]) i++;
+    return i;
+}
+
 export function clearDocxQuoteHighlights(root: HTMLElement): void {
     root.querySelectorAll(`.${QUOTE_HIGHLIGHT_CLASS}`).forEach((span) => {
         const parent = span.parentNode;
@@ -87,7 +103,8 @@ export function highlightDocxQuote(
         const searchKey = segment.slice(0, 30);
         const matchPos = fullStripped.indexOf(searchKey);
         if (matchPos < 0) continue;
-        const matchEnd = matchPos + segment.length;
+        const matchEnd =
+            matchPos + matchedLength(fullStripped, matchPos, segment);
 
         for (let i = 0; i < textNodes.length; i++) {
             const start = nodeStartInFull[i];

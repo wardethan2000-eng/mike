@@ -41,6 +41,22 @@ function strippedPosToOriginal(original: string, strippedPos: number): number {
     return original.length;
 }
 
+/**
+ * How far the document's text keeps matching the quote from `start`. The quote
+ * and the document rarely line up to the last letter — a header, a page number
+ * or a stray character in between would otherwise let a highlight run on far
+ * past the words it matched.
+ */
+function matchedLength(
+    haystack: string,
+    start: number,
+    needle: string,
+): number {
+    let i = 0;
+    while (i < needle.length && haystack[start + i] === needle[i]) i++;
+    return i;
+}
+
 export function clearHighlights(textDivs: HTMLElement[]) {
     for (const div of textDivs) {
         if (div.hasAttribute(ORIGINAL_TEXT_ATTR)) {
@@ -87,7 +103,8 @@ export async function highlightQuote(
         if (matchPos === -1) {
             continue;
         }
-        const matchEnd = matchPos + segment.length;
+        const matchEnd =
+            matchPos + matchedLength(fullStripped, matchPos, segment);
 
         for (let i = 0; i < textDivs.length; i++) {
             const divStart = divStartInFull[i];

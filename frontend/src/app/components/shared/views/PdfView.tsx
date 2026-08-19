@@ -29,9 +29,11 @@ const SIDE_PADDING = 20;
 const ZOOM_MIN = 0.5;
 const ZOOM_MAX = 3.0;
 const ZOOM_STEP = 0.25;
-// Pages are drawn at the screen's own pixel density, capped so a very dense
-// screen does not ask for pictures the browser cannot hold.
-const MAX_PIXEL_RATIO = 2;
+// Pages are drawn with more detail than the screen strictly needs, so the small
+// print stays crisp; capped so a very dense screen does not ask for pictures the
+// browser cannot hold.
+const MIN_PIXEL_RATIO = 2;
+const MAX_PIXEL_RATIO = 3;
 // How many pages keep their drawn picture in memory. Pages beyond this that the
 // reader has scrolled away from are given back their blank placeholder, so a
 // long file does not grow until the tab runs out of memory.
@@ -186,7 +188,7 @@ export function PdfView({
 
                 const pixelRatio = Math.min(
                     MAX_PIXEL_RATIO,
-                    Math.max(1, window.devicePixelRatio || 1),
+                    Math.max(MIN_PIXEL_RATIO, window.devicePixelRatio || 1),
                 );
                 const canvas = document.createElement("canvas");
                 canvas.width = Math.floor(slot.viewport.width * pixelRatio);

@@ -1,7 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { Loader2, Pencil } from "lucide-react";
+import { Loader2, Pencil, ZoomIn, ZoomOut } from "lucide-react";
 import { useFetchDocxBytes } from "@/app/hooks/useFetchDocxBytes";
 import { supabase } from "@/app/lib/supabase";
 import {
@@ -10,6 +10,11 @@ import {
 } from "./highlightDocxQuote";
 import type { CitationQuote } from "../types";
 import { SelectionQuoteButton } from "@/app/components/assistant/SelectionQuoteButton";
+
+// The reader's own zoom, applied on top of shrinking a page to fit the panel.
+const DOCX_ZOOM_MIN = 0.5;
+const DOCX_ZOOM_MAX = 3;
+const DOCX_ZOOM_STEP = 0.25;
 
 interface Props {
     documentId: string;
@@ -224,6 +229,8 @@ export function DocxView({
 }: Props) {
     const scrollRef = useRef<HTMLDivElement>(null);
     const containerRef = useRef<HTMLDivElement>(null);
+    const zoomRef = useRef(1);
+    const [zoom, setZoom] = useState(1);
     const lastScrollTopRef = useRef(0);
     const renderKeyRef = useRef(0);
     // Ref-stabilize onReady and highlightEdit so the render effect only
@@ -533,10 +540,24 @@ export function DocxView({
         sections.forEach((s) => {
             const w = s.offsetWidth;
             if (!w) return;
-            const scale = Math.min(1, available / w);
+            const scale = Math.min(1, available / w) * zoomRef.current;
             s.style.zoom = String(scale);
         });
     };
+
+    function changeZoom(step: number) {
+        const next = Math.min(
+            DOCX_ZOOM_MAX,
+            Math.max(
+                DOCX_ZOOM_MIN,
+                Math.round((zoomRef.current + step) * 100) / 100,
+            ),
+        );
+        if (next === zoomRef.current) return;
+        zoomRef.current = next;
+        setZoom(next);
+        applyDocxScale();
+    }
 
     // Observe the scroll container (which tracks the side panel's width)
     // and re-scale whenever it resizes. Also observe the docx container so
@@ -783,6 +804,31 @@ export function DocxView({
                     />
                 )}
             </div>
+            {bytes && (
+                <div className="absolute bottom-4 right-4 flex items-center gap-px rounded-full border border-white/30 bg-white/25 px-1 py-1 shadow-md backdrop-blur-md">
+                    <button
+                        type="button"
+                        onClick={() => changeZoom(-DOCX_ZOOM_STEP)}
+                        disabled={zoom <= DOCX_ZOOM_MIN}
+                        className="flex h-7 w-7 items-center justify-center rounded-full text-gray-600 transition-colors hover:bg-white/80 disabled:opacity-30"
+                        aria-label="Make the text smaller"
+                    >
+                        <ZoomOut className="h-3.5 w-3.5" />
+                    </button>
+                    <span className="w-9 select-none text-center text-xs font-medium tabular-nums text-gray-600">
+                        {Math.round(zoom * 100)}%
+                    </span>
+                    <button
+                        type="button"
+                        onClick={() => changeZoom(DOCX_ZOOM_STEP)}
+                        disabled={zoom >= DOCX_ZOOM_MAX}
+                        className="flex h-7 w-7 items-center justify-center rounded-full text-gray-600 transition-colors hover:bg-white/80 disabled:opacity-30"
+                        aria-label="Make the text bigger"
+                    >
+                        <ZoomIn className="h-3.5 w-3.5" />
+                    </button>
+                </div>
+            )}
         </div>
     );
 }
