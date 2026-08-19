@@ -403,6 +403,11 @@ export async function appendAssistantEventsToLastAssistantMessage(
   events: AssistantEvent[],
   citations?: unknown[],
   messageTable = "chat_messages",
+  /**
+   * Event types to clear off the existing message first. Used when a
+   * "keep going" card has been acted on and should no longer be offered.
+   */
+  dropEventTypes?: string[],
 ) {
   if (events.length === 0 && (!citations || citations.length === 0)) {
     return;
@@ -433,9 +438,15 @@ export async function appendAssistantEventsToLastAssistantMessage(
     content: unknown;
     citations?: unknown;
   };
-  const existing = Array.isArray(row.content)
-    ? row.content
-    : [];
+  const existingAll = Array.isArray(row.content) ? row.content : [];
+  const existing = dropEventTypes?.length
+    ? existingAll.filter(
+        (event) =>
+          !dropEventTypes.includes(
+            (event as { type?: unknown })?.type as string,
+          ),
+      )
+    : existingAll;
   const next = [...existing, ...events];
   const existingCitations = Array.isArray(row.citations)
     ? row.citations
@@ -782,4 +793,48 @@ export async function buildWorkflowStore(
     }
   }
   return store;
+}
+
+/**
+ * Files the user attached straight to a project chat, which are deliberately
+ * not project documents. buildProjectDocContext only sees files that belong to
+ * the project, so without this merge the assistant cannot open them.
+ * Anything that IS already a project document is skipped, so a file picked
+ * from the project keeps its usual label.
+ */
+export async function mergeChatOnlyDocs(
+  messages: ChatMessage[],
+  userId: string,
+  db: ReturnType<typeof createServerSupabase>,
+  target: { docIndex: DocIndex; docStore: DocStore },
+): Promise<void> {
+  const hasAttachedFile = messages.some((m) =>
+    (m.files ?? []).some((f) => f.document_id),
+  );
+  if (!hasAttachedFile) return;
+  const projectDocumentIds = new Set(
+    Object.values(target.docIndex).map((info) => info.document_id),
+  );
+  // A chat must never fail because of an attachment lookup.
+  try {
+    const { docIndex, docStore } = await buildDocContext(messages, userId, db);
+    let i = 0;
+    for (const [label, info] of Object.entries(docIndex)) {
+      if (projectDocumentIds.has(info.document_id)) continue;
+      const entry = docStore.get(label);
+      if (!entry) continue;
+      const chatLabel = `chatdoc-${i++}`;
+      target.docIndex[chatLabel] = info;
+      target.docStore.set(chatLabel, entry);
+    }
+  } catch (err) {
+    console.error("[mergeChatOnlyDocs] failed:", err);
+    return;
+  }
+  devLog(
+    "[mergeChatOnlyDocs] chat-only docs:",
+    Object.entries(target.docIndex)
+      .filter(([label]) => label.startsWith("chatdoc-"))
+      .map(([label, info]) => ({ label, filename: info.filename })),
+  );
 }

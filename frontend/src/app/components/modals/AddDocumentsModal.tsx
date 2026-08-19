@@ -33,6 +33,9 @@ interface Props {
     keepMounted?: boolean;
     /** Limit the directory to the target project's files and folder tree. */
     projectDocumentsOnly?: boolean;
+    /** Attach files to the conversation only: uploads stay out of the
+     * project's document list, and picked files are not filed into it. */
+    attachOnly?: boolean;
     tabs?: readonly DirectoryTab[];
     disabledDocumentIds?: ReadonlySet<string>;
 }
@@ -50,6 +53,7 @@ export function AddDocumentsModal({
     externalUploadedDocuments,
     keepMounted = false,
     projectDocumentsOnly = false,
+    attachOnly = false,
     tabs,
     disabledDocumentIds,
 }: Props) {
@@ -165,6 +169,11 @@ export function AddDocumentsModal({
     if (!open && (!keepMounted || !hasOpened)) return null;
 
     async function handleConfirm() {
+        if (attachOnly) {
+            onSelect(selectedDocuments, projectId);
+            onClose();
+            return;
+        }
         if (projectId) {
             const toAssign = selectedDocuments.filter(
                 (d) => d.project_id !== projectId,
@@ -217,7 +226,7 @@ export function AddDocumentsModal({
         try {
             const uploaded = await Promise.all(
                 supported.map((f) =>
-                    projectId
+                    projectId && !attachOnly
                         ? uploadProjectDocument(projectId, f)
                         : uploadStandaloneDocument(f),
                 ),

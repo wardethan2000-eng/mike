@@ -4,6 +4,7 @@ import { createServerSupabase } from "../lib/supabase";
 import { recordChatTurn } from "../lib/audit";
 import {
     buildProjectDocContext,
+    mergeChatOnlyDocs,
     buildMessages,
     buildWorkflowStore,
     enrichWithPriorEvents,
@@ -24,6 +25,9 @@ import {
     parseOptionalChatId,
     parseOptionalDisplayedDoc,
     parseOptionalModel,
+    parseOptionalResume,
+    condenseForContinuation,
+    takeResumeState,
     type ChatMessage,
 } from "../lib/chat";
 import {
@@ -90,7 +94,17 @@ projectChatRouter.post("/", requireAuth, async (req, res) => {
     const model = parsedModel.value;
     const displayed_doc = parsedDisplayedDoc.value;
     const attached_documents = parsedAttachedDocuments.value;
+    const parsedResume = parseOptionalResume(body.resume);
+    if (!parsedResume.ok) {
+        return void res.status(400).json({ detail: parsedResume.detail });
+    }
+    const resume = parsedResume.value;
     const askInputsResponse = parsedAskInputsResponse.value;
+    if (resume && !chat_id) {
+        return void res.status(400).json({ detail: "resume requires chat_id" });
+    }
+    // Continuing a paused turn adds to the answer already on screen.
+    const appendToPrevious = !!askInputsResponse || !!resume;
 
     const db = createServerSupabase();
 
@@ -139,7 +153,7 @@ projectChatRouter.post("/", requireAuth, async (req, res) => {
             chatId,
             askInputsResponse,
         );
-    } else if (lastUser) {
+    } else if (lastUser && !resume) {
         await db.from("chat_messages").insert({
             chat_id: chatId,
             role: "user",
@@ -154,6 +168,10 @@ projectChatRouter.post("/", requireAuth, async (req, res) => {
         userId,
         db,
     );
+    // Files dropped straight onto the chat live in the chat, not the project,
+    // so they are not in the list above. Add them or the assistant cannot
+    // open the very file the user just handed it.
+    await mergeChatOnlyDocs(messages, userId, db, { docIndex, docStore });
     const docAvailability = Object.entries(docIndex).map(([doc_id, info]) => ({
         doc_id,
         filename: info.filename,
@@ -225,7 +243,19 @@ projectChatRouter.post("/", requireAuth, async (req, res) => {
         legal_research_us: legalResearchUs,
         title_model: titleModel,
     } = await getUserModelSettings(userId, db);
-    const apiMessages = buildMessages(
+
+    // A paused turn is held in memory, so it does not survive a backend
+    // restart. Say so plainly rather than silently starting from scratch.
+    let resumeState = resume
+        ? takeResumeState({ token: resume.token, userId, chatId })
+        : null;
+    if (resume && !resumeState) {
+        return void res.status(409).json({
+            detail: "This answer can no longer be continued. Ask the question again.",
+        });
+    }
+
+    let apiMessages = buildMessages(
         messagesForLLM,
         docAvailability,
         systemPromptExtra,
@@ -233,6 +263,25 @@ projectChatRouter.post("/", requireAuth, async (req, res) => {
         legalResearchUs,
         nonce,
     );
+
+    // "Condense and keep going": swap the whole working transcript for a
+    // written summary of it, then run on from there with room to spare.
+    if (resumeState && resume?.condense) {
+        try {
+            const condensed = await condenseForContinuation({
+                state: resumeState,
+                apiKeys,
+            });
+            apiMessages = [apiMessages[0], ...condensed];
+            resumeState = null;
+        } catch (error) {
+            console.error("[project-chat] failed to condense paused turn", error);
+            return void res.status(500).json({
+                detail: "Could not shorten this answer to continue it.",
+            });
+        }
+    }
+    const runModel = resumeState ? resumeState.model : model;
 
     const workflowStore = await buildWorkflowStore(userId, userEmail, db);
 
@@ -253,7 +302,7 @@ projectChatRouter.post("/", requireAuth, async (req, res) => {
         write(`data: ${JSON.stringify({ type: "chat_id", chatId })}\n\n`);
 
         const shouldGenerateTitle =
-            !chatTitle && !!lastUser?.content && !askInputsResponse;
+            !chatTitle && !!lastUser?.content && !appendToPrevious;
         const titleMessage = lastUser
             ? [
                   lastUser.content,
@@ -304,21 +353,26 @@ projectChatRouter.post("/", requireAuth, async (req, res) => {
             extraTools: PROJECT_EXTRA_TOOLS,
             workflowStore,
             includeResearchTools: legalResearchUs,
-            model,
+            model: runModel,
             apiKeys,
             signal: streamAbort.signal,
             projectId,
             nonce,
+            chatId,
+            resumeState,
             emitDone: false,
         });
 
         const persistedEvents = stripTransientAssistantEvents(events);
-        if (askInputsResponse) {
+        if (appendToPrevious) {
             await appendAssistantEventsToLastAssistantMessage(
                 db,
                 chatId,
                 persistedEvents,
                 citations,
+                "chat_messages",
+                // The old "keep going" card has been acted on.
+                resume ? ["paused"] : undefined,
             );
         } else {
             await db.from("chat_messages").insert({
@@ -370,7 +424,7 @@ projectChatRouter.post("/", requireAuth, async (req, res) => {
                     buildCitations: (fullText, events) =>
                         extractCitations(fullText, docIndex, events),
                 });
-                const saveError = askInputsResponse
+                const saveError = appendToPrevious
                     ? null
                     : (
                           await db.from("chat_messages").insert({
@@ -384,7 +438,7 @@ projectChatRouter.post("/", requireAuth, async (req, res) => {
                                   : null,
                           })
                       ).error;
-                if (askInputsResponse) {
+                if (appendToPrevious) {
                     await appendAssistantEventsToLastAssistantMessage(
                         db,
                         chatId,
@@ -414,7 +468,7 @@ projectChatRouter.post("/", requireAuth, async (req, res) => {
                 docIndex,
                 errorEvents,
             );
-            const saveError = askInputsResponse
+            const saveError = appendToPrevious
                 ? null
                 : (
                       await db.from("chat_messages").insert({
@@ -424,7 +478,7 @@ projectChatRouter.post("/", requireAuth, async (req, res) => {
                           citations: citations.length ? citations : null,
                       })
                   ).error;
-            if (askInputsResponse) {
+            if (appendToPrevious) {
                 await appendAssistantEventsToLastAssistantMessage(
                     db,
                     chatId,

@@ -72,6 +72,13 @@ interface Props {
     onCancel: () => void;
     isLoading: boolean;
     hideAddDocButton?: boolean;
+    /** Attach files to this conversation only, instead of filing them into
+     * the project. Used by project chats, where a dropped file belongs to
+     * the chat unless it was dropped on the project's own file list. */
+    attachOnly?: boolean;
+    /** When set, only drags over this element count as a drop on the chat.
+     * Keeps the chat from claiming files dropped on a project's file list. */
+    dropZoneRef?: React.RefObject<HTMLElement | null>;
     hideWorkflowButton?: boolean;
     projectName?: string;
     projectCmNumber?: string | null;
@@ -86,6 +93,8 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput(
         onCancel,
         isLoading,
         hideAddDocButton,
+        attachOnly,
+        dropZoneRef,
         hideWorkflowButton,
         projectName,
         projectCmNumber,
@@ -114,6 +123,7 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput(
     const [apiKeyModalProvider, setApiKeyModalProvider] =
         useState<ModelProvider | null>(null);
     const [isDraggingFiles, setIsDraggingFiles] = useState(false);
+    const [dropZoneBounds, setDropZoneBounds] = useState<DOMRect | null>(null);
     const [uploadingFilenames, setUploadingFilenames] = useState<string[]>([]);
     const [uploadWarning, setUploadWarning] = useState<string | null>(null);
     const [droppedDocuments, setDroppedDocuments] = useState<Document[]>([]);
@@ -227,7 +237,7 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput(
             setUploadingFilenames(supported.map((file) => file.name));
             const results = await Promise.allSettled(
                 supported.map((file) =>
-                    projectId
+                    projectId && !attachOnly
                         ? uploadProjectDocument(projectId, file)
                         : uploadStandaloneDocument(file),
                 ),
@@ -259,23 +269,37 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput(
             }
             setUploadingFilenames([]);
         },
-        [addAttachedDocuments, onDocumentsUploaded, projectId],
+        [addAttachedDocuments, attachOnly, onDocumentsUploaded, projectId],
     );
 
     useEffect(() => {
         const hasFiles = (dataTransfer: DataTransfer | null) =>
             !!dataTransfer && Array.from(dataTransfer.types).includes("Files");
 
+        const inDropZone = (event: DragEvent) => {
+            const zone = dropZoneRef?.current;
+            if (!zone) return true;
+            return zone.contains(event.target as Node);
+        };
+
         const handleDragEnter = (event: DragEvent) => {
             if (!hasFiles(event.dataTransfer)) return;
             event.preventDefault();
             dragDepthRef.current += 1;
+            if (!inDropZone(event)) {
+                setIsDraggingFiles(false);
+                return;
+            }
+            setDropZoneBounds(
+                dropZoneRef?.current?.getBoundingClientRect() ?? null,
+            );
             setIsDraggingFiles(true);
         };
         const handleDragOver = (event: DragEvent) => {
             if (!hasFiles(event.dataTransfer)) return;
             event.preventDefault();
             if (event.dataTransfer) event.dataTransfer.dropEffect = "copy";
+            setIsDraggingFiles(inDropZone(event));
         };
         const handleDragLeave = (event: DragEvent) => {
             if (!hasFiles(event.dataTransfer)) return;
@@ -284,6 +308,13 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput(
         };
         const handleDrop = (event: DragEvent) => {
             if (!hasFiles(event.dataTransfer)) return;
+            // Dropped outside the chat — the matter file list, say. Leave
+            // it to whatever owns that area so nothing uploads twice.
+            if (!inDropZone(event)) {
+                dragDepthRef.current = 0;
+                setIsDraggingFiles(false);
+                return;
+            }
             event.preventDefault();
             event.stopPropagation();
             dragDepthRef.current = 0;
@@ -301,7 +332,7 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput(
             window.removeEventListener("dragleave", handleDragLeave);
             window.removeEventListener("drop", handleDrop);
         };
-    }, [handleDroppedFiles]);
+    }, [dropZoneRef, handleDroppedFiles]);
 
     const handleChange = (e: React.ChangeEvent<HTMLTextAreaElement>) => {
         setValue(e.target.value);
@@ -631,6 +662,7 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput(
                 externalUploadedDocuments={droppedDocuments}
                 initialTab={docSelectorInitialTab}
                 projectId={projectId}
+                attachOnly={attachOnly}
                 breadcrumb={
                     selectedWorkflow
                         ? ["Assistant", selectedWorkflow.title, "Add Documents"]
@@ -657,6 +689,7 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput(
             />
             <UploadOverlay
                 open={isDraggingFiles}
+                bounds={dropZoneBounds}
                 warning={uploadWarning}
                 onWarningClose={() => setUploadWarning(null)}
             />
