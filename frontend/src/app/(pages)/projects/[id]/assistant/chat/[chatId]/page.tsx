@@ -45,6 +45,7 @@ import { SpreadsheetView } from "@/app/components/shared/views/SpreadsheetView";
 import { ConfirmPopup } from "@/app/components/popups/ConfirmPopup";
 import { OwnerOnlyPopup } from "@/app/components/popups/OwnerOnlyPopup";
 import { DocxView } from "@/app/components/shared/views/DocxView";
+import { DocPanel } from "@/app/components/assistant/DocPanel";
 import { MikeIcon } from "@/app/components/chat/mike-icon";
 import { useAuth } from "@/app/contexts/AuthContext";
 import { useUserProfile } from "@/app/contexts/UserProfileContext";
@@ -57,12 +58,14 @@ import type {
     Document,
     EditAnnotation,
     Message,
+    PanelDocument,
     Project,
 } from "@/app/components/shared/types";
 import {
     expandCitationToEntries,
     isDocxFilename,
     isSpreadsheetFilename,
+    panelDocumentFromCitation,
 } from "@/app/components/shared/types";
 import {
     INITIAL_FOLDER_DELETE_DIALOG_STATE,
@@ -84,6 +87,11 @@ type DocTab = {
     refetchKey?: number;
     warning?: string | null;
     scrollTop?: number;
+    // Set for statute/legislation tabs. These carry their own text in an
+    // in-memory panel document (built by the backend), so they render with
+    // DocPanel instead of the file-backed document viewers.
+    panelDocument?: PanelDocument;
+    citation?: Citation;
 };
 
 type EditScrollTarget = {
@@ -242,6 +250,7 @@ export default function ProjectAssistantChatPage({ params }: Props) {
     const fileInputRef = useRef<HTMLInputElement>(null);
     const [uploading, setUploading] = useState(false);
     const [explorerDragOver, setExplorerDragOver] = useState(false);
+    const assistantPanelRef = useRef<HTMLDivElement>(null);
 
     // Tabs
     const [tabs, setTabs] = useState<DocTab[]>([]);
@@ -275,8 +284,14 @@ export default function ProjectAssistantChatPage({ params }: Props) {
         renameChat: renameChatInHistory,
     } = useChatHistoryContext();
     const [initialMessages] = useState<Message[]>(newChatMessages ?? []);
-    const { messages, isResponseLoading, handleChat, setMessages, cancel } =
-        useAssistantChat({ initialMessages, chatId, projectId });
+    const {
+        messages,
+        isResponseLoading,
+        handleChat,
+        continueRun,
+        setMessages,
+        cancel,
+    } = useAssistantChat({ initialMessages, chatId, projectId });
     const pendingInitialUserMessageRef = useRef<Message | null>(
         initialMessages.length === 1 && initialMessages[0].role === "user"
             ? initialMessages[0]
@@ -510,6 +525,36 @@ export default function ProjectAssistantChatPage({ params }: Props) {
         });
     }
 
+    // Open a statute or a case in the reading panel. A statute arrives with its
+    // text inside the citation (backend-built panel document); a case carries
+    // only its name and id, and the panel fetches the opinions itself. Either
+    // way the tab holds the document rather than a stored file.
+    function openLegalSourceTab(citation: Citation) {
+        const document = panelDocumentFromCitation(citation);
+        const docId = document.document_id;
+        setTabs((prev) => {
+            const existing = prev.find((t) => t.documentId === docId);
+            if (existing) {
+                return prev.map((t) =>
+                    t.documentId === docId
+                        ? { ...t, panelDocument: document, citation }
+                        : t,
+                );
+            }
+            return [
+                ...prev,
+                {
+                    documentId: docId,
+                    filename: document.title,
+                    panelDocument: document,
+                    citation,
+                },
+            ];
+        });
+        setActiveTabId(docId);
+        setActiveQuotes(null);
+    }
+
     function switchTab(docId: string) {
         setActiveTabId(docId);
         setActiveQuotes(null);
@@ -535,7 +580,10 @@ export default function ProjectAssistantChatPage({ params }: Props) {
     };
 
     const handleCitationClick = (citation: Citation) => {
-        if (citation.kind === "case") return;
+        if (citation.kind === "legislation" || citation.kind === "case") {
+            openLegalSourceTab(citation);
+            return;
+        }
         openTab(
             citation.document_id,
             citation.filename,
@@ -608,9 +656,11 @@ export default function ProjectAssistantChatPage({ params }: Props) {
     };
 
     const handleChatDrop = (e: React.DragEvent) => {
-        e.preventDefault();
         const docId = e.dataTransfer.getData("application/mike-doc");
+        // A file dragged in from the desktop is left alone here so the chat
+        // box can pick it up and attach it to this conversation only.
         if (!docId) return;
+        e.preventDefault();
         const doc = project?.documents?.find((d) => d.id === docId);
         if (doc) chatInputRef.current?.addDoc(doc);
     };
@@ -1223,7 +1273,20 @@ export default function ProjectAssistantChatPage({ params }: Props) {
                     </div>
                     <div className="flex-1 min-h-0 overflow-hidden flex flex-col">
                         {activeTab ? (
-                            isDocxFilename(activeTab.filename) ? (
+                            activeTab.panelDocument ? (
+                                <DocPanel
+                                    key={activeTab.documentId}
+                                    document={activeTab.panelDocument}
+                                    mode={
+                                        activeTab.citation
+                                            ? {
+                                                  kind: "citation",
+                                                  citation: activeTab.citation,
+                                              }
+                                            : { kind: "document" }
+                                    }
+                                />
+                            ) : isDocxFilename(activeTab.filename) ? (
                                 <DocxView
                                     key={activeTab.documentId}
                                     documentId={activeTab.documentId}
@@ -1291,6 +1354,7 @@ export default function ProjectAssistantChatPage({ params }: Props) {
 
                 {/* RIGHT: Assistant Panel */}
                 <div
+                    ref={assistantPanelRef}
                     style={{ width: chatWidth }}
                     className="relative shrink-0 flex flex-col"
                     onDragOver={(e) => e.preventDefault()}
@@ -1397,6 +1461,10 @@ export default function ProjectAssistantChatPage({ params }: Props) {
                                             isDocReloading={(docId) =>
                                                 reloadingDocIds.has(docId)
                                             }
+                                            onContinue={(args) =>
+                                                void continueRun(args)
+                                            }
+                                            isContinuing={isResponseLoading}
                                         />
                                     ),
                                 );
@@ -1414,22 +1482,10 @@ export default function ProjectAssistantChatPage({ params }: Props) {
                                 onSubmit={handleSubmit}
                                 onCancel={cancel}
                                 isLoading={isResponseLoading}
-                                hideAddDocButton
+                                attachOnly
+                                dropZoneRef={assistantPanelRef}
                                 projectId={projectId}
                                 onDocumentClick={handleDocClick}
-                                onDocumentsUploaded={(documents) =>
-                                    setProject((prev) =>
-                                        prev
-                                            ? {
-                                                  ...prev,
-                                                  documents: [
-                                                      ...(prev.documents ?? []),
-                                                      ...documents,
-                                                  ],
-                                              }
-                                            : prev,
-                                    )
-                                }
                                 projectName={project?.name}
                                 projectCmNumber={project?.cm_number}
                             />

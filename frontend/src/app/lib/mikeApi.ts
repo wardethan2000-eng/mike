@@ -1391,6 +1391,8 @@ export async function streamChat(payload: {
               }
         )[];
     };
+    /** Carry on a turn that stopped searching before it finished. */
+    resume?: { token: string; condense?: boolean };
     signal?: AbortSignal;
 }): Promise<Response> {
     const { signal, ...body } = payload;
@@ -1438,6 +1440,8 @@ export async function streamProjectChat(payload: {
               }
         )[];
     };
+    /** Carry on a turn that stopped searching before it finished. */
+    resume?: { token: string; condense?: boolean };
     signal?: AbortSignal;
 }): Promise<Response> {
     const { projectId, signal, ...body } = payload;
@@ -2096,4 +2100,41 @@ export async function deleteWorkflowReferenceFile(
             method: "DELETE",
         },
     );
+}
+
+// ---------------------------------------------------------------------------
+// Legal sources saved out of a chat
+// ---------------------------------------------------------------------------
+
+export type SaveLegalSourceBody =
+    | {
+          kind: "case";
+          cluster_id: number;
+          case_name?: string | null;
+          citation?: string | null;
+          date_filed?: string | null;
+          url?: string | null;
+          pdf_url?: string | null;
+      }
+    | { kind: "legislation"; leg_id: string; chat_id: string };
+
+export type SavedLegalSource = {
+    status: "saved" | "exists";
+    document_id: string;
+    filename: string;
+    folder_id: string | null;
+    folder_name: string;
+    title: string;
+};
+
+/** File a case or statute into a matter's Law folder. */
+export async function saveLegalSource(
+    projectId: string,
+    body: SaveLegalSourceBody,
+): Promise<SavedLegalSource> {
+    return apiRequest<SavedLegalSource>(`/projects/${projectId}/legal-sources`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+    });
 }

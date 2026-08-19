@@ -19,6 +19,10 @@ import type { Citation, EditAnnotation, PanelDocument } from "../shared/types";
 import { quoteVerificationState } from "./message/citationVerification";
 import { FileTypeIcon } from "../shared/FileTypeIcon";
 import { CaseView } from "./CaseView";
+import {
+    SaveLegalSourceButton,
+    type LegalSourceRef,
+} from "./SaveLegalSourceButton";
 import { useResolvedPanelDocument } from "./useResolvedPanelDocument";
 
 /**
@@ -92,6 +96,7 @@ export function DocPanel({
     const documentId = resolvedDocument.document_id;
     const versionId = resolvedDocument.version_id ?? null;
     const isCase = resolvedDocument.type === "case";
+    const isLegislation = resolvedDocument.type === "legislation";
     const isDocx = resolvedDocument.type === "docx";
     const isSpreadsheet = resolvedDocument.type === "spreadsheet";
     const firstSelectableQuoteIndex =
@@ -118,7 +123,7 @@ export function DocPanel({
         : undefined;
 
     const { activeViewerQuotes, activeHighlightCells } = useMemo(() => {
-        if (mode.kind !== "citation" || isCase) {
+        if (mode.kind !== "citation" || isCase || isLegislation) {
             return {
                 activeViewerQuotes: undefined,
                 activeHighlightCells: undefined,
@@ -147,7 +152,7 @@ export function DocPanel({
                       ]
                     : [],
         };
-    }, [activeDocumentQuote, isCase, mode.kind]);
+    }, [activeDocumentQuote, isCase, isLegislation, mode.kind]);
 
     useEffect(() => {
         setActiveCitationQuoteId(citationQuoteId);
@@ -216,7 +221,7 @@ export function DocPanel({
             )}
 
             <div className="flex flex-1 min-h-0 flex-col">
-                {isCase ? (
+                {isCase || isLegislation ? (
                     <CaseView
                         document={resolvedDocument}
                         activeQuote={activeDocumentQuote}
@@ -290,6 +295,7 @@ export function DocumentTitleRow({
         document.type === "pdf" ||
         document.type === "spreadsheet";
     const versionNumber = document.version_number;
+    const legalSource = legalSourceFromPanelDocument(document);
 
     return (
         <div className="p-3">
@@ -332,6 +338,12 @@ export function DocumentTitleRow({
                     </div>
                 </div>
                 <div className="flex min-w-0 shrink-0 flex-wrap items-center justify-end gap-2">
+                    {legalSource && (
+                        <SaveLegalSourceButton
+                            source={legalSource}
+                            compact={compactActions}
+                        />
+                    )}
                     {isFile && (
                         <DownloadButton
                             documentId={document.document_id}
@@ -378,6 +390,40 @@ export function DocumentTitleRow({
 // ---------------------------------------------------------------------------
 // Source actions
 // ---------------------------------------------------------------------------
+
+/**
+ * A case or statute in the panel can be filed into a matter. Everything the
+ * save needs is already in the panel document: the id says which source it is,
+ * and its buttons carry the links back to the court or the legislature.
+ */
+function legalSourceFromPanelDocument(
+    document: PanelDocument,
+): LegalSourceRef | null {
+    const actions = document.actions ?? [];
+    if (document.type === "case") {
+        const clusterId = Number.parseInt(
+            /^case:(\d+)$/.exec(document.document_id)?.[1] ?? "",
+            10,
+        );
+        if (!Number.isFinite(clusterId) || clusterId <= 0) return null;
+        return {
+            kind: "case",
+            clusterId,
+            url: actions.find((action) => action.type === "link")?.url ?? null,
+            pdfUrl:
+                actions.find((action) => action.type === "download")?.url ??
+                null,
+            dateFiled:
+                document.metadata.find((item) => item.label === "Date")?.value ??
+                null,
+        };
+    }
+    if (document.type === "legislation") {
+        const legId = /^legislation:(.+)$/.exec(document.document_id)?.[1];
+        return legId ? { kind: "legislation", legId } : null;
+    }
+    return null;
+}
 
 function formatMetadataValue(item: PanelDocument["metadata"][number]): string {
     if (item.format !== "date") return item.value;

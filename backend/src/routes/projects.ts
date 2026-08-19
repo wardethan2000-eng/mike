@@ -26,6 +26,10 @@ import {
 } from "../lib/documentRendition";
 import { indexInBackground } from "../lib/passageIndex";
 import { checkProjectAccess } from "../lib/access";
+import {
+  saveLegalSourceToProject,
+  type SaveLegalSourceInput,
+} from "../lib/legalSources";
 import { searchMatter } from "../lib/matterSearch";
 import { answerMatter } from "../lib/matterAnswer";
 import { getUserModelSettings } from "../lib/userSettings";
@@ -1252,6 +1256,85 @@ projectsRouter.post(
     await handleDocumentUpload(req, res, userId, projectId, db);
   },
 );
+
+// POST /projects/:projectId/legal-sources — file a case or statute the
+// assistant pulled into this matter's Law folder. The body says which source;
+// the text itself is fetched or read back server-side, never taken from the
+// browser.
+projectsRouter.post(
+  "/:projectId/legal-sources",
+  requireAuth,
+  async (req, res) => {
+    const userId = res.locals.userId as string;
+    const userEmail = res.locals.userEmail as string | undefined;
+    const { projectId } = req.params;
+    const body = (req.body ?? {}) as Record<string, unknown>;
+
+    let input: SaveLegalSourceInput;
+    if (body.kind === "case") {
+      const clusterId =
+        typeof body.cluster_id === "number"
+          ? body.cluster_id
+          : Number.parseInt(String(body.cluster_id ?? ""), 10);
+      if (!Number.isFinite(clusterId) || clusterId <= 0)
+        return void res.status(400).json({ detail: "cluster_id is required" });
+      input = {
+        kind: "case",
+        clusterId,
+        caseName: asOptionalString(body.case_name),
+        citation: asOptionalString(body.citation),
+        dateFiled: asOptionalString(body.date_filed),
+        url: asOptionalString(body.url),
+        pdfUrl: asOptionalString(body.pdf_url),
+      };
+    } else if (body.kind === "legislation") {
+      const legId = asOptionalString(body.leg_id);
+      const chatId = asOptionalString(body.chat_id);
+      if (!legId || !chatId)
+        return void res
+          .status(400)
+          .json({ detail: "leg_id and chat_id are required" });
+      input = { kind: "legislation", legId, chatId };
+    } else {
+      return void res.status(400).json({ detail: "Unrecognised source" });
+    }
+
+    const db = createServerSupabase();
+    try {
+      const settings = await getUserModelSettings(userId, db);
+      const result = await saveLegalSourceToProject({
+        db,
+        userId,
+        userEmail,
+        projectId,
+        input,
+        courtlistenerToken: settings.api_keys.courtlistener,
+      });
+      if ("error" in result)
+        return void res
+          .status(result.status ?? 500)
+          .json({ detail: result.error });
+      res.status(result.status === "saved" ? 201 : 200).json({
+        status: result.status,
+        document_id: result.documentId,
+        filename: result.filename,
+        folder_id: result.folderId,
+        folder_name: result.folderName,
+        title: result.title,
+      });
+    } catch (err) {
+      console.error("[projects/legal-sources] failed", {
+        projectId,
+        error: safeErrorLog(err),
+      });
+      res.status(500).json({ detail: "Could not save this source" });
+    }
+  },
+);
+
+function asOptionalString(value: unknown): string | null {
+  return typeof value === "string" && value.trim() ? value.trim() : null;
+}
 
 // GET /projects/:projectId/chats — every assistant chat under this project
 // (any author with project access). Used by the project page's chat tab so

@@ -3,6 +3,10 @@ import { Loader2 } from "lucide-react";
 import { FileTypeIcon } from "../../shared/FileTypeIcon";
 import { displayCitationQuote, formatCitationPage } from "../../shared/types";
 import type { Citation } from "../../shared/types";
+import {
+    SaveLegalSourceButton,
+    type LegalSourceRef,
+} from "../SaveLegalSourceButton";
 import { RESPONSE_GLASS_ANNOTATION, RESPONSE_GLASS_SURFACE } from "./messageStyles";
 import {
     citationVerificationAriaLabel,
@@ -21,6 +25,9 @@ function citationSourceKey(annotation: Citation): string {
     if (annotation.kind === "case") {
         return `case:${annotation.cluster_id}`;
     }
+    if (annotation.kind === "legislation") {
+        return `legislation:${annotation.leg_id}`;
+    }
     return `document:${annotation.document_id}`;
 }
 
@@ -30,6 +37,9 @@ function citationSourceLabel(annotation: Citation): string {
         const citation = annotation.citation?.trim();
         if (caseName && citation) return `${caseName}, ${citation}`;
         return caseName || citation || `Case ${annotation.cluster_id}`;
+    }
+    if (annotation.kind === "legislation") {
+        return annotation.title || annotation.leg_id;
     }
     return annotation.filename;
 }
@@ -51,6 +61,18 @@ function CitationSourceIcon({
         return (
             <Image
                 src="/icons/legal-sources/case-law.svg"
+                alt=""
+                aria-hidden="true"
+                width={14}
+                height={14}
+                className="h-3.5 w-3.5 shrink-0"
+            />
+        );
+    }
+    if (annotation.kind === "legislation") {
+        return (
+            <Image
+                src="/icons/legal-sources/legislation.svg"
                 alt=""
                 aria-hidden="true"
                 width={14}
@@ -83,6 +105,26 @@ function buildCitationSourceRows(
         });
     });
     return Array.from(rows.values());
+}
+
+
+/** Cases and statutes can be filed into a matter straight from this list. */
+function legalSourceFromCitation(annotation: Citation): LegalSourceRef | null {
+    if (annotation.kind === "case") {
+        return {
+            kind: "case",
+            clusterId: annotation.cluster_id,
+            caseName: annotation.case_name ?? null,
+            citation: annotation.citation ?? null,
+            dateFiled: annotation.dateFiled ?? null,
+            url: annotation.url ?? null,
+            pdfUrl: annotation.pdfUrl ?? null,
+        };
+    }
+    if (annotation.kind === "legislation") {
+        return { kind: "legislation", legId: annotation.leg_id };
+    }
+    return null;
 }
 
 function escapeHtmlText(value: string): string {
@@ -189,7 +231,17 @@ export function CitationsBlock({
                                         {row.label}
                                     </span>
                                 </button>
-                                <div className="flex shrink-0 flex-wrap justify-end gap-1">
+                                <div className="flex shrink-0 flex-wrap items-center justify-end gap-1">
+                                    {legalSourceFromCitation(row.source) && (
+                                        <SaveLegalSourceButton
+                                            source={
+                                                legalSourceFromCitation(
+                                                    row.source,
+                                                ) as LegalSourceRef
+                                            }
+                                            variant="icon"
+                                        />
+                                    )}
                                     {row.entries.map(
                                         ({ annotation, index }) => (
                                             <button
