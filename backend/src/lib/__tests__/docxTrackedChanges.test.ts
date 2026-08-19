@@ -917,3 +917,161 @@ describe("applyFormattedEdits — headings (v2)", () => {
         expect(await lines(out)).toEqual(["Styled text.", "End."]);
     });
 });
+
+describe("applyFormattedEdits — bullet and numbered lists (v3)", () => {
+    async function lines(bytes: Buffer): Promise<string[]> {
+        return (await extractDocxBodyText(bytes)).split("\n");
+    }
+    async function part(bytes: Buffer, path: string): Promise<string | null> {
+        const zip = await JSZip.loadAsync(bytes);
+        const f = zip.file(path);
+        return f ? await f.async("string") : null;
+    }
+
+    it("makes paragraphs into a bullet list and defines the numbering", async () => {
+        const bytes = await makeDocx(para("One") + para("Two") + para("End."));
+        const next = [
+            { text: "One", list: "bullet" as const, runs: [{ text: "One" }] },
+            { text: "Two", list: "bullet" as const, runs: [{ text: "Two" }] },
+            { text: "End.", runs: [{ text: "End." }] },
+        ];
+        const { bytes: out } = await applyFormattedEdits(
+            bytes,
+            ["One", "Two", "End."],
+            next,
+        );
+        expect(await lines(out)).toEqual(["One", "Two", "End."]);
+        const xml = await readDocumentXml(out);
+        expect((xml.match(/<w:numPr>/g) ?? []).length).toBe(2);
+        const numbering = await part(out, "word/numbering.xml");
+        expect(numbering).toBeTruthy();
+        expect(numbering!).toContain('w:val="bullet"');
+    });
+
+    it("numbers a numbered list with decimal format", async () => {
+        const bytes = await makeDocx(para("First") + para("Second") + para("End."));
+        const next = [
+            { text: "First", list: "number" as const, runs: [{ text: "First" }] },
+            { text: "Second", list: "number" as const, runs: [{ text: "Second" }] },
+            { text: "End.", runs: [{ text: "End." }] },
+        ];
+        const { bytes: out } = await applyFormattedEdits(
+            bytes,
+            ["First", "Second", "End."],
+            next,
+        );
+        const numbering = await part(out, "word/numbering.xml");
+        expect(numbering!).toContain('w:val="decimal"');
+        const xml = await readDocumentXml(out);
+        // Both list paragraphs share one numId, so they count 1, 2.
+        const ids = [...xml.matchAll(/<w:numId w:val="(\d+)"/g)].map((m) => m[1]);
+        expect(ids).toHaveLength(2);
+        expect(new Set(ids).size).toBe(1);
+    });
+
+    it("bullets and numbers use different definitions", async () => {
+        const bytes = await makeDocx(para("B") + para("N") + para("End."));
+        const next = [
+            { text: "B", list: "bullet" as const, runs: [{ text: "B" }] },
+            { text: "N", list: "number" as const, runs: [{ text: "N" }] },
+            { text: "End.", runs: [{ text: "End." }] },
+        ];
+        const { bytes: out } = await applyFormattedEdits(bytes, ["B", "N", "End."], next);
+        const xml = await readDocumentXml(out);
+        const ids = [...xml.matchAll(/<w:numId w:val="(\d+)"/g)].map((m) => m[1]);
+        expect(new Set(ids).size).toBe(2);
+        const numbering = await part(out, "word/numbering.xml");
+        expect(numbering!).toContain('w:val="bullet"');
+        expect(numbering!).toContain('w:val="decimal"');
+    });
+
+    it("registers numbering.xml in the package", async () => {
+        const zip = new JSZip();
+        zip.file(
+            "[Content_Types].xml",
+            `<?xml version="1.0"?><Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Override PartName="/word/document.xml" ContentType="x"/></Types>`,
+        );
+        zip.file(
+            "word/_rels/document.xml.rels",
+            `<?xml version="1.0"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="t" Target="styles.xml"/></Relationships>`,
+        );
+        zip.file(
+            "word/document.xml",
+            `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>` +
+                `<w:document ${W_NS}><w:body>${para("Item") + para("End.")}</w:body></w:document>`,
+        );
+        const bytes = await zip.generateAsync({ type: "nodebuffer" });
+        const { bytes: out } = await applyFormattedEdits(bytes, ["Item", "End."], [
+            { text: "Item", list: "bullet" as const, runs: [{ text: "Item" }] },
+            { text: "End.", runs: [{ text: "End." }] },
+        ]);
+        const ct = await part(out, "[Content_Types].xml");
+        const rels = await part(out, "word/_rels/document.xml.rels");
+        expect(ct!).toContain("/word/numbering.xml");
+        expect(rels!).toContain('Target="numbering.xml"');
+    });
+
+    it("turns a list item back into an ordinary paragraph", async () => {
+        const bytes = await makeDocx(
+            `<w:p><w:pPr><w:numPr><w:ilvl w:val="0"/><w:numId w:val="3"/></w:numPr></w:pPr>` +
+                `<w:r><w:t xml:space="preserve">Was a bullet</w:t></w:r></w:p>` +
+                para("End."),
+        );
+        const { bytes: out } = await applyFormattedEdits(
+            bytes,
+            ["Was a bullet", "End."],
+            [
+                { text: "Was a bullet", list: null, runs: [{ text: "Was a bullet" }] },
+                { text: "End.", runs: [{ text: "End." }] },
+            ],
+        );
+        const xml = await readDocumentXml(out);
+        expect(xml).not.toContain("<w:numPr>");
+        expect(await lines(out)).toEqual(["Was a bullet", "End."]);
+    });
+
+    it("does not disturb a document's existing numbering definitions", async () => {
+        const zip = new JSZip();
+        zip.file(
+            "word/document.xml",
+            `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>` +
+                `<w:document ${W_NS}><w:body>${para("Item") + para("End.")}</w:body></w:document>`,
+        );
+        zip.file(
+            "word/numbering.xml",
+            `<?xml version="1.0"?><w:numbering ${W_NS}>` +
+                `<w:abstractNum w:abstractNumId="1"><w:lvl w:ilvl="0"><w:numFmt w:val="lowerRoman"/></w:lvl></w:abstractNum>` +
+                `<w:num w:numId="1"><w:abstractNumId w:val="1"/></w:num></w:numbering>`,
+        );
+        const bytes = await zip.generateAsync({ type: "nodebuffer" });
+        const { bytes: out } = await applyFormattedEdits(bytes, ["Item", "End."], [
+            { text: "Item", list: "number" as const, runs: [{ text: "Item" }] },
+            { text: "End.", runs: [{ text: "End." }] },
+        ]);
+        const numbering = await part(out, "word/numbering.xml");
+        // The firm's own lowerRoman definition survives, ours is added beside it.
+        expect(numbering!).toContain('w:val="lowerRoman"');
+        expect(numbering!).toContain('w:val="decimal"');
+        expect(numbering!).toContain('w:abstractNumId="1"');
+    });
+
+    it("keeps a list item's bold and alignment", async () => {
+        const bytes = await makeDocx(para("Point") + para("End."));
+        const { bytes: out } = await applyFormattedEdits(bytes, ["Point", "End."], [
+            {
+                text: "Point",
+                list: "bullet" as const,
+                align: "center" as const,
+                runs: [{ text: "Point", bold: true }],
+            },
+            { text: "End.", runs: [{ text: "End." }] },
+        ]);
+        const xml = await readDocumentXml(out);
+        expect(xml).toContain("<w:numPr>");
+        expect(xml).toMatch(/<w:jc w:val="center"\/?>/);
+        expect(xml).toMatch(/<w:b\/?>/);
+        // Schema order: numPr must precede jc inside pPr.
+        const pPr = xml.slice(xml.indexOf("<w:pPr>"), xml.indexOf("</w:pPr>"));
+        expect(pPr.indexOf("numPr")).toBeLessThan(pPr.indexOf("w:jc"));
+    });
+});

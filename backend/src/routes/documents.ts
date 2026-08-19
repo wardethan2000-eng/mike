@@ -738,6 +738,136 @@ documentsRouter.post(
   },
 );
 
+// POST /single-documents/:documentId/undo-edit
+// Step back to the document as it was before the most recent editor save.
+// Editor saves overwrite one working version in place, so "undo" restores the
+// bytes of the version that preceded it and makes that the current version —
+// the later state stays in history rather than being destroyed.
+documentsRouter.post(
+  "/:documentId/undo-edit",
+  requireAuth,
+  async (req, res) => {
+    const userId = res.locals.userId as string;
+    const userEmail = res.locals.userEmail as string | undefined;
+    const { documentId } = req.params;
+    const db = createServerSupabase();
+
+    const { data: doc } = await db
+      .from("documents")
+      .select("id, user_id, project_id, current_version_id")
+      .eq("id", documentId)
+      .single();
+    if (!doc)
+      return void res.status(404).json({ detail: "Document not found" });
+    const access = await ensureDocAccess(doc, userId, userEmail, db);
+    if (!access.ok)
+      return void res.status(404).json({ detail: "Document not found" });
+
+    const { data: versions } = await db
+      .from("document_versions")
+      .select("id, version_number, source, storage_path, filename, created_at")
+      .eq("document_id", documentId)
+      .is("deleted_at", null)
+      .in("source", ["upload", "user_upload", "assistant_edit", "generated"])
+      .order("version_number", { ascending: true, nullsFirst: false });
+    if (!versions || versions.length < 2) {
+      return void res
+        .status(409)
+        .json({ detail: "There is no earlier version to go back to." });
+    }
+
+    const currentIdx = versions.findIndex(
+      (v) => v.id === doc.current_version_id,
+    );
+    const priorIdx = currentIdx > 0 ? currentIdx - 1 : versions.length - 2;
+    const prior = versions[priorIdx];
+    const current = versions[currentIdx >= 0 ? currentIdx : versions.length - 1];
+    if (!prior || !prior.storage_path || prior.id === current?.id) {
+      return void res
+        .status(409)
+        .json({ detail: "There is no earlier version to go back to." });
+    }
+
+    const raw = await downloadFile(prior.storage_path);
+    if (!raw)
+      return void res
+        .status(404)
+        .json({ detail: "That version's file is no longer available." });
+    const buf = Buffer.from(raw);
+    const ab = buf.buffer.slice(
+      buf.byteOffset,
+      buf.byteOffset + buf.byteLength,
+    ) as ArrayBuffer;
+
+    const filename = current?.filename ?? prior.filename ?? "Document.docx";
+    const versionSlug = crypto.randomUUID().replace(/-/g, "");
+    const key = versionStorageKey(userId, documentId, versionSlug, filename);
+    try {
+      await uploadFile(key, ab, contentTypeForDocumentType("docx"));
+    } catch (e) {
+      console.error("[undo-edit] storage write failed", e);
+      return void res.status(500).json({ detail: "Could not undo." });
+    }
+
+    let pdfStoragePath: string | null = null;
+    try {
+      const pdfBuf = await docxToPdf(buf);
+      const pdfKey = `converted-pdfs/${userId}/${documentId}/${versionSlug}.pdf`;
+      await uploadFile(
+        pdfKey,
+        pdfBuf.buffer.slice(
+          pdfBuf.byteOffset,
+          pdfBuf.byteOffset + pdfBuf.byteLength,
+        ) as ArrayBuffer,
+        "application/pdf",
+      );
+      pdfStoragePath = pdfKey;
+    } catch (err) {
+      console.error("[undo-edit] Office→PDF conversion failed:", err);
+    }
+
+    const { data: maxRow } = await db
+      .from("document_versions")
+      .select("version_number")
+      .eq("document_id", documentId)
+      .in("source", ["upload", "user_upload", "assistant_edit"])
+      .order("version_number", { ascending: false, nullsFirst: false })
+      .limit(1)
+      .maybeSingle();
+    const nextVersionNumber =
+      ((maxRow?.version_number as number | null) ?? 1) + 1;
+
+    const { data: versionRow, error: verErr } = await db
+      .from("document_versions")
+      .insert({
+        document_id: documentId,
+        storage_path: key,
+        pdf_storage_path: pdfStoragePath,
+        source: "user_upload",
+        version_number: nextVersionNumber,
+        filename,
+        file_type: "docx",
+        size_bytes: buf.byteLength,
+        content_sha256: contentSha256(buf),
+      })
+      .select("id, version_number, source")
+      .single();
+    if (verErr || !versionRow) {
+      console.error("[undo-edit] insert failed", verErr);
+      return void res.status(500).json({ detail: "Could not undo." });
+    }
+    await db
+      .from("documents")
+      .update({ current_version_id: versionRow.id })
+      .eq("id", documentId);
+
+    res.status(201).json({
+      ...versionRow,
+      restored_from_version_number: prior.version_number ?? null,
+    });
+  },
+);
+
 // POST /single-documents/:documentId/formatted-edit
 // Save edits from the in-app formatting editor. The client sends the body it
 // started from (`baseline`, plain text per paragraph) and the edited body

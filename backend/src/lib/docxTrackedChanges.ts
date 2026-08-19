@@ -1689,6 +1689,12 @@ export interface EditParagraph {
      * them up.
      */
     heading?: number | null;
+    /**
+     * "bullet" or "number" to make this paragraph a list item, null/undefined
+     * for an ordinary paragraph. Consecutive paragraphs of the same kind form
+     * one list, so a numbered run counts 1, 2, 3.
+     */
+    list?: "bullet" | "number" | null;
     runs: EditRun[];
 }
 
@@ -1756,6 +1762,7 @@ function applyParagraphProps(
     basePPr: XNode | null,
     align: EditParagraph["align"],
     heading: number | null | undefined,
+    list?: { numId: number } | null,
 ): XNode | null {
     const wantHeading =
         typeof heading === "number" && heading >= 1 && heading <= 3
@@ -1763,7 +1770,7 @@ function applyParagraphProps(
             : null;
     const base = basePPr ? cloneNode(basePPr) : null;
     const noAlign = !align || align === "left";
-    if (noAlign && !wantHeading && !base) return null;
+    if (noAlign && !wantHeading && !list && !base) return null;
 
     const pPr = base ?? makeEl("w:pPr", []);
     let kids = elChildren(pPr);
@@ -1779,11 +1786,25 @@ function applyParagraphProps(
         ];
     }
 
+    // List membership. w:numPr lives inside w:pPr, after w:pStyle.
+    kids = kids.filter((c) => elName(c) !== "w:numPr");
+    if (list) {
+        const numPr = makeEl("w:numPr", [
+            makeEl("w:ilvl", [], { "w:val": "0" }),
+            makeEl("w:numId", [], { "w:val": String(list.numId) }),
+        ]);
+        const styleIdx = kids.findIndex((c) => elName(c) === "w:pStyle");
+        const at = styleIdx >= 0 ? styleIdx + 1 : 0;
+        kids = [...kids.slice(0, at), numPr, ...kids.slice(at)];
+    }
+
     // Alignment.
     kids = kids.filter((c) => elName(c) !== "w:jc");
     if (!noAlign) {
+        // Schema order inside w:pPr: pStyle, numPr, ... , jc.
+        const numIdx = kids.findIndex((c) => elName(c) === "w:numPr");
         const styleIdx = kids.findIndex((c) => elName(c) === "w:pStyle");
-        const at = styleIdx >= 0 ? styleIdx + 1 : 0;
+        const at = Math.max(numIdx, styleIdx) + 1;
         kids = [
             ...kids.slice(0, at),
             makeEl("w:jc", [], { "w:val": align as string }),
@@ -1850,17 +1871,213 @@ function ensureHeadingStyles(
     return added;
 }
 
+/**
+ * Word renders a list only if the document has a numbering part defining it.
+ * Generated documents often have none, so build (or extend) word/numbering.xml
+ * with one bullet definition and one decimal definition, and make sure the
+ * package registers the part. Returns the numId for each kind.
+ *
+ * Existing definitions are never modified — a firm template keeps its own list
+ * look; we only append the two definitions we need with unused ids.
+ */
+const LIST_ABSTRACT_BULLET = 9100;
+const LIST_ABSTRACT_NUMBER = 9101;
+
+function buildAbstractNum(id: number, kind: "bullet" | "number"): XNode {
+    const lvls: XNode[] = [];
+    for (let i = 0; i < 3; i++) {
+        const indent = 720 * (i + 1);
+        const bulletChars = ["", "o", ""];
+        lvls.push(
+            makeEl(
+                "w:lvl",
+                [
+                    makeEl("w:start", [], { "w:val": "1" }),
+                    makeEl("w:numFmt", [], {
+                        "w:val": kind === "bullet" ? "bullet" : "decimal",
+                    }),
+                    makeEl("w:lvlText", [], {
+                        "w:val": kind === "bullet" ? bulletChars[i] : `%${i + 1}.`,
+                    }),
+                    makeEl("w:lvlJc", [], { "w:val": "left" }),
+                    makeEl("w:pPr", [
+                        makeEl("w:ind", [], {
+                            "w:left": String(indent),
+                            "w:hanging": "360",
+                        }),
+                    ]),
+                    ...(kind === "bullet"
+                        ? [
+                              makeEl("w:rPr", [
+                                  makeEl("w:rFonts", [], {
+                                      "w:ascii": "Symbol",
+                                      "w:hAnsi": "Symbol",
+                                      "w:hint": "default",
+                                  }),
+                              ]),
+                          ]
+                        : []),
+                ],
+                { "w:ilvl": String(i) },
+            ),
+        );
+    }
+    return makeEl(
+        "w:abstractNum",
+        [makeEl("w:multiLevelType", [], { "w:val": "hybridMultilevel" }), ...lvls],
+        { "w:abstractNumId": String(id) },
+    );
+}
+
+/**
+ * Ensure numbering definitions exist. Mutates/creates the numbering tree and
+ * returns { bullet, number } numIds, or null if the part can't be prepared.
+ */
+function ensureNumbering(
+    numberingTree: XNode[] | null,
+    kinds: Set<"bullet" | "number">,
+): { tree: XNode[]; ids: Record<string, number>; changed: boolean } | null {
+    if (kinds.size === 0) return null;
+    let tree = numberingTree;
+    let changed = false;
+    if (!tree) {
+        tree = [
+            makeEl("w:numbering", [], {
+                "xmlns:w":
+                    "http://schemas.openxmlformats.org/wordprocessingml/2006/main",
+            }),
+        ];
+        changed = true;
+    }
+    let root: XNode | null = null;
+    for (const top of tree) if (elName(top) === "w:numbering") root = top;
+    if (!root) return null;
+
+    const kids = elChildren(root);
+    const haveAbstract = new Set<string>();
+    const haveNum = new Map<string, string>(); // numId -> abstractNumId
+    let maxNumId = 0;
+    for (const c of kids) {
+        const name = elName(c);
+        if (name === "w:abstractNum") {
+            const id = String(elAttrs(c)["@_w:abstractNumId"] ?? "");
+            if (id) haveAbstract.add(id);
+        } else if (name === "w:num") {
+            const id = String(elAttrs(c)["@_w:numId"] ?? "");
+            const ref = findChildByName(elChildren(c), "w:abstractNumId");
+            const refVal = ref ? String(elAttrs(ref)["@_w:val"] ?? "") : "";
+            if (id) {
+                haveNum.set(id, refVal);
+                const n = parseInt(id, 10);
+                if (Number.isFinite(n) && n > maxNumId) maxNumId = n;
+            }
+        }
+    }
+
+    const ids: Record<string, number> = {};
+    // w:abstractNum elements must all precede w:num elements.
+    const abstracts: XNode[] = [];
+    const nums: XNode[] = [];
+    for (const kind of kinds) {
+        const absId =
+            kind === "bullet" ? LIST_ABSTRACT_BULLET : LIST_ABSTRACT_NUMBER;
+        // Reuse our own definition if a previous save already added it.
+        let numId: number | null = null;
+        for (const [nId, aId] of haveNum) {
+            if (aId === String(absId)) {
+                numId = parseInt(nId, 10);
+                break;
+            }
+        }
+        if (!haveAbstract.has(String(absId))) {
+            abstracts.push(buildAbstractNum(absId, kind));
+            haveAbstract.add(String(absId));
+            changed = true;
+        }
+        if (numId === null) {
+            numId = ++maxNumId;
+            nums.push(
+                makeEl(
+                    "w:num",
+                    [makeEl("w:abstractNumId", [], { "w:val": String(absId) })],
+                    { "w:numId": String(numId) },
+                ),
+            );
+            haveNum.set(String(numId), String(absId));
+            changed = true;
+        }
+        ids[kind] = numId;
+    }
+
+    if (changed) {
+        const existingAbstract = kids.filter(
+            (c) => elName(c) === "w:abstractNum",
+        );
+        const existingNums = kids.filter((c) => elName(c) === "w:num");
+        const others = kids.filter(
+            (c) => elName(c) !== "w:abstractNum" && elName(c) !== "w:num",
+        );
+        setChildren(root, [
+            ...others,
+            ...existingAbstract,
+            ...abstracts,
+            ...existingNums,
+            ...nums,
+        ]);
+    }
+    return { tree, ids, changed };
+}
+
+/**
+ * Register word/numbering.xml in [Content_Types].xml and the document's
+ * relationships, so a document that never had a numbering part gets a valid
+ * one. No-ops when the entries already exist.
+ */
+async function registerNumberingPart(zip: JSZip): Promise<void> {
+    // Content types
+    const ctFile = getZipEntry(zip, "[Content_Types].xml");
+    if (ctFile) {
+        const raw = await ctFile.async("string");
+        if (!raw.includes("/word/numbering.xml")) {
+            const entry =
+                '<Override PartName="/word/numbering.xml" ' +
+                'ContentType="application/vnd.openxmlformats-officedocument' +
+                '.wordprocessingml.numbering+xml"/>';
+            const out = raw.replace("</Types>", `${entry}</Types>`);
+            setZipEntry(zip, "[Content_Types].xml", out);
+        }
+    }
+    // Document relationships
+    const relPath = "word/_rels/document.xml.rels";
+    const relFile = getZipEntry(zip, relPath);
+    if (relFile) {
+        const raw = await relFile.async("string");
+        if (!raw.includes('Target="numbering.xml"')) {
+            // Pick an id that isn't taken.
+            let n = 900;
+            while (raw.includes(`Id="rId${n}"`)) n++;
+            const entry =
+                `<Relationship Id="rId${n}" Type="http://schemas.openxmlformats.org` +
+                `/officeDocument/2006/relationships/numbering" Target="numbering.xml"/>`;
+            const out = raw.replace("</Relationships>", `${entry}</Relationships>`);
+            setZipEntry(zip, relPath, out);
+        }
+    }
+}
+
 /** Build a fresh <w:p> from a formatted paragraph, inheriting base props. */
 function buildFormattedParagraph(
     para: EditParagraph,
     baseRPr: XNode | null,
     basePPr: XNode | null,
+    listNumId?: number | null,
 ): XNode {
     const children: XNode[] = [];
     const pPr = applyParagraphProps(
         basePPr,
         para.align ?? null,
         para.heading ?? null,
+        listNumId ? { numId: listNumId } : null,
     );
     if (pPr) children.push(pPr);
     const runs = para.runs && para.runs.length ? para.runs : [{ text: para.text }];
@@ -1910,6 +2127,7 @@ export async function applyFormattedEdits(
         basePPr: XNode | null;
         hasSectPr: boolean;
         headingLevel: number; // 0 = body text
+        isListItem: boolean;
     }
     const paras: Para[] = [];
     const collect = (nodes: XNode[]) => {
@@ -1933,6 +2151,9 @@ export async function applyFormattedEdits(
                     basePPr: pPr,
                     hasSectPr: !!(pPr && findChildByName(elChildren(pPr), "w:sectPr")),
                     headingLevel: hm ? Number(hm[1]) : 0,
+                    isListItem: !!(
+                        pPr && findChildByName(elChildren(pPr), "w:numPr")
+                    ),
                 });
             } else if (
                 name === "w:tbl" ||
@@ -1956,6 +2177,32 @@ export async function applyFormattedEdits(
             "The document changed since editing began. Reopen it and try again.",
         );
     }
+
+    // Prepare list numbering before rebuilding paragraphs, so each list
+    // paragraph can be given its numId.
+    const usedLists = new Set<"bullet" | "number">();
+    for (const ep of next) {
+        if (ep.list === "bullet" || ep.list === "number") usedLists.add(ep.list);
+    }
+    let listIds: Record<string, number> = {};
+    let numberingTreeToWrite: XNode[] | null = null;
+    if (usedLists.size > 0) {
+        const numFile = getZipEntry(zip, "word/numbering.xml");
+        const existingTree = numFile
+            ? (createParser().parse(await numFile.async("string")) as XNode[])
+            : null;
+        const prepared = ensureNumbering(existingTree, usedLists);
+        if (prepared) {
+            listIds = prepared.ids;
+            if (prepared.changed) numberingTreeToWrite = prepared.tree;
+        }
+    }
+    const listNumIdFor = (ep: EditParagraph): number | null => {
+        if (ep.list === "bullet" || ep.list === "number") {
+            return listIds[ep.list] ?? null;
+        }
+        return null;
+    };
 
     const nextText = next.map((p) => p.text);
     // Fast path: nothing changed.
@@ -2012,15 +2259,23 @@ export async function applyFormattedEdits(
                     ? ep.heading
                     : 0;
             const headingChanged = wantHeading !== currentHeading;
+            const wantList = ep.list === "bullet" || ep.list === "number";
+            const listChanged = wantList !== paras[oi].isListItem;
             const hasFormatting =
                 (ep.align && ep.align !== "left") ||
                 headingChanged ||
+                listChanged ||
                 (ep.runs || []).some(
                     (r) => r.bold || r.italic || r.underline || r.color || r.size,
                 );
             if (hasFormatting || (ep.runs && ep.runs.length > 1)) {
                 newBodyParas.push(
-                    buildFormattedParagraph(ep, paras[oi].baseRPr, paras[oi].basePPr),
+                    buildFormattedParagraph(
+                        ep,
+                        paras[oi].baseRPr,
+                        paras[oi].basePPr,
+                        listNumIdFor(ep),
+                    ),
                 );
             } else {
                 newBodyParas.push(paras[oi].node);
@@ -2048,6 +2303,7 @@ export async function applyFormattedEdits(
                     next[nj],
                     nearestBaseRPr(),
                     nearestBasePPr(),
+                    listNumIdFor(next[nj]),
                 ),
             );
             nj++;
@@ -2100,6 +2356,15 @@ export async function applyFormattedEdits(
             usedHeadings.add(ep.heading);
         }
     }
+    if (numberingTreeToWrite) {
+        setZipEntry(
+            zip,
+            "word/numbering.xml",
+            ensureXmlDeclaration(createBuilder().build(numberingTreeToWrite)),
+        );
+        await registerNumberingPart(zip);
+    }
+
     if (usedHeadings.size > 0) {
         const stylesFile = getZipEntry(zip, "word/styles.xml");
         if (stylesFile) {
