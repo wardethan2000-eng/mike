@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 /**
  * Panel arrangement for the project chat page.
@@ -102,6 +102,66 @@ function writeStored(layout: ProjectChatLayout) {
     } catch {
         // A full or blocked store just means the arrangement isn't remembered.
     }
+}
+
+/**
+ * Dragging a panel by its handle onto another panel's strip swaps the two.
+ * This follows the mouse directly rather than using the browser's own
+ * drag-and-drop, which is unreliable inside scrolling panels.
+ */
+export function usePaneDrag(onDrop: (moved: PaneId, target: PaneId) => void) {
+    const [draggingPane, setDraggingPane] = useState<PaneId | null>(null);
+    const [hoverPane, setHoverPane] = useState<PaneId | null>(null);
+    const draggingRef = useRef<PaneId | null>(null);
+    const hoverRef = useRef<PaneId | null>(null);
+
+    const startDrag = useCallback((pane: PaneId) => {
+        draggingRef.current = pane;
+        setDraggingPane(pane);
+    }, []);
+
+    useEffect(() => {
+        if (!draggingPane) return;
+
+        function paneUnder(x: number, y: number): PaneId | null {
+            const element = document.elementFromPoint(x, y);
+            const strip = element?.closest?.(
+                "[data-pane-header]",
+            ) as HTMLElement | null;
+            const id = strip?.dataset.paneHeader;
+            return isPaneId(id) ? id : null;
+        }
+
+        function onMove(e: MouseEvent) {
+            const over = paneUnder(e.clientX, e.clientY);
+            hoverRef.current =
+                over && over !== draggingRef.current ? over : null;
+            setHoverPane(hoverRef.current);
+        }
+
+        function onUp() {
+            const moved = draggingRef.current;
+            const target = hoverRef.current;
+            draggingRef.current = null;
+            hoverRef.current = null;
+            setDraggingPane(null);
+            setHoverPane(null);
+            if (moved && target) onDrop(moved, target);
+        }
+
+        document.body.style.cursor = "grabbing";
+        document.body.style.userSelect = "none";
+        window.addEventListener("mousemove", onMove);
+        window.addEventListener("mouseup", onUp);
+        return () => {
+            window.removeEventListener("mousemove", onMove);
+            window.removeEventListener("mouseup", onUp);
+            document.body.style.cursor = "";
+            document.body.style.userSelect = "";
+        };
+    }, [draggingPane, onDrop]);
+
+    return { draggingPane, hoverPane, startDrag };
 }
 
 /**

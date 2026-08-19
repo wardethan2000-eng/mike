@@ -4,8 +4,6 @@ import type { ReactNode } from "react";
 import { GripVertical } from "lucide-react";
 import type { PaneId } from "@/app/hooks/useProjectChatLayout";
 
-export const PANE_DRAG_TYPE = "application/mike-pane";
-
 /**
  * The strip along the top of a panel. Its handle can be dragged onto another
  * panel's strip to swap the two panels around.
@@ -16,8 +14,8 @@ export function PaneHeader({
     children,
     actions,
     draggingPane,
-    onDragStateChange,
-    onDropPane,
+    hoverPane,
+    onStartDrag,
 }: {
     paneId: PaneId;
     label: string;
@@ -25,40 +23,28 @@ export function PaneHeader({
     children?: ReactNode;
     actions?: ReactNode;
     draggingPane: PaneId | null;
-    onDragStateChange: (pane: PaneId | null) => void;
-    onDropPane: (moved: PaneId, target: PaneId) => void;
+    hoverPane: PaneId | null;
+    onStartDrag: (pane: PaneId) => void;
 }) {
-    const isTarget = draggingPane !== null && draggingPane !== paneId;
+    const isDropTarget = hoverPane === paneId && draggingPane !== paneId;
 
     return (
         <div
+            data-pane-header={paneId}
             className="relative h-10 flex items-stretch border-b border-gray-200 shrink-0 min-w-0"
-            onDragOver={(e) => {
-                if (!isTarget) return;
-                if (!e.dataTransfer.types.includes(PANE_DRAG_TYPE)) return;
-                e.preventDefault();
-                e.dataTransfer.dropEffect = "move";
-            }}
-            onDrop={(e) => {
-                if (!isTarget) return;
-                const moved = e.dataTransfer.getData(PANE_DRAG_TYPE);
-                if (!moved) return;
-                e.preventDefault();
-                e.stopPropagation();
-                onDropPane(moved as PaneId, paneId);
-                onDragStateChange(null);
-            }}
         >
             <div
-                draggable
-                onDragStart={(e) => {
-                    e.dataTransfer.setData(PANE_DRAG_TYPE, paneId);
-                    e.dataTransfer.effectAllowed = "move";
-                    onDragStateChange(paneId);
+                onMouseDown={(e) => {
+                    if (e.button !== 0) return;
+                    e.preventDefault();
+                    onStartDrag(paneId);
                 }}
-                onDragEnd={() => onDragStateChange(null)}
                 title={`Drag to move the ${label.toLowerCase()} panel`}
-                className="flex items-center px-2 shrink-0 cursor-grab active:cursor-grabbing text-gray-300 hover:text-gray-600 transition-colors"
+                className={`flex items-center px-2 shrink-0 transition-colors ${
+                    draggingPane === paneId
+                        ? "cursor-grabbing text-gray-600"
+                        : "cursor-grab text-gray-300 hover:text-gray-600"
+                }`}
             >
                 <GripVertical className="h-3.5 w-3.5" />
             </div>
@@ -71,7 +57,7 @@ export function PaneHeader({
                 </div>
             )}
 
-            {isTarget && (
+            {isDropTarget && (
                 <div className="absolute inset-0 z-20 flex items-center justify-center bg-blue-50/90 border-2 border-dashed border-blue-400 pointer-events-none">
                     <span className="text-xs font-medium text-blue-600">
                         Drop to move here

@@ -58,6 +58,7 @@ import { PaneHeader } from "@/app/components/projects/PaneHeader";
 import {
     PANE_LABELS,
     useProjectChatLayout,
+    usePaneDrag,
     type PaneId,
 } from "@/app/hooks/useProjectChatLayout";
 import type {
@@ -247,7 +248,6 @@ export default function ProjectAssistantChatPage({ params }: Props) {
 
     // Panel arrangement — order, sizes and whether the files rail is showing
     // are the reader's own choice and are remembered between visits.
-    const [draggingPane, setDraggingPane] = useState<PaneId | null>(null);
     const paneRowRef = useRef<HTMLDivElement>(null);
 
     // Upload state
@@ -281,6 +281,7 @@ export default function ProjectAssistantChatPage({ params }: Props) {
         resetLayout,
         isDefaultLayout,
     } = useProjectChatLayout({ documentOpen: tabs.length > 0 });
+    const { draggingPane, hoverPane, startDrag } = usePaneDrag(movePane);
     const tabBarRef = useRef<HTMLDivElement | null>(null);
     const tabItemRefs = useRef<Record<string, HTMLDivElement | null>>({});
 
@@ -1015,8 +1016,8 @@ export default function ProjectAssistantChatPage({ params }: Props) {
                     paneId="files"
                     label={PANE_LABELS.files}
                     draggingPane={draggingPane}
-                    onDragStateChange={setDraggingPane}
-                    onDropPane={movePane}
+                    hoverPane={hoverPane}
+                    onStartDrag={startDrag}
                     actions={
                         <>
                             <input
@@ -1109,8 +1110,8 @@ export default function ProjectAssistantChatPage({ params }: Props) {
                     paneId="document"
                     label={PANE_LABELS.document}
                     draggingPane={draggingPane}
-                    onDragStateChange={setDraggingPane}
-                    onDropPane={movePane}
+                    hoverPane={hoverPane}
+                    onStartDrag={startDrag}
                 >
                     <div
                         ref={tabBarRef}
@@ -1282,8 +1283,8 @@ export default function ProjectAssistantChatPage({ params }: Props) {
                     paneId="chat"
                     label={PANE_LABELS.chat}
                     draggingPane={draggingPane}
-                    onDragStateChange={setDraggingPane}
-                    onDropPane={movePane}
+                    hoverPane={hoverPane}
+                    onStartDrag={startDrag}
                 >
                     <span className="self-center truncate text-xs text-gray-700">
                         Project Assistant
