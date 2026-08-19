@@ -79,13 +79,24 @@ export async function embedPassages(
   texts: string[],
 ): Promise<(number[] | null)[]> {
   const clean = texts.map(tidy);
+  // Embed in small chunks so a document with hundreds of passages does not push
+  // the whole set through the model at once, which would exhaust memory on a
+  // small machine. Order is preserved.
+  const CHUNK = 16;
+  const result: (number[] | null)[] = [];
   try {
     const extractor = await getExtractor();
-    const out = await extractor(
-      clean.map((c) => c || " "),
-      { pooling: "mean", normalize: true },
-    );
-    return clean.map((c, i) => (c ? rowToArray(out, i) : null));
+    for (let i = 0; i < clean.length; i += CHUNK) {
+      const chunk = clean.slice(i, i + CHUNK);
+      const out = await extractor(
+        chunk.map((c) => c || " "),
+        { pooling: "mean", normalize: true },
+      );
+      for (let j = 0; j < chunk.length; j++) {
+        result.push(chunk[j] ? rowToArray(out, j) : null);
+      }
+    }
+    return result;
   } catch (err) {
     console.error("[embeddings] passage embedding failed:", err);
     return texts.map(() => null);
