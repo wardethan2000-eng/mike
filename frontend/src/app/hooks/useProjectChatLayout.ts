@@ -1,14 +1,22 @@
 "use client";
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import {
+    getUiPreferences,
+    saveUiPreferences,
+} from "@/app/lib/mikeApi";
 
 /**
  * Panel arrangement for the project chat page.
  *
  * The page shows up to three panes — the chat, an open document, and the
  * matter's files. Each person can put them in whatever order they like and
- * size them however they like; the arrangement is remembered on their machine
- * the same way the selected model is (see useSelectedModel).
+ * size them however they like.
+ *
+ * The arrangement is saved against their account, so it follows them to any
+ * computer they sign in from. A copy is also kept in this browser so the
+ * panels are drawn in the right places immediately on load, before the saved
+ * one has come back from the server.
  *
  * Sizes are stored as weights rather than pixels so a pane keeps its share of
  * the window when the window is resized, when a pane is hidden, or on a
@@ -37,7 +45,12 @@ export type ProjectChatLayout = {
     filesOpen: boolean;
 };
 
+/** This browser's copy — a cache so the first paint is already correct. */
 const STORAGE_KEY = "mike.projectChatLayout.v1";
+/** The key this arrangement is stored under against the person's account. */
+const PREFERENCE_KEY = "projectChatLayout";
+/** How long to wait after the last change before saving to the account. */
+const SAVE_DELAY_MS = 700;
 
 export const DEFAULT_LAYOUT: ProjectChatLayout = {
     order: ["chat", "document", "files"],
@@ -175,19 +188,63 @@ export function useProjectChatLayout({
     documentOpen: boolean;
 }) {
     const [layout, setLayout] = useState<ProjectChatLayout>(DEFAULT_LAYOUT);
+    /** Set once the reader moves something, so a slow reply can't undo it. */
+    const changedHereRef = useRef(false);
+    const saveTimerRef = useRef<number | null>(null);
+    const pendingRef = useRef<ProjectChatLayout | null>(null);
 
     useEffect(() => {
+        // The browser's copy first, so the panels are drawn in the right
+        // places straight away; then the one saved against the account.
         // eslint-disable-next-line react-hooks/set-state-in-effect -- hydration-safe localStorage read; SSR must render the default arrangement
         setLayout(readStored());
+
+        let cancelled = false;
+        getUiPreferences()
+            .then((preferences) => {
+                if (cancelled || changedHereRef.current) return;
+                const saved = preferences?.[PREFERENCE_KEY];
+                if (!saved) return;
+                const layout = normalize(saved);
+                setLayout(layout);
+                writeStored(layout);
+            })
+            .catch(() => {
+                // Signed out, offline, or the server has nothing for us —
+                // this browser's copy stands.
+            });
+        return () => {
+            cancelled = true;
+        };
     }, []);
+
+    // Once the reader has moved something, keep it — in this browser straight
+    // away, and against their account a moment after they stop, so dragging a
+    // divider doesn't fire a request per pixel.
+    useEffect(() => {
+        if (!changedHereRef.current) return;
+        writeStored(layout);
+        pendingRef.current = layout;
+        if (saveTimerRef.current !== null) {
+            window.clearTimeout(saveTimerRef.current);
+        }
+        saveTimerRef.current = window.setTimeout(() => {
+            saveTimerRef.current = null;
+            const toSave = pendingRef.current;
+            if (!toSave) return;
+            void saveUiPreferences({ [PREFERENCE_KEY]: toSave }).catch(() => {
+                // Keeping it in this browser is enough for now; the next
+                // change tries again.
+            });
+        }, SAVE_DELAY_MS);
+        // No cleanup on purpose: leaving the page shortly after a change
+        // should still save it, and the next change clears the timer above.
+    }, [layout]);
 
     const update = useCallback(
         (change: (previous: ProjectChatLayout) => ProjectChatLayout) => {
-            setLayout((previous) => {
-                const next = change(previous);
-                writeStored(next);
-                return next;
-            });
+            changedHereRef.current = true;
+            setLayout(change);
         },
         [],
     );

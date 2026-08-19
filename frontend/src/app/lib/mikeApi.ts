@@ -512,6 +512,32 @@ export async function getUserProfile(): Promise<UserProfile> {
     return apiRequest<UserProfile>("/user/profile");
 }
 
+/**
+ * Small personal display settings, such as how the panels in a project
+ * conversation are arranged. Stored per person so they follow them to any
+ * computer they sign in from.
+ */
+export async function getUiPreferences(): Promise<Record<string, unknown>> {
+    const result = await apiRequest<{ preferences?: Record<string, unknown> }>(
+        "/user/ui-preferences",
+    );
+    return result.preferences ?? {};
+}
+
+export async function saveUiPreferences(
+    preferences: Record<string, unknown>,
+): Promise<Record<string, unknown>> {
+    const result = await apiRequest<{ preferences?: Record<string, unknown> }>(
+        "/user/ui-preferences",
+        {
+            method: "PATCH",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ preferences }),
+        },
+    );
+    return result.preferences ?? preferences;
+}
+
 export async function lookupUserByEmail(
     email: string,
 ): Promise<UserLookupResult> {

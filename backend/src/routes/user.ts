@@ -3,6 +3,7 @@ import { Router } from "express";
 import { requireAuth, requireMfaIfEnrolled } from "../middleware/auth";
 import { createServerSupabase } from "../lib/supabase";
 import { recordAudit } from "../lib/audit";
+import { getUiPreferences, saveUiPreferences } from "../lib/uiPreferences";
 import {
     DEFAULT_TABULAR_MODEL,
     DEFAULT_TITLE_MODEL,
@@ -646,6 +647,39 @@ userRouter.patch(
 );
 
 // GET /user/api-keys
+// GET /user/ui-preferences — small personal display settings, such as how the
+// panels in a project conversation are arranged.
+userRouter.get("/ui-preferences", requireAuth, async (_req, res) => {
+    const userId = res.locals.userId as string;
+    const db = createServerSupabase();
+    res.json({ preferences: await getUiPreferences(userId, db) });
+});
+
+// PATCH /user/ui-preferences — merges the given keys into what is stored.
+userRouter.patch("/ui-preferences", requireAuth, async (req, res) => {
+    const userId = res.locals.userId as string;
+    const changes = req.body?.preferences;
+    if (!changes || typeof changes !== "object" || Array.isArray(changes)) {
+        return void res
+            .status(400)
+            .json({ detail: "preferences must be an object" });
+    }
+    const db = createServerSupabase();
+    try {
+        res.json({
+            preferences: await saveUiPreferences(
+                userId,
+                changes as Record<string, unknown>,
+                db,
+            ),
+        });
+    } catch (err) {
+        const detail = errorMessage(err);
+        console.error("[user/ui-preferences] save failed", { error: detail });
+        res.status(500).json({ detail });
+    }
+});
+
 userRouter.get("/api-keys", requireAuth, async (_req, res) => {
     const userId = res.locals.userId as string;
     const db = createServerSupabase();
