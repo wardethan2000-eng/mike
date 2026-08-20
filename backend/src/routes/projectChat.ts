@@ -36,9 +36,11 @@ import {
     takeResumeState,
     type ChatMessage,
 } from "../lib/chat";
+import { researchNotesFilenameForChat } from "../lib/chat/researchNotes";
 import {
     getUserModelSettings,
 } from "../lib/userSettings";
+import { DEFAULT_MAIN_MODEL, resolveModel } from "../lib/llm";
 import { checkProjectAccess } from "../lib/access";
 import { startSseHeartbeat } from "../lib/chat/routeStreaming";
 import {
@@ -317,6 +319,11 @@ projectChatRouter.post("/", requireAuth, async (req, res) => {
             const condensed = await condenseForContinuation({
                 state: resumeState,
                 apiKeys,
+                researchNotesFilename: await researchNotesFilenameForChat({
+                    db,
+                    projectId,
+                    chatId,
+                }),
             });
             apiMessages = [apiMessages[0], ...condensed];
             resumeState = null;
@@ -327,7 +334,12 @@ projectChatRouter.post("/", requireAuth, async (req, res) => {
             });
         }
     }
-    const runModel = resumeState ? resumeState.model : model;
+    // Resolved rather than taken as sent: a request that names no model still
+    // runs on one, and the answer should say which.
+    const runModel = resolveModel(
+        resumeState ? resumeState.model : model,
+        DEFAULT_MAIN_MODEL,
+    );
 
     const workflowStore = await buildWorkflowStore(userId, userEmail, db);
 
@@ -343,6 +355,9 @@ projectChatRouter.post("/", requireAuth, async (req, res) => {
     res.on("close", () => {
         if (!streamFinished) streamAbort.abort();
     });
+    // Known for as long as it is being written, so a restart can stop it
+    // deliberately and let it save what it has.
+    const forgetLiveAnswer = registerLiveAnswer(() => streamAbort.abort());
     const stopHeartbeat = startSseHeartbeat(res);
 
     try {
@@ -571,6 +586,7 @@ projectChatRouter.post("/", requireAuth, async (req, res) => {
         }
     } finally {
         streamFinished = true;
+        forgetLiveAnswer();
         stopHeartbeat();
         res.end();
     }

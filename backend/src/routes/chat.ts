@@ -36,6 +36,7 @@ import {
     reserveAssistantMessage,
     withoutEmptyAssistantReservations,
 } from "../lib/chat";
+import { DEFAULT_MAIN_MODEL, resolveModel } from "../lib/llm";
 import { getUserModelSettings } from "../lib/userSettings";
 import { checkProjectAccess } from "../lib/access";
 import { safeErrorLog, safeErrorMessage } from "../lib/safeError";
@@ -582,7 +583,12 @@ chatRouter.post("/", requireAuth, async (req, res) => {
             });
         }
     }
-    const runModel = resumeState ? resumeState.model : model;
+    // Resolved rather than taken as sent: a request that names no model still
+    // runs on one, and the answer should say which.
+    const runModel = resolveModel(
+        resumeState ? resumeState.model : model,
+        DEFAULT_MAIN_MODEL,
+    );
 
     const workflowStore = await buildWorkflowStore(userId, userEmail, db);
 

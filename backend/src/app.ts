@@ -1,5 +1,9 @@
 import "dotenv/config";
 import express from "express";
+import {
+  isStoppingForRestart,
+  liveAnswerCount,
+} from "./lib/chat/liveAnswers";
 import cors from "cors";
 import helmet from "helmet";
 import rateLimit from "express-rate-limit";
@@ -223,7 +227,16 @@ app.use("/admin/forms", adminFormsRouter);
 app.use("/admin", adminRouter);
 app.use("/auth", inviteLimiter, firmInvitesRouter);
 
-app.get("/health", (_req, res) => res.json({ ok: true }));
+// `active_answers` is what scripts/deploy.sh waits on: restarting the backend
+// while an answer is being written cuts it off, so a deploy holds until this
+// reaches zero.
+app.get("/health", (_req, res) =>
+  res.json({
+    ok: true,
+    active_answers: liveAnswerCount(),
+    shutting_down: isStoppingForRestart(),
+  }),
+);
 
 // The Ed25519 public key this deployment signs project export manifests with,
 // or null when no key is configured. Deliberately open: whoever checks a

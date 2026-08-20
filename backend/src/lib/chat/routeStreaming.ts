@@ -1,5 +1,6 @@
 import type { Response } from "express";
 import type { createServerSupabase } from "../supabase";
+import { registerLiveAnswer } from "./liveAnswers";
 
 type Db = ReturnType<typeof createServerSupabase>;
 type AssistantMessageTable = "chat_messages" | "word_chat_messages";
@@ -98,12 +99,16 @@ export function openAssistantSse(res: Response): {
     if (!finished) controller.abort();
   });
   const stopHeartbeat = startSseHeartbeat(res);
+  // Known for as long as it is being written, so a restart can stop it
+  // deliberately and let it save what it has.
+  const forget = registerLiveAnswer(() => controller.abort());
 
   return {
     signal: controller.signal,
     write: (line) => res.write(line),
     finish: () => {
       finished = true;
+      forget();
       stopHeartbeat();
       res.end();
     },

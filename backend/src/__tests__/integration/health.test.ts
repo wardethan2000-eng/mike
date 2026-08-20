@@ -40,10 +40,18 @@ vi.mock("@supabase/supabase-js", () => ({
 import { app } from "../../app";
 
 describe("GET /health", () => {
-    it("returns 200 with { ok: true }", async () => {
+    it("returns 200 and says the server is up", async () => {
         const res = await request(app).get("/health");
         expect(res.status).toBe(200);
-        expect(res.body).toEqual({ ok: true });
+        expect(res.body.ok).toBe(true);
+    });
+
+    // scripts/deploy.sh waits on this before restarting the backend, because
+    // restarting mid-answer cuts the answer off.
+    it("says how many answers are being written, and whether it is stopping", async () => {
+        const res = await request(app).get("/health");
+        expect(res.body.active_answers).toBe(0);
+        expect(res.body.shutting_down).toBe(false);
     });
 });
 

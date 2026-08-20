@@ -14,6 +14,7 @@ import {
 } from "./types";
 import { buildSystemPrompt } from "./prompts";
 import { parseCitations, createCitation } from "./citations";
+import { cancellationNote } from "./liveAnswers";
 import type { AssistantEvent } from "./streaming";
 import { ensureDefaultWorkflows } from "../workflowCatalog";
 import { filterAccessibleDocumentIds } from "../access";
@@ -488,7 +489,7 @@ export async function appendAssistantEventsToLastAssistantMessage(
 }
 
 export function appendCancelledAssistantEvent(events: AssistantEvent[]) {
-  return [...events, { type: "content" as const, text: "Cancelled by user." }];
+  return [...events, { type: "content" as const, text: cancellationNote() }];
 }
 
 export function buildCancelledAssistantMessage(args: {

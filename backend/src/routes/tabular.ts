@@ -1,6 +1,7 @@
 import { Router } from "express";
 import { requireAuth } from "../middleware/auth";
 import { createServerSupabase } from "../lib/supabase";
+import { registerLiveAnswer } from "../lib/chat/liveAnswers";
 import { recordAudit } from "../lib/audit";
 import { downloadFile } from "../lib/storage";
 import { attachActiveVersionPaths } from "../lib/documentVersions";
@@ -706,7 +707,8 @@ tabularRouter.post("/prompt", requireAuth, async (req, res) => {
             systemPrompt:
                 'You write high-quality column prompts for legal tabular review workflows. Return only valid JSON with a single field: {"prompt": string}. The prompt you write must focus solely on what to extract — never on how to format the response.',
             user: userMessage,
-            maxTokens: 512,
+            // Thinking models spend this budget on reasoning before answering.
+            maxTokens: 2000,
             apiKeys: api_keys,
         });
         const parsed = JSON.parse(
@@ -1736,6 +1738,9 @@ tabularRouter.post("/:reviewId/chat", requireAuth, async (req, res) => {
     res.on("close", () => {
         if (!streamFinished) streamAbort.abort();
     });
+    // Known for as long as it is being written, so a restart can stop it
+    // deliberately and let it save what it has.
+    const forgetLiveAnswer = registerLiveAnswer(() => streamAbort.abort());
 
     if (chatId) {
         write(`data: ${JSON.stringify({ type: "chat_id", chatId })}\n\n`);
@@ -1864,6 +1869,7 @@ tabularRouter.post("/:reviewId/chat", requireAuth, async (req, res) => {
         }
     } finally {
         streamFinished = true;
+        forgetLiveAnswer();
         res.end();
     }
 });
@@ -1929,7 +1935,9 @@ async function queryTabularCell(
 
 The "summary" and "reasoning" field values may use markdown formatting (bullets, bold, italics, etc.) — the values are still plain JSON strings (escape newlines as \\n), but the text inside will be rendered as markdown in the UI.
 
-The "summary" field must contain only the extracted value with inline citations — no explanation or reasoning. Every factual claim in "summary" must be followed immediately by a citation in the format [[document:SOURCE_DOCUMENT_ID||page:N||quote:exact quoted text]], using the exact source document ID shown before the supporting document. For spreadsheets, use [[document:SOURCE_DOCUMENT_ID||sheet:SHEET_NAME||cell:A1||quote:exact cell text]]. The quote must be a short verbatim excerpt (≤ 25 words) narrowly scoped to the specific claim. Do not have multiple claims share the same long quote; if two different statements need different evidence, give each its own short, precise quote. All reasoning and explanation belongs in "reasoning" only, which may also contain citations.`;
+The "summary" field must contain only the extracted value with inline citations — no explanation or reasoning. Every factual claim in "summary" must be followed immediately by a citation in the format [[document:SOURCE_DOCUMENT_ID||page:N||quote:exact quoted text]], using the exact source document ID shown before the supporting document. For spreadsheets, use [[document:SOURCE_DOCUMENT_ID||sheet:SHEET_NAME||cell:A1||quote:exact cell text]]. The quote must be a short verbatim excerpt (≤ 25 words) narrowly scoped to the specific claim. Do not have multiple claims share the same long quote; if two different statements need different evidence, give each its own short, precise quote. All reasoning and explanation belongs in "reasoning" only, which may also contain citations.
+
+If the document does not contain the information asked for, say exactly that in "summary" and set "flag" to "grey". Never answer from general knowledge, another document, or inference beyond what this document states — an honest "not addressed" is correct; a guessed value is wrong.`;
 
     let raw: string;
     try {
@@ -1937,7 +1945,8 @@ The "summary" field must contain only the extracted value with inline citations 
             model,
             systemPrompt: EXTRACTION_SYSTEM,
             user: `Document: ${filename}\n\n${documentText}\n\n---\nInstruction: ${fullPrompt}`,
-            maxTokens: 2048,
+            // Thinking models spend this budget on reasoning before answering.
+            maxTokens: 8000,
             apiKeys,
         });
     } catch (err) {
@@ -1996,10 +2005,15 @@ async function generateChatTitle(
         const raw = await completeText({
             model,
             user: `${contextBlock}Generate a short title (4-6 words) for a chat that starts with the message below. The title should reflect the user's specific question, not the review or project name. Return only the title, no punctuation, no quotes:\n\n${firstUserMessage}`,
-            maxTokens: 64,
+            // Thinking models spend this budget on reasoning before answering.
+            maxTokens: 2000,
             apiKeys,
         });
-        return raw.trim().slice(0, 80) || null;
+        const cleaned = raw
+            .replace(/<think>[\s\S]*?<\/think>/gi, "")
+            .replace(/[\s\S]*<\/think>/i, "")
+            .replace(/<\/?think>/gi, "");
+        return cleaned.trim().slice(0, 80) || null;
     } catch {
         return null;
     }
@@ -2045,6 +2059,7 @@ Rules:
 - "summary": the extracted value with inline citations [[document:SOURCE_DOCUMENT_ID||page:N||quote:verbatim excerpt ≤25 words]] after every factual claim, using the exact source document ID shown before the supporting document. For spreadsheets, use [[document:SOURCE_DOCUMENT_ID||sheet:SHEET_NAME||cell:A1||quote:exact cell text]]. No explanation or reasoning here. Quotes must be narrowly scoped to the specific claim — extract only the exact supporting words, not the full surrounding sentence. Do not reuse one long quote across multiple statements; give each claim its own short, precise quote.
 - "flag": green = standard/favorable, yellow = needs attention, red = problematic/unfavorable, grey = neutral/not found
 - "reasoning": brief explanation of the extraction
+- If the document does not contain the information for a column, say exactly that in "summary" and set "flag" to "grey". Never answer from general knowledge, another document, or inference beyond what this document states — an honest "not addressed" is correct; a guessed value is wrong.
 - The "summary" and "reasoning" string VALUES may use markdown (bullets, bold, italics, etc.) — escape newlines as \\n inside the JSON string. This markdown is rendered in the UI.
 - Output ONLY the JSON lines themselves. Do NOT wrap the response in markdown code fences (e.g. \`\`\`json), and do not add any preamble or summary.`;
 
