@@ -323,3 +323,52 @@ describe("runEditDocument edit mode", () => {
         expect(result.tracked).toBe(true);
     });
 });
+
+describe("runEditDocument header/footer routing", () => {
+    it("applies an edit whose anchor lives in the page header", async () => {
+        const zip = new JSZip();
+        zip.file(
+            "word/document.xml",
+            `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>` +
+                `<w:document ${W_NS}><w:body>` +
+                `<w:p><w:r><w:t xml:space="preserve">Body text.</w:t></w:r></w:p>` +
+                `</w:body></w:document>`,
+        );
+        zip.file(
+            "word/header1.xml",
+            `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>` +
+                `<w:hdr ${W_NS}><w:p><w:r><w:t xml:space="preserve">Cooks Guttering LLC</w:t></w:r></w:p></w:hdr>`,
+        );
+        sourceBytes = await zip.generateAsync({ type: "nodebuffer" });
+
+        const db = makeDb(fixtureTables());
+        const result = await runEditDocument({
+            documentId: "doc-1",
+            userId: "user-1",
+            edits: [
+                {
+                    find: "Cooks Guttering LLC",
+                    replace: "Central Spray Foam, LLC",
+                    context_before: "",
+                    context_after: "",
+                },
+            ],
+            db,
+        });
+
+        expect(result.ok).toBe(true);
+        if (!result.ok) return;
+        // Header edits are written directly: no cards, no edit rows.
+        expect(result.header_footer_applied).toBe(1);
+        expect(result.applied_count).toBe(1);
+        expect(result.annotations).toEqual([]);
+        expect(db.inserted.document_edits ?? []).toEqual([]);
+
+        const saved = uploads.get(result.storage_path)!;
+        const headerXml = await (await JSZip.loadAsync(saved))
+            .file("word/header1.xml")!
+            .async("string");
+        expect(headerXml).toContain("Central Spray Foam, LLC");
+        expect(headerXml).not.toContain("Cooks Guttering");
+    });
+});

@@ -109,6 +109,110 @@ export async function extractPdfText(buf: ArrayBuffer): Promise<string> {
   }
 }
 
+/**
+ * The text of a PDF grouped into paragraphs, using the page's own geometry:
+ * items sharing a baseline make a line, and a vertical gap clearly larger
+ * than the page's usual line spacing starts a new paragraph. Used when a PDF
+ * precedent is copied into an editable Word file — a paragraph per visual
+ * blob reads far better than a paragraph per page.
+ */
+export async function extractPdfParagraphs(
+  buf: ArrayBuffer,
+): Promise<string[]> {
+  try {
+    const pdfjsLib = await import("pdfjs-dist/legacy/build/pdf.mjs" as string);
+    const pdf = await (
+      pdfjsLib as unknown as {
+        getDocument: (opts: unknown) => {
+          promise: Promise<{
+            numPages: number;
+            getPage: (n: number) => Promise<{
+              getTextContent: () => Promise<{
+                items: { str?: string; transform?: number[] }[];
+              }>;
+            }>;
+          }>;
+        };
+      }
+    ).getDocument({
+      data: new Uint8Array(buf),
+      standardFontDataUrl: STANDARD_FONT_DATA_URL,
+    }).promise;
+
+    const paragraphs: string[] = [];
+    for (let i = 1; i <= pdf.numPages; i++) {
+      const page = await pdf.getPage(i);
+      const textContent = await page.getTextContent();
+
+      // Bucket items into lines by their baseline y (rounded to absorb
+      // sub-pixel jitter), keeping x order within a line and remembering how
+      // far right each line reaches.
+      const lines = new Map<
+        number,
+        { x: number; right: number; str: string }[]
+      >();
+      for (const item of textContent.items) {
+        const str = item.str ?? "";
+        if (!str.trim()) continue;
+        const t = item.transform ?? [];
+        const y = Math.round((t[5] ?? 0) * 2) / 2;
+        const x = t[4] ?? 0;
+        const width = (item as { width?: number }).width ?? 0;
+        const bucket = lines.get(y);
+        const entry = { x, right: x + width, str };
+        if (bucket) bucket.push(entry);
+        else lines.set(y, [entry]);
+      }
+      const ordered = [...lines.entries()]
+        .sort((a, b) => b[0] - a[0]) // top of the page first
+        .map(([y, items]) => ({
+          y,
+          right: Math.max(...items.map((it) => it.right)),
+          text: items
+            .sort((a, b) => a.x - b.x)
+            .map((it) => it.str)
+            .join(" ")
+            .replace(/\s+/g, " ")
+            .trim(),
+        }))
+        .filter((line) => line.text);
+      if (ordered.length === 0) continue;
+
+      // Two signals end a paragraph: a vertical gap clearly wider than the
+      // page's usual line spacing, and a line that stops well short of the
+      // page's usual right edge (the last line of justified/wrapped text).
+      const gaps: number[] = [];
+      for (let j = 1; j < ordered.length; j++) {
+        gaps.push(ordered[j - 1].y - ordered[j].y);
+      }
+      const sortedGaps = [...gaps].sort((a, b) => a - b);
+      const medianGap = sortedGaps.length
+        ? sortedGaps[Math.floor(sortedGaps.length / 2)]
+        : 0;
+      const gapThreshold =
+        medianGap > 0 ? medianGap * 1.6 : Number.POSITIVE_INFINITY;
+      const rights = ordered.map((line) => line.right).sort((a, b) => a - b);
+      const pageRight = rights[Math.floor(rights.length * 0.9)] ?? 0;
+      const shortLine = (right: number) =>
+        pageRight > 0 && right < pageRight * 0.85;
+
+      let current = ordered[0].text;
+      for (let j = 1; j < ordered.length; j++) {
+        if (gaps[j - 1] > gapThreshold || shortLine(ordered[j - 1].right)) {
+          paragraphs.push(current);
+          current = ordered[j].text;
+        } else {
+          current += ` ${ordered[j].text}`;
+        }
+      }
+      paragraphs.push(current);
+    }
+    return paragraphs;
+  } catch {
+    return [];
+  }
+}
+
 export type DocxStyle = {
   font?: string;
   fontSize?: number;

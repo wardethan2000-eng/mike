@@ -37,6 +37,8 @@ import { type EditInput } from "../../docxTrackedChanges";
 import {
   citationReminder,
   generateDocx,
+  docxBytesFromParagraphs,
+  extractPdfParagraphs,
   type DocxStyle,
   generateExcel,
   generatePpt,
@@ -1714,14 +1716,49 @@ export async function runToolCalls(
           let pdfBytes = sourcePdfPath
             ? await downloadFile(sourcePdfPath)
             : null;
-          if (!raw) {
+          // A PDF cannot be edited paragraph by paragraph, so a PDF
+          // precedent is copied as a fresh, fully editable .docx built from
+          // its text. The wording carries over; the layout is approximated
+          // (standard legal formatting), which the tool result says plainly.
+          let copyBytes = raw;
+          let copyFileType = (
+            active?.file_type ?? sourceInfo.file_type
+          ).toLowerCase();
+          let pdfApproximated = false;
+          let pdfNoText = false;
+          if (raw && copyFileType === "pdf") {
+            let lines: string[] = [];
+            try {
+              // pdfjs transfers (detaches) the buffer it is handed — give it
+              // a copy so the original bytes stay usable for the upload.
+              lines = await extractPdfParagraphs(raw.slice(0));
+            } catch {
+              lines = [];
+            }
+            if (lines.length === 0) {
+              // A scan with no text layer stays a byte-for-byte PDF copy —
+              // nothing to build a Word file from. The result says so.
+              pdfNoText = true;
+            } else {
+              const built = await docxBytesFromParagraphs(lines);
+              copyBytes = built.buffer.slice(
+                built.byteOffset,
+                built.byteOffset + built.byteLength,
+              ) as ArrayBuffer;
+              copyFileType = "docx";
+              pdfApproximated = true;
+              pdfBytes = null; // rendition of the new docx, not the old PDF
+            }
+          }
+
+          if (!raw || !copyBytes) {
             fail("Could not read the source document's bytes from storage.");
           } else {
-            if (!pdfBytes && sourceInfo.file_type.toLowerCase() === "pdf") {
-              pdfBytes = raw;
-            } else if (!pdfBytes && shouldConvertToPdf(sourceInfo.file_type)) {
+            if (!pdfBytes && copyFileType === "pdf") {
+              pdfBytes = copyBytes;
+            } else if (!pdfBytes && shouldConvertToPdf(copyFileType)) {
               try {
-                const converted = await docxToPdf(Buffer.from(raw));
+                const converted = await docxToPdf(Buffer.from(copyBytes));
                 pdfBytes = converted.buffer.slice(
                   converted.byteOffset,
                   converted.byteOffset + converted.byteLength,
@@ -1736,7 +1773,9 @@ export async function runToolCalls(
             // Build N filenames. With count=1 keep the
             // pre-existing "(copy)" suffix; with count>1 use
             // numbered "(1)", "(2)" suffixes.
-            const srcExt = sourceInfo.filename.match(/\.[^./\\]+$/)?.[0] ?? "";
+            const srcExt = pdfApproximated
+              ? ".docx"
+              : (sourceInfo.filename.match(/\.[^./\\]+$/)?.[0] ?? "");
             const baseStem = (() => {
               if (requestedFilename) {
                 return requestedFilename.replace(/\.[^./\\]+$/, "");
@@ -1763,9 +1802,7 @@ export async function runToolCalls(
               id: crypto.randomUUID(),
               filename: fn,
             }));
-            const contentType = contentTypeForDocumentType(
-              sourceInfo.file_type,
-            );
+            const contentType = contentTypeForDocumentType(copyFileType);
 
             // Parallel uploads: the doc bytes (and PDF
             // rendition if any) for every new copy.
@@ -1775,7 +1812,7 @@ export async function runToolCalls(
             for (const d of newDocs) {
               const key = storageKey(userId, d.id, d.filename);
               newKeys.push(key);
-              uploadJobs.push(uploadFile(key, raw, contentType));
+              uploadJobs.push(uploadFile(key, copyBytes, contentType));
               if (pdfBytes) {
                 const pdfKey = convertedPdfKey(userId, d.id);
                 newPdfKeys.push(pdfKey);
@@ -1823,13 +1860,16 @@ export async function runToolCalls(
                 source: "upload",
                 version_number: 1,
                 filename: d.filename,
-                file_type: active?.file_type ?? sourceInfo.file_type,
-                // From `raw`, not `active`, so size and hash always describe
-                // the same bytes. A verifier that stats a file before hashing
-                // it must not see a size that disagrees with content_sha256.
-                size_bytes: raw.byteLength,
-                page_count: active?.page_count ?? null,
-                content_sha256: contentSha256(raw),
+                file_type: copyFileType,
+                // From the copy's actual bytes, so size and hash always
+                // describe the same content. A verifier that stats a file
+                // before hashing it must not see a size that disagrees with
+                // content_sha256.
+                size_bytes: copyBytes.byteLength,
+                page_count: pdfApproximated
+                  ? null
+                  : (active?.page_count ?? null),
+                content_sha256: contentSha256(copyBytes),
               }));
               const { data: insertedVersions, error: verErr } = await db
                 .from("document_versions")
@@ -1936,7 +1976,7 @@ export async function runToolCalls(
                   };
                   docStore.set(slug, {
                     storage_path: newKey,
-                    file_type: sourceInfo.file_type,
+                    file_type: copyFileType,
                     filename: d.filename,
                     source_kind: "document",
                   });
@@ -1983,6 +2023,17 @@ export async function runToolCalls(
                         ? "project_documents"
                         : "library_files",
                       copies: toolPayloadCopies,
+                      ...(pdfApproximated
+                        ? {
+                            approximated_from_pdf: true,
+                            note: "The source is a PDF, so each copy is a fresh .docx built from its text: the wording carried over, but the PDF's layout (fonts, columns, letterhead art) did not. Use write_document to restyle it — add [centered]/[heading N] tokens, **bold** markers, page breaks and tables to match the original's look where it matters. Tell the user the copy's formatting is approximated.",
+                          }
+                        : {}),
+                      ...(pdfNoText
+                        ? {
+                            note: "This PDF has no extractable text (likely a scan without OCR), so the copy is a byte-for-byte PDF that cannot be edited. To adapt it, the user needs to OCR it first, or you can draft fresh with generate_docx.",
+                          }
+                        : {}),
                       // Copies that uploaded but could not be linked
                       // to their version are reported, not silently
                       // dropped from an ok:true result.

@@ -321,3 +321,56 @@ describe("redlineEditsForRewrite", () => {
         ).toEqual([]);
     });
 });
+
+describe("writeBlockToParagraph layout tokens", () => {
+    it("parses leading tokens off a string paragraph", () => {
+        const p = writeBlockToParagraph("[page break] [centered] EXHIBIT A");
+        expect(p.text).toBe("EXHIBIT A");
+        expect(p.align).toBe("center");
+        expect(p.pageBreak).toBe(true);
+        expect(p.heading).toBeUndefined();
+    });
+
+    it("lets the object form override a token", () => {
+        const p = writeBlockToParagraph({
+            text: "[centered] Title",
+            align: "right",
+        });
+        expect(p.text).toBe("Title");
+        expect(p.align).toBe("right");
+    });
+
+    it("leaves mid-line brackets alone", () => {
+        const p = writeBlockToParagraph("See section [centered] herein");
+        expect(p.text).toBe("See section [centered] herein");
+        expect(p.align).toBeUndefined();
+    });
+});
+
+describe("redlineEditsForRewrite with formatting and tables", () => {
+    it("carries markers into the replacement text", () => {
+        const edits = redlineEditsForRewrite(
+            ["Notice. Ten days."],
+            [writeBlockToParagraph("**Notice.** Thirty days.")],
+        );
+        expect(edits).toHaveLength(1);
+        expect(edits[0].replace).toBe("**Notice.** Thirty days.");
+    });
+});
+
+describe("docxBytesFromParagraphs", () => {
+    it("builds an editable document from plain paragraphs", async () => {
+        const { docxBytesFromParagraphs } = await import("../documentOps");
+        const bytes = await docxBytesFromParagraphs([
+            "MECHANIC'S LIEN",
+            "STATE OF KANSAS",
+            "The undersigned claims a lien.",
+        ]);
+        const { extractDocxBodyText } = await import(
+            "../../../docxTrackedChanges"
+        );
+        await expect(extractDocxBodyText(bytes)).resolves.toBe(
+            "MECHANIC'S LIEN\nSTATE OF KANSAS\nThe undersigned claims a lien.",
+        );
+    });
+});
