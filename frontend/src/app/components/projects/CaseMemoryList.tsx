@@ -24,6 +24,10 @@ import {
     type ProjectMemory,
 } from "@/app/lib/mikeApi";
 import type { Document } from "@/app/components/shared/types";
+import {
+    refreshOnReturn,
+    watchForNewSuggestions,
+} from "@/app/lib/suggestionWatch";
 
 /**
  * What this matter wants Mike to do about remembering.
@@ -83,12 +87,6 @@ const BODY_MAX_CHARS = 500;
 
 /** How long a "could not save" note stays up before it takes itself away. */
 const NOTICE_TIMEOUT_MS = 6000;
-
-/**
- * Suggestions are written after the answer has been sent, so a look straight
- * away would find nothing. Look again a moment later, and once more after that.
- */
-const SUGGESTION_CHECK_DELAYS_MS = [2500, 9000];
 
 /**
  * The first three describe the case itself and travel with every question, however
@@ -366,45 +364,71 @@ export function CaseMemoryList({
         );
     }, []);
 
-    // Once on opening, and again shortly after each answer. What Mike writes
-    // down is written after the answer has gone out, so looking straight away
-    // would find nothing — and on a matter set to keep suggestions without
-    // asking, the new fact lands in the list itself rather than in the
-    // suggestions, so both have to be looked at again.
+    // Once on opening, and then repeatedly for a minute or so after each
+    // answer. What Mike writes down is written after the answer has gone out,
+    // and how long that takes depends on the model, so a couple of fixed looks
+    // used to miss a slow one and leave it sitting there until the page was
+    // reloaded. On a matter set to keep suggestions without asking the new
+    // fact lands in the list itself rather than in the suggestions, so both
+    // have to be looked at again.
     useEffect(() => {
         let cancelled = false;
-        const load = () => {
+        // What the last look found, so a later one can tell whether anything
+        // has actually changed. Null until the first look has been made.
+        let lastFactCount: number | null = null;
+        let lastProposalCount: number | null = null;
+
+        const load = async (): Promise<boolean> => {
             // Asked for with their replaced wordings, in one request, so the
             // history of a fact that has changed is there to open up without
             // going back to the server for it.
-            listProjectMemories(projectId, { includeReplaced: true })
-                .then((loaded) => {
-                    if (cancelled) return;
-                    setMemories(loaded.filter((m) => !m.superseded_by));
-                    setReplaced(loaded.filter((m) => m.superseded_by));
-                })
-                .catch(() => {
-                    if (!cancelled) setMemories((prev) => prev ?? []);
-                });
-            listProjectMemories(projectId, { status: "proposed" })
-                .then((loaded) => {
-                    if (cancelled) return;
-                    setProposals(loaded);
-                    onPendingCountChange?.(loaded.length);
-                })
-                .catch(() => {
-                    // No suggestions to show is a perfectly good outcome.
-                });
+            const [all, proposed] = await Promise.all([
+                listProjectMemories(projectId, { includeReplaced: true }).catch(
+                    () => null,
+                ),
+                listProjectMemories(projectId, { status: "proposed" }).catch(
+                    () => null,
+                ),
+            ]);
+            if (cancelled) return false;
+            let changed = false;
+
+            if (all) {
+                const live = all.filter((m) => !m.superseded_by);
+                setMemories(live);
+                setReplaced(all.filter((m) => m.superseded_by));
+                if (lastFactCount !== null && live.length !== lastFactCount) {
+                    changed = true;
+                }
+                lastFactCount = live.length;
+            } else {
+                setMemories((prev) => prev ?? []);
+            }
+
+            if (proposed) {
+                setProposals(proposed);
+                onPendingCountChange?.(proposed.length);
+                if (
+                    lastProposalCount !== null &&
+                    proposed.length !== lastProposalCount
+                ) {
+                    changed = true;
+                }
+                lastProposalCount = proposed.length;
+            }
+
+            return changed;
         };
-        load();
-        const timers = refreshSignal
-            ? SUGGESTION_CHECK_DELAYS_MS.map((delay) =>
-                  window.setTimeout(load, delay),
-              )
-            : [];
+
+        void load();
+        const stopWatching = refreshSignal
+            ? watchForNewSuggestions(load)
+            : null;
+        const stopReturnRefresh = refreshOnReturn(() => void load());
         return () => {
             cancelled = true;
-            for (const timer of timers) window.clearTimeout(timer);
+            stopWatching?.();
+            stopReturnRefresh();
         };
     }, [projectId, refreshSignal]);
 

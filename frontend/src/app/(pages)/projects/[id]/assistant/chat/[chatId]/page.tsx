@@ -61,6 +61,10 @@ import { PaneHeader } from "@/app/components/projects/PaneHeader";
 import { CaseOverviewPanel } from "@/app/components/projects/CaseOverviewPanel";
 import type { SuggestionMode } from "@/app/components/projects/CaseMemoryList";
 import {
+    refreshOnReturn,
+    watchForNewSuggestions,
+} from "@/app/lib/suggestionWatch";
+import {
     PANE_LABELS,
     useProjectChatLayout,
     usePaneDrag,
@@ -292,24 +296,37 @@ export default function ProjectAssistantChatPage({ params }: Props) {
 
     useEffect(() => {
         let cancelled = false;
-        const count = () => {
-            listProjectMemories(projectId, { status: "proposed" })
-                .then((waiting) => {
-                    if (!cancelled) setPendingSuggestions(waiting.length);
-                })
-                .catch(() => {
-                    // Nothing to mark is the right answer when we cannot ask.
+        // What the last look found, so a later one can tell whether the number
+        // has moved. Null until the first look has been made.
+        let lastCount: number | null = null;
+        const count = async (): Promise<boolean> => {
+            try {
+                const waiting = await listProjectMemories(projectId, {
+                    status: "proposed",
                 });
+                if (cancelled) return false;
+                setPendingSuggestions(waiting.length);
+                const changed =
+                    lastCount !== null && waiting.length !== lastCount;
+                lastCount = waiting.length;
+                return changed;
+            } catch {
+                // Nothing to mark is the right answer when we cannot ask.
+                return false;
+            }
         };
-        count();
-        // Suggestions are written after the answer has gone out, so look again
-        // a moment later rather than at the instant it finishes.
-        const timers = answersFinished
-            ? [2500, 9000].map((delay) => window.setTimeout(count, delay))
-            : [];
+        void count();
+        // Suggestions are written after the answer has gone out, and how long
+        // that takes depends on the model, so keep looking until one turns up
+        // rather than giving up after a couple of tries.
+        const stopWatching = answersFinished
+            ? watchForNewSuggestions(count)
+            : null;
+        const stopReturnRefresh = refreshOnReturn(() => void count());
         return () => {
             cancelled = true;
-            for (const timer of timers) window.clearTimeout(timer);
+            stopWatching?.();
+            stopReturnRefresh();
         };
     }, [projectId, answersFinished]);
 
