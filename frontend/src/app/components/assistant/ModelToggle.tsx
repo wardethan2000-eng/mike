@@ -15,6 +15,7 @@ import {
 import { isModelAvailable } from "@/app/lib/modelAvailability";
 import type { ApiKeyState } from "@/app/lib/mikeApi";
 import { useOllamaModels } from "@/app/hooks/useOllamaModels";
+import { useUserProfile } from "@/app/contexts/UserProfileContext";
 
 export interface ModelOption {
     id: string;
@@ -63,7 +64,14 @@ interface Props {
 export function ModelToggle({ value, onChange, apiKeys }: Props) {
     const [isOpen, setIsOpen] = useState(false);
     const ollamaModels = useOllamaModels();
-    const models = [...MODELS, ...ollamaModels];
+    const { profile } = useUserProfile();
+    // A firm can narrow the list of models. When it has, only those are
+    // offered — the one already picked stays visible so the label is never
+    // blank, but the server refuses it either way.
+    const allowed = profile?.allowedModels ?? null;
+    const models = [...MODELS, ...ollamaModels].filter(
+        (model) => !allowed || allowed.includes(model.id) || model.id === value,
+    );
     const selected = models.find((m) => m.id === value);
     const selectedLabel = selected?.label ?? "Model";
     const selectedAvailable = apiKeys

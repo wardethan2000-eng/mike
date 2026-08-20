@@ -16,7 +16,7 @@ export function ApiKeyField({
     description,
     placeholder,
     hasSavedKey,
-    isServerConfigured,
+    keySource,
     onSave,
     onRemove,
 }: {
@@ -24,7 +24,8 @@ export function ApiKeyField({
     description?: string;
     placeholder: string;
     hasSavedKey: boolean;
-    isServerConfigured: boolean;
+    /** Where the key being used right now comes from. */
+    keySource: "user" | "firm" | "env" | null;
     onSave: (value: string) => Promise<boolean>;
     onRemove: () => Promise<boolean>;
 }) {
@@ -114,22 +115,18 @@ export function ApiKeyField({
                             value={value}
                             onChange={(event) => setValue(event.target.value)}
                             placeholder={
-                                isServerConfigured
-                                    ? "Server .env key configured"
-                                    : hasSavedKey
-                                      ? "Saved key hidden"
-                                      : placeholder
+                                keySource === "user"
+                                    ? "Your key is saved and hidden"
+                                    : placeholder
                             }
                             className="pr-10"
                             autoComplete="off"
                             spellCheck={false}
-                            disabled={isServerConfigured}
                         />
                         {dirty && (
                             <button
                                 type="button"
                                 onClick={() => setReveal((current) => !current)}
-                                disabled={isServerConfigured}
                                 className={`absolute inset-y-1 right-1.5 flex items-center ${settingsGlassIconButtonClassName}`}
                                 aria-label={reveal ? "Hide key" : "Show key"}
                             >
@@ -145,12 +142,7 @@ export function ApiKeyField({
                         <button
                             type="button"
                             onClick={handleSave}
-                            disabled={
-                                isServerConfigured ||
-                                isSaving ||
-                                !dirty ||
-                                saved
-                            }
+                            disabled={isSaving || !dirty || saved}
                             className="text-xs font-medium text-gray-700 transition-colors hover:text-gray-950 disabled:cursor-not-allowed disabled:text-gray-400"
                         >
                             {isSaving ? (
@@ -161,7 +153,7 @@ export function ApiKeyField({
                                 "Save"
                             )}
                         </button>
-                        {hasSavedKey && !isServerConfigured && (
+                        {keySource === "user" && (
                             <button
                                 type="button"
                                 onClick={handleRemove}
@@ -172,6 +164,13 @@ export function ApiKeyField({
                             </button>
                         )}
                     </div>
+                    {keySource && keySource !== "user" && (
+                        <p className="text-xs text-gray-500">
+                            {keySource === "firm"
+                                ? "Your firm has an account here, so this already works. Add your own key only if you want yours used instead."
+                                : "This server has a key of its own, so this already works. Add your own key only if you want yours used instead."}
+                        </p>
+                    )}
                 </div>
             </div>
             <MfaVerificationPopup

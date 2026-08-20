@@ -5,6 +5,7 @@ import { createServerSupabase } from "../lib/supabase";
 import { recordAudit } from "../lib/audit";
 import { getUiPreferences, saveUiPreferences } from "../lib/uiPreferences";
 import { getFirm, getMembership } from "../lib/firm";
+import { normalizeAllowedModels } from "../lib/allowedModels";
 import {
     loadProfessionalDetails,
     normalizeBarAdmissions,
@@ -21,7 +22,6 @@ import {
 import {
     type ApiKeyStatus,
     getUserApiKeyStatus,
-    hasEnvApiKey,
     normalizeApiKeyProvider,
     saveUserApiKey,
 } from "../lib/userApiKeys";
@@ -667,6 +667,9 @@ async function loadProfile(
             firm_role: membership?.role ?? null,
             firm_status: membership?.status ?? null,
             can_edit_firm_library: membership?.canEditFirmLibrary ?? false,
+            // Null means the firm has not narrowed the list, so every model
+            // stays on offer. A list means only those.
+            allowed_models: normalizeAllowedModels(firm?.allowed_models),
         },
         error: null,
     };
@@ -839,11 +842,10 @@ userRouter.put(
             typeof req.body?.api_key === "string" ? req.body.api_key : null;
         const db = createServerSupabase();
         try {
-            if (hasEnvApiKey(provider)) {
-                return void res.status(409).json({
-                    detail: "This provider is configured by the server environment and cannot be changed from the browser.",
-                });
-            }
+            // Somebody's own key used to be refused whenever the server had
+            // one of its own, because the server's would have won anyway.
+            // Now a person's own key comes first, so there is a point to
+            // setting one and it is accepted.
             await saveUserApiKey(userId, provider, apiKey, db);
             const status = await getUserApiKeyStatus(userId, db);
             res.json(status);

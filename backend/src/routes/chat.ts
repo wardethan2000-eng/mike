@@ -3,6 +3,11 @@ import { randomUUID } from "node:crypto";
 import { requireAuth } from "../middleware/auth";
 import { createServerSupabase } from "../lib/supabase";
 import { whoIsAskingSection } from "../lib/draftingContext";
+import {
+    allowedModelsForFirm,
+    isModelAllowed,
+    MODEL_NOT_ALLOWED_DETAIL,
+} from "../lib/allowedModels";
 import { recordChatTurn } from "../lib/audit";
 import {
     buildDocContext,
@@ -422,6 +427,13 @@ chatRouter.post("/", requireAuth, async (req, res) => {
 
     const userEmail = res.locals.userEmail as string | undefined;
     const db = createServerSupabase();
+
+    // The firm may have named a shortlist of models. It applies to everybody,
+    // and to a request sent straight at the API as much as to the picker.
+    if (!isModelAllowed(model, await allowedModelsForFirm(db))) {
+        return void res.status(403).json({ detail: MODEL_NOT_ALLOWED_DETAIL });
+    }
+
     let chatId = chat_id ?? null;
     let chatTitle: string | null = null;
     let resolvedProjectId: string | null = parsedProjectId.value.projectId;

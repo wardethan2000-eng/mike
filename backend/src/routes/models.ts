@@ -1,6 +1,11 @@
 import { Router } from "express";
 import { requireAuth } from "../middleware/auth";
 import { authHeaders } from "../lib/llm/ollama";
+import { createServerSupabase } from "../lib/supabase";
+import {
+    allowedModelsForFirm,
+    filterAllowedModels,
+} from "../lib/allowedModels";
 
 export const modelsRouter = Router();
 
@@ -19,7 +24,9 @@ modelsRouter.get("/ollama", requireAuth, async (_req, res) => {
             label: `${m.id} (local)`,
             group: "Local",
         }));
-        res.json({ models });
+        // A firm that has named a shortlist should not be offered the rest.
+        const allowed = await allowedModelsForFirm(createServerSupabase());
+        res.json({ models: filterAllowedModels(models, allowed) });
     } catch {
         res.json({ models: [] });
     }

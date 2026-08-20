@@ -4,6 +4,11 @@ import { requireAuth } from "../middleware/auth";
 import { createServerSupabase } from "../lib/supabase";
 import { whoIsAskingSection } from "../lib/draftingContext";
 import {
+    allowedModelsForFirm,
+    isModelAllowed,
+    MODEL_NOT_ALLOWED_DETAIL,
+} from "../lib/allowedModels";
+import {
   AssistantStreamError,
   ACTIVE_WORD_DOCUMENT_FILENAME,
   ACTIVE_WORD_DOCUMENT_LABEL,
@@ -279,6 +284,13 @@ wordChatRouter.post("/", requireAuth, async (req, res) => {
   const clientDocumentId = parsedDocumentId.value;
   const persistChat = parsedStorage.value === "cloud";
   const db = createServerSupabase();
+
+  // The firm may have named a shortlist of models. It applies to everybody,
+  // and to a request sent straight at the API as much as to the picker.
+  if (!isModelAllowed(model, await allowedModelsForFirm(db))) {
+    return void res.status(403).json({ detail: MODEL_NOT_ALLOWED_DETAIL });
+  }
+
   let chatId = parsedChatId.value;
   let chatTitle: string | null = null;
   let wordDocumentRowId: string | null = null;

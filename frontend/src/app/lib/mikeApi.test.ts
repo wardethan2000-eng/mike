@@ -114,7 +114,11 @@ import {
     saveApiKey,
     bulkDeleteLibraryDocuments,
     searchProjectDirectory,
+    getFirmApiKeys,
+    getFirmAudit,
+    getFirmUsage,
     publishDocumentToFirm,
+    saveFirmApiKey,
     publishWorkflowToFirm,
     searchLibraryDocuments,
     setMcpToolEnabled,
@@ -1450,6 +1454,55 @@ describe("reading the firm's shelves instead of your own", () => {
             library_kind: "template",
             folder_id: null,
         });
+    });
+
+    it("asks which providers the firm holds an account with", async () => {
+        fetchMock.mockResolvedValue(jsonResponse([]));
+
+        await getFirmApiKeys();
+
+        expect(lastFetchCall().url).toBe(
+            "http://localhost:3001/admin/api-keys",
+        );
+    });
+
+    it("saves the firm's key without putting it in the address", async () => {
+        fetchMock.mockResolvedValue(jsonResponse({ ok: true }));
+
+        await saveFirmApiKey("openai", "sk-secret");
+
+        const { url, init } = lastFetchCall();
+        expect(url).toBe("http://localhost:3001/admin/api-keys/openai");
+        expect(url).not.toContain("sk-secret");
+        expect(init.method).toBe("PUT");
+        expect(JSON.parse(init.body as string)).toEqual({ key: "sk-secret" });
+    });
+
+    it("passes the history filters through", async () => {
+        fetchMock.mockResolvedValue(jsonResponse({ events: [], hasMore: false }));
+
+        await getFirmAudit({
+            userId: "u9",
+            action: "chat.message",
+            from: "2026-08-01T00:00:00.000Z",
+            limit: 50,
+        });
+
+        const url = lastFetchCall().url;
+        expect(url).toContain("user_id=u9");
+        expect(url).toContain("action=chat.message");
+        expect(url).toContain("limit=50");
+        expect(url).not.toContain("project_id");
+    });
+
+    it("asks for one month of usage", async () => {
+        fetchMock.mockResolvedValue(jsonResponse({ month: "2026-08", people: [] }));
+
+        await getFirmUsage("2026-08");
+
+        expect(lastFetchCall().url).toBe(
+            "http://localhost:3001/admin/usage?month=2026-08",
+        );
     });
 
     it("publishes a workflow to the firm", async () => {

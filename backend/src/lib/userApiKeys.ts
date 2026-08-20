@@ -1,5 +1,6 @@
 import crypto from "crypto";
 import { createServerSupabase } from "./supabase";
+import { getActiveFirmId } from "./firm";
 import type { UserApiKeys } from "./llm";
 
 type Db = ReturnType<typeof createServerSupabase>;
@@ -9,7 +10,7 @@ export type ApiKeyProvider =
     | "openai"
     | "openrouter"
     | "courtlistener";
-export type ApiKeySource = "user" | "env" | null;
+export type ApiKeySource = "user" | "firm" | "env" | null;
 export type ApiKeyStatus = Record<ApiKeyProvider, boolean> & {
     sources: Record<ApiKeyProvider, ApiKeySource>;
 };
@@ -106,6 +107,87 @@ export function normalizeApiKeyProvider(value: string): ApiKeyProvider | null {
     return isProvider(value) ? value : null;
 }
 
+export const API_KEY_PROVIDERS: readonly ApiKeyProvider[] = PROVIDERS;
+
+/**
+ * The firm's own keys, decrypted.
+ *
+ * Kept next to the personal ones because they are the same secret, the same
+ * method and the same table shape — splitting them into two modules would mean
+ * two copies of the encryption to keep in step.
+ */
+async function firmApiKeyRows(
+    firmId: string,
+    db: Db,
+): Promise<Partial<Record<ApiKeyProvider, string>>> {
+    const out: Partial<Record<ApiKeyProvider, string>> = {};
+    try {
+        const { data, error } = await db
+            .from("firm_api_keys")
+            .select("provider, encrypted_key, iv, auth_tag")
+            .eq("firm_id", firmId);
+        if (error || !data) return out;
+        for (const row of data as EncryptedKeyRow[]) {
+            const provider = normalizeApiKeyProvider(row.provider);
+            if (!provider) continue;
+            const value = decrypt(row);
+            if (value) out[provider] = value;
+        }
+    } catch {
+        // A firm without the table yet simply has no keys.
+    }
+    return out;
+}
+
+/** Which providers the firm holds an account for. Never the key itself. */
+export async function getFirmApiKeyProviders(
+    firmId: string,
+    db: Db = createServerSupabase(),
+): Promise<ApiKeyProvider[]> {
+    try {
+        const { data, error } = await db
+            .from("firm_api_keys")
+            .select("provider")
+            .eq("firm_id", firmId);
+        if (error || !data) return [];
+        return (data as { provider: string }[])
+            .map((row) => normalizeApiKeyProvider(String(row.provider)))
+            .filter((provider): provider is ApiKeyProvider => !!provider);
+    } catch {
+        return [];
+    }
+}
+
+export async function saveFirmApiKey(
+    firmId: string,
+    provider: ApiKeyProvider,
+    value: string | null,
+    createdBy: string | null,
+    db: Db = createServerSupabase(),
+): Promise<void> {
+    const normalized = value?.trim() || null;
+    if (!normalized) {
+        const { error } = await db
+            .from("firm_api_keys")
+            .delete()
+            .eq("firm_id", firmId)
+            .eq("provider", provider);
+        if (error) throw error;
+        return;
+    }
+    const { error } = await db.from("firm_api_keys").upsert(
+        {
+            firm_id: firmId,
+            provider,
+            created_by: createdBy,
+            ...encrypt(normalized),
+            updated_at: new Date().toISOString(),
+        },
+        { onConflict: "firm_id,provider" },
+    );
+    if (error) throw error;
+}
+
 export async function getUserApiKeyStatus(
     userId: string,
     db: Db = createServerSupabase(),
@@ -125,13 +207,6 @@ export async function getUserApiKeyStatus(
         },
     };
 
-    for (const provider of PROVIDERS) {
-        if (hasEnvApiKey(provider)) {
-            status[provider] = true;
-            status.sources[provider] = "env";
-        }
-    }
-
     const { data, error } = await db
         .from("user_api_keys")
         .select("provider")
@@ -140,25 +215,49 @@ export async function getUserApiKeyStatus(
 
     for (const row of data ?? []) {
         const provider = normalizeApiKeyProvider(String(row.provider));
-        if (provider && !status[provider]) {
+        if (provider) {
             status[provider] = true;
             status.sources[provider] = "user";
+        }
+    }
+
+    const firmId = await getActiveFirmId(db, userId);
+    if (firmId) {
+        for (const provider of await getFirmApiKeyProviders(firmId, db)) {
+            if (!status[provider]) {
+                status[provider] = true;
+                status.sources[provider] = "firm";
+            }
+        }
+    }
+
+    for (const provider of PROVIDERS) {
+        if (!status[provider] && hasEnvApiKey(provider)) {
+            status[provider] = true;
+            status.sources[provider] = "env";
         }
     }
 
     return status;
 }
 
+/**
+ * The keys to use for this person, in order: their own, then the firm's, then
+ * whatever the server was started with.
+ *
+ * Your own key winning is the change Phase 4 made; before the firm had keys,
+ * the server's own setting won and a key you pasted in was quietly ignored.
+ */
 export async function getUserApiKeys(
     userId: string,
     db: Db = createServerSupabase(),
 ): Promise<UserApiKeys> {
     const apiKeys: UserApiKeys = {
-        claude: envApiKey("claude"),
-        gemini: envApiKey("gemini"),
-        openai: envApiKey("openai"),
-        openrouter: envApiKey("openrouter"),
-        courtlistener: envApiKey("courtlistener"),
+        claude: null,
+        gemini: null,
+        openai: null,
+        openrouter: null,
+        courtlistener: null,
     };
 
     const { data, error } = await db
@@ -170,8 +269,23 @@ export async function getUserApiKeys(
     for (const row of (data ?? []) as EncryptedKeyRow[]) {
         const provider = normalizeApiKeyProvider(row.provider);
         if (!provider) continue;
-        if (apiKeys[provider]?.trim()) continue;
         apiKeys[provider] = decrypt(row);
+    }
+
+    const firmId = await getActiveFirmId(db, userId);
+    if (firmId) {
+        const firmKeys = await firmApiKeyRows(firmId, db);
+        for (const provider of PROVIDERS) {
+            if (!apiKeys[provider]?.trim() && firmKeys[provider]) {
+                apiKeys[provider] = firmKeys[provider]!;
+            }
+        }
+    }
+
+    for (const provider of PROVIDERS) {
+        if (!apiKeys[provider]?.trim()) {
+            apiKeys[provider] = envApiKey(provider);
+        }
     }
 
     return apiKeys;

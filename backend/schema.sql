@@ -2271,17 +2271,38 @@ create table if not exists public.audit_events (
   model text,
   detail jsonb
 );
+-- The firm's own accounts with the AI providers, so nobody has to paste their
+-- own key in to get started. Encrypted with the same secret and the same
+-- method as each person's own keys, and never handed back out.
+create table if not exists public.firm_api_keys (
+  id uuid primary key default gen_random_uuid(),
+  firm_id uuid not null references public.firms(id) on delete cascade,
+  provider text not null,
+  encrypted_key text not null,
+  iv text not null,
+  auth_tag text not null,
+  created_by uuid references auth.users(id) on delete set null,
+  created_at timestamptz not null default now(),
+  updated_at timestamptz not null default now(),
+  unique (firm_id, provider)
+);
+
+create index if not exists firm_api_keys_firm_idx
+  on public.firm_api_keys(firm_id);
+
 create index if not exists audit_events_user_created on public.audit_events (user_id, created_at desc);
 create index if not exists audit_events_project_created on public.audit_events (project_id, created_at desc);
 alter table public.audit_events enable row level security;
 alter table public.firms enable row level security;
 alter table public.firm_members enable row level security;
 alter table public.firm_invites enable row level security;
+alter table public.firm_api_keys enable row level security;
 
 revoke all on public.user_profiles from anon, authenticated;
 revoke all on public.firms from anon, authenticated;
 revoke all on public.firm_members from anon, authenticated;
 revoke all on public.firm_invites from anon, authenticated;
+revoke all on public.firm_api_keys from anon, authenticated;
 revoke all on public.projects from anon, authenticated;
 revoke all on public.project_subfolders from anon, authenticated;
 revoke all on public.library_folders from anon, authenticated;

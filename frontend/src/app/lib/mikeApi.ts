@@ -460,6 +460,8 @@ export interface UserProfile {
     firm_role: "admin" | "attorney" | "paralegal" | null;
     firm_status: "active" | "deactivated" | null;
     can_edit_firm_library: boolean;
+    /** The models the firm allows. Null means all of them. */
+    allowed_models: string[] | null;
 }
 
 /** Where an attorney is admitted to practise, and under what number. */
@@ -580,6 +582,8 @@ export interface Firm {
     /** Sent quietly with every chat anyone at the firm has. */
     standing_instructions: string | null;
     drafting_defaults: FirmDraftingDefaults | null;
+    /** The models the firm allows. Null means all of them. */
+    allowed_models: string[] | null;
 }
 
 /** One of the workflows the firm has published for everyone to run. */
@@ -641,12 +645,95 @@ export async function updateFirm(updates: {
     citation_style?: string | null;
     standing_instructions?: string | null;
     drafting_defaults?: FirmDraftingDefaults | null;
+    allowed_models?: string[] | null;
 }): Promise<Firm> {
     return apiRequest<Firm>("/admin/firm", {
         method: "PATCH",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(updates),
     });
+}
+
+/** Which providers the firm holds an account with. Never the key itself. */
+export interface FirmApiKeyStatus {
+    provider: string;
+    firm_key_set: boolean;
+    server_key_set: boolean;
+}
+
+export async function getFirmApiKeys(): Promise<FirmApiKeyStatus[]> {
+    return apiRequest<FirmApiKeyStatus[]>("/admin/api-keys");
+}
+
+export async function saveFirmApiKey(
+    provider: string,
+    key: string,
+): Promise<{ ok: boolean }> {
+    return apiRequest(`/admin/api-keys/${provider}`, {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ key }),
+    });
+}
+
+export async function removeFirmApiKey(provider: string): Promise<void> {
+    await apiRequest(`/admin/api-keys/${provider}`, { method: "DELETE" });
+}
+
+/** One thing somebody did, as the history records it. */
+export interface AuditEvent {
+    id: string;
+    created_at: string;
+    user_id: string;
+    user_email: string | null;
+    action: string;
+    status: string;
+    title: string | null;
+    surface: string | null;
+    project_id: string | null;
+    chat_id: string | null;
+    document_id: string | null;
+    model: string | null;
+}
+
+export async function getFirmAudit(options: {
+    userId?: string | null;
+    action?: string | null;
+    projectId?: string | null;
+    from?: string | null;
+    to?: string | null;
+    limit?: number;
+    offset?: number;
+}): Promise<{ events: AuditEvent[]; hasMore: boolean }> {
+    const params = new URLSearchParams();
+    if (options.userId) params.set("user_id", options.userId);
+    if (options.action) params.set("action", options.action);
+    if (options.projectId) params.set("project_id", options.projectId);
+    if (options.from) params.set("from", options.from);
+    if (options.to) params.set("to", options.to);
+    if (options.limit != null) params.set("limit", String(options.limit));
+    if (options.offset != null) params.set("offset", String(options.offset));
+    const query = params.toString();
+    return apiRequest(`/admin/audit${query ? `?${query}` : ""}`);
+}
+
+export async function getFirmAuditActions(): Promise<{ actions: string[] }> {
+    return apiRequest("/admin/audit/actions");
+}
+
+/** How much each person used Mike in one month. */
+export interface FirmUsagePerson {
+    user_id: string;
+    email: string;
+    display_name: string | null;
+    messages: number;
+    by_model: { model: string; count: number }[];
+}
+
+export async function getFirmUsage(
+    month?: string,
+): Promise<{ month: string; people: FirmUsagePerson[] }> {
+    return apiRequest(`/admin/usage${month ? `?month=${month}` : ""}`);
 }
 
 export async function getFirmWorkflows(): Promise<FirmWorkflow[]> {
@@ -830,7 +917,7 @@ export async function updateUserMfaOnLogin(
 
 export type ApiKeyProvider =
     "claude" | "gemini" | "openai" | "openrouter" | "courtlistener";
-export type ApiKeySource = "user" | "env" | null;
+export type ApiKeySource = "user" | "firm" | "env" | null;
 export type ApiKeyState = Record<
     ApiKeyProvider,
     {

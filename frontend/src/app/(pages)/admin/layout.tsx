@@ -17,6 +17,9 @@ const TABS: TabDef[] = [
     { id: "people", label: "People", href: "/admin" },
     { id: "firm", label: "Firm", href: "/admin/firm" },
     { id: "content", label: "Content", href: "/admin/content" },
+    { id: "ai", label: "AI", href: "/admin/ai" },
+    { id: "audit", label: "History", href: "/admin/audit" },
+    { id: "usage", label: "Usage", href: "/admin/usage" },
 ];
 
 export default function AdminLayout({

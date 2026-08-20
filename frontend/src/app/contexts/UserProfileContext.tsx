@@ -44,6 +44,8 @@ interface UserProfile {
     firm: { id: string; name: string } | null;
     firmRole: "admin" | "attorney" | "paralegal" | null;
     canEditFirmLibrary: boolean;
+    /** The models the firm allows, or null when it allows all of them. */
+    allowedModels: string[] | null;
 }
 
 interface UserProfileContextType {
@@ -108,8 +110,14 @@ function toProfile(data: ApiUserProfile): UserProfile {
         };
     }
 
-    const { firm, firm_role, can_edit_firm_library, firm_status, ...rest } =
-        profile;
+    const {
+        firm,
+        firm_role,
+        can_edit_firm_library,
+        firm_status,
+        allowed_models,
+        ...rest
+    } = profile;
     void firm_status;
 
     return {
@@ -119,6 +127,7 @@ function toProfile(data: ApiUserProfile): UserProfile {
         firm: firm ?? null,
         firmRole: firm_role ?? null,
         canEditFirmLibrary: can_edit_firm_library === true,
+        allowedModels: Array.isArray(allowed_models) ? allowed_models : null,
     };
 }
 
@@ -159,6 +168,7 @@ export function UserProfileProvider({ children }: { children: ReactNode }) {
                 firm: null,
                 firmRole: null,
                 canEditFirmLibrary: false,
+                allowedModels: null,
             });
         } finally {
             setLoading(false);

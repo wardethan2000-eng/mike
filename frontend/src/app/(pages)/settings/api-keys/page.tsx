@@ -38,9 +38,10 @@ export default function ApiKeysPage() {
                 </h2>
             </div>
             <p className="text-sm text-gray-500 mb-4">
-                You must provide your own API keys for the app to work or add
-                your API keys into the .env file if you are running your own
-                instance of Mike. All API keys are encrypted in storage.
+                A key you add here is yours and is used before anything else.
+                If your firm has an account with a provider, or this server was
+                set up with one, that is used instead and you do not need to add
+                anything. Every key is encrypted where it is stored.
             </p>
             <SettingsSection>
                 {MODEL_API_KEY_FIELDS.map((field) => (
@@ -51,9 +52,8 @@ export default function ApiKeysPage() {
                             hasSavedKey={
                                 !!profile?.apiKeys[field.provider].configured
                             }
-                            isServerConfigured={
-                                profile?.apiKeys[field.provider].source ===
-                                "env"
+                            keySource={
+                                profile?.apiKeys[field.provider].source ?? null
                             }
                             onSave={(value) =>
                                 updateApiKey(

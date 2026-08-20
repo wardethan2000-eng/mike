@@ -338,7 +338,9 @@ describe("user.routes", () => {
             expect(saveUserApiKey).not.toHaveBeenCalled();
         });
 
-        it("returns 409 when the provider is configured by the server env", async () => {
+        it("saves your own key even when the server has one of its own", async () => {
+            // Your own key now comes first, so setting one has a point. It
+            // used to be refused, because the server's would have won anyway.
             hasEnvApiKey.mockReturnValue(true);
 
             const res = await request(app)
@@ -346,8 +348,8 @@ describe("user.routes", () => {
                 .set(...AUTH)
                 .send({ api_key: "sk-x" });
 
-            expect(res.status).toBe(409);
-            expect(saveUserApiKey).not.toHaveBeenCalled();
+            expect(res.status).toBe(200);
+            expect(saveUserApiKey).toHaveBeenCalled();
         });
 
         it("returns 500 when saving the key throws", async () => {

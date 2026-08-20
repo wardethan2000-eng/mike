@@ -616,6 +616,49 @@ Semantics: `firm_id null` = personal (today's behavior, untouched);
 
 ## 6. Phase 4 — Oversight (audit viewer, usage, firm keys, model controls)
 
+> **STATUS: BUILT AND DEPLOYED 2026-08-20.** What actually shipped, and where
+> it differs from the plan below:
+>
+> - **Migration** `20260820_06_firm_keys.sql`, applied live: the `firm_api_keys`
+>   table. It carries `iv` and `auth_tag` as well as `encrypted_key` — the
+>   plan's sketch left those out, but the encryption personal keys already use
+>   needs all three, and reusing it exactly was the point.
+> - **Key order is now your own, then the firm's, then the server's.** That
+>   reverses the old behaviour, where the server's own setting won and a key
+>   you had pasted in was quietly ignored. Two consequences: the personal key
+>   field in Settings is no longer disabled when the server has a key (it used
+>   to be, and the route refused the save with a 409), and it now says in plain
+>   words where the key in use is coming from.
+> - **A stored key is never handed back**, not to the administrator who set it
+>   and not to anyone else. `/admin/api-keys` only says which providers the firm
+>   holds an account with, and whether the server has one as a backstop.
+> - **The model shortlist** lives on `firms.allowed_models`, edited on the new
+>   AI tab. Empty means all of them — an empty list is deliberately stored as
+>   "no shortlist" rather than "nothing allowed", because clearing the box never
+>   means locking everybody out. It is enforced in three places at once: the
+>   picker, the settings screens, and — the one that matters — inside all three
+>   chat routes, so a request sent straight at the API is refused with a 403 the
+>   same as a click is. Administrators get no exemption.
+> - **Enforcement sits after validation, not before.** The first attempt put the
+>   check straight after the model was parsed, which made four existing tests
+>   fail: they assert a malformed request is refused before anything touches the
+>   database. The guard now runs where each route already opens the database.
+> - **Usage is counted from the history, not from the messages table**, because
+>   the messages table does not record which model answered and the history
+>   does — one row per message sent, with the model on it.
+> - **Screens**: Administration gained **AI** (firm keys, model shortlist),
+>   **History** (filterable by person, what happened, and date range) and
+>   **Usage** (month by month, per person, broken down by model).
+> - **Verified**: backend 864 passing, frontend 369, plus `/tmp/smoke4.sh` on
+>   VM 133 — 39 checks against the live server covering the admin gate, the key
+>   never coming back out, the personal-over-firm-over-server order, the
+>   shortlist refusing a model at the chat for an administrator as well as an
+>   attorney, the history filters, and the usage figures.
+> - **Not checked end to end**: acceptance item 1 wants the server's own key
+>   removed for a provider and replaced by a firm key, with chats still working.
+>   The order is unit-tested and the reported source is checked live, but a real
+>   chat driven by a real firm key was not run — that needs a spare paid key.
+
 ### 6.1 Migration `<date>_01_firm_keys.sql`
 
 ```sql

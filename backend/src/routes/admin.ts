@@ -21,7 +21,16 @@ import {
     isFirmMemberStatus,
     type FirmMembership,
 } from "../lib/firm";
+import { normalizeAllowedModels } from "../lib/allowedModels";
 import { normalizeDraftingDefaults } from "../lib/draftingContext";
+import { parsePaginationQuery } from "../lib/pagination";
+import {
+    API_KEY_PROVIDERS,
+    getFirmApiKeyProviders,
+    hasEnvApiKey,
+    normalizeApiKeyProvider,
+    saveFirmApiKey,
+} from "../lib/userApiKeys";
 import { safeErrorLog } from "../lib/safeError";
 
 export const adminRouter = Router();
@@ -139,6 +148,15 @@ adminRouter.patch("/firm", async (req, res) => {
                 ? cleaned
                 : null;
         }
+    }
+    if ("allowed_models" in req.body) {
+        const raw = req.body.allowed_models;
+        if (raw !== null && !Array.isArray(raw)) {
+            return void res
+                .status(400)
+                .json({ detail: "That list of models is not usable." });
+        }
+        updates.allowed_models = normalizeAllowedModels(raw);
     }
     if (Object.keys(updates).length === 0) {
         return void res.status(400).json({ detail: "Nothing to change." });
@@ -585,4 +603,260 @@ adminRouter.delete("/workflows/:workflowId", async (req, res) => {
         detail: { workflow_id: req.params.workflowId },
     });
     res.status(204).send();
+});
+
+// ---------------------------------------------------------------------------
+// The firm's accounts with the AI providers
+// ---------------------------------------------------------------------------
+//
+// A stored key is never handed back out, not even to the administrator who set
+// it. All these routes say is which providers the firm holds an account for,
+// and where each person's key is coming from.
+
+adminRouter.get("/api-keys", async (_req, res) => {
+    const db = createServerSupabase();
+    const firmId = membership(res).firmId;
+    const held = new Set(await getFirmApiKeyProviders(firmId, db));
+    res.json(
+        API_KEY_PROVIDERS.map((provider) => ({
+            provider,
+            firm_key_set: held.has(provider),
+            // Without a firm key, the server's own setting is what everybody
+            // falls back on — worth showing so a blank row is not alarming.
+            server_key_set: hasEnvApiKey(provider),
+        })),
+    );
+});
+
+adminRouter.put("/api-keys/:provider", async (req, res) => {
+    const provider = normalizeApiKeyProvider(String(req.params.provider));
+    if (!provider) {
+        return void res.status(404).json({ detail: "No such provider." });
+    }
+    const value = trimmedOrNull(req.body?.key);
+    if (!value) {
+        return void res.status(400).json({ detail: "Paste the key first." });
+    }
+
+    const db = createServerSupabase();
+    try {
+        await saveFirmApiKey(
+            membership(res).firmId,
+            provider,
+            value,
+            res.locals.userId as string,
+            db,
+        );
+    } catch (error) {
+        console.error("[admin/api-keys] save failed", safeErrorLog(error));
+        return void res.status(500).json({ detail: "That key did not save." });
+    }
+
+    await recordAudit(db, {
+        userId: res.locals.userId as string,
+        userEmail: res.locals.userEmail as string,
+        action: "admin_firm_key_set",
+        surface: "admin",
+        title: `Set the firm's ${provider} key`,
+        detail: { provider },
+    });
+    res.json({ ok: true });
+});
+
+adminRouter.delete("/api-keys/:provider", async (req, res) => {
+    const provider = normalizeApiKeyProvider(String(req.params.provider));
+    if (!provider) {
+        return void res.status(404).json({ detail: "No such provider." });
+    }
+    const db = createServerSupabase();
+    try {
+        await saveFirmApiKey(
+            membership(res).firmId,
+            provider,
+            null,
+            res.locals.userId as string,
+            db,
+        );
+    } catch (error) {
+        console.error("[admin/api-keys] remove failed", safeErrorLog(error));
+        return void res
+            .status(500)
+            .json({ detail: "That key could not be removed." });
+    }
+
+    await recordAudit(db, {
+        userId: res.locals.userId as string,
+        userEmail: res.locals.userEmail as string,
+        action: "admin_firm_key_remove",
+        surface: "admin",
+        title: `Removed the firm's ${provider} key`,
+        detail: { provider },
+    });
+    res.status(204).send();
+});
+
+// ---------------------------------------------------------------------------
+// What people have been doing
+// ---------------------------------------------------------------------------
+
+/** Read-only history across everybody at the firm, newest first. */
+adminRouter.get("/audit", async (req, res) => {
+    const db = createServerSupabase();
+    const pagination = parsePaginationQuery(req.query as Record<string, unknown>);
+
+    // Only people at this firm — the history is not a way around the firm
+    // boundary if a second firm ever exists.
+    const { data: members } = await db
+        .from("firm_members")
+        .select("user_id")
+        .eq("firm_id", membership(res).firmId);
+    const memberIds = (members ?? []).map(
+        (row) => (row as { user_id: string }).user_id,
+    );
+    if (memberIds.length === 0) {
+        return void res.json({ events: [], hasMore: false });
+    }
+
+    let query = db
+        .from("audit_events")
+        .select(
+            "id, created_at, user_id, user_email, action, status, title, surface, project_id, chat_id, document_id, model",
+        )
+        .in("user_id", memberIds);
+
+    const person = typeof req.query.user_id === "string" ? req.query.user_id : "";
+    if (person) query = query.eq("user_id", person);
+    const action = typeof req.query.action === "string" ? req.query.action : "";
+    if (action) query = query.eq("action", action);
+    const matter =
+        typeof req.query.project_id === "string" ? req.query.project_id : "";
+    if (matter) query = query.eq("project_id", matter);
+    const from = typeof req.query.from === "string" ? req.query.from : "";
+    if (from) query = query.gte("created_at", from);
+    const to = typeof req.query.to === "string" ? req.query.to : "";
+    if (to) query = query.lte("created_at", to);
+
+    // One row past the page tells us whether there is more, without a count.
+    const { data, error } = await query
+        .order("created_at", { ascending: false })
+        .range(pagination.offset, pagination.offset + pagination.limit);
+    if (error) return void res.status(500).json({ detail: error.message });
+
+    const rows = (data ?? []) as Record<string, unknown>[];
+    res.json({
+        events: rows.slice(0, pagination.limit),
+        hasMore: rows.length > pagination.limit,
+    });
+});
+
+/** The list of things that happen, so the filter can offer them. */
+adminRouter.get("/audit/actions", async (_req, res) => {
+    const db = createServerSupabase();
+    const { data, error } = await db
+        .from("audit_events")
+        .select("action")
+        .order("action", { ascending: true })
+        .limit(5000);
+    if (error) return void res.status(500).json({ detail: error.message });
+    const actions = [
+        ...new Set(
+            (data ?? []).map((row) => String((row as { action: string }).action)),
+        ),
+    ].sort();
+    res.json({ actions });
+});
+
+/**
+ * How much each person has used, for one month.
+ *
+ * Counted from the history rather than from the messages table, because the
+ * messages table does not record which model answered — the history does, and
+ * it is written once per message sent.
+ */
+adminRouter.get("/usage", async (req, res) => {
+    const db = createServerSupabase();
+    const month =
+        typeof req.query.month === "string" &&
+        /^\d{4}-\d{2}$/.test(req.query.month)
+            ? req.query.month
+            : new Date().toISOString().slice(0, 7);
+    const start = `${month}-01T00:00:00.000Z`;
+    const [year, monthNumber] = month.split("-").map(Number);
+    const nextMonth =
+        monthNumber === 12
+            ? `${year + 1}-01`
+            : `${year}-${String(monthNumber + 1).padStart(2, "0")}`;
+    const end = `${nextMonth}-01T00:00:00.000Z`;
+
+    const { data: members } = await db
+        .from("firm_members")
+        .select("user_id")
+        .eq("firm_id", membership(res).firmId);
+    const memberIds = (members ?? []).map(
+        (row) => (row as { user_id: string }).user_id,
+    );
+    if (memberIds.length === 0) {
+        return void res.json({ month, people: [] });
+    }
+
+    const { data, error } = await db
+        .from("audit_events")
+        .select("user_id, user_email, model")
+        .eq("action", "chat.message")
+        .in("user_id", memberIds)
+        .gte("created_at", start)
+        .lt("created_at", end)
+        .limit(50000);
+    if (error) return void res.status(500).json({ detail: error.message });
+
+    const byPerson = new Map<
+        string,
+        { user_id: string; email: string; messages: number; byModel: Map<string, number> }
+    >();
+    for (const row of (data ?? []) as {
+        user_id: string;
+        user_email: string | null;
+        model: string | null;
+    }[]) {
+        const entry = byPerson.get(row.user_id) ?? {
+            user_id: row.user_id,
+            email: row.user_email ?? "",
+            messages: 0,
+            byModel: new Map<string, number>(),
+        };
+        entry.messages += 1;
+        if (!entry.email && row.user_email) entry.email = row.user_email;
+        const model = row.model ?? "not recorded";
+        entry.byModel.set(model, (entry.byModel.get(model) ?? 0) + 1);
+        byPerson.set(row.user_id, entry);
+    }
+
+    const names = new Map<string, string>();
+    const { data: profiles } = await db
+        .from("user_profiles")
+        .select("user_id, display_name")
+        .in("user_id", memberIds);
+    for (const profile of (profiles ?? []) as {
+        user_id: string;
+        display_name: string | null;
+    }[]) {
+        if (profile.display_name?.trim()) {
+            names.set(profile.user_id, profile.display_name.trim());
+        }
+    }
+
+    res.json({
+        month,
+        people: [...byPerson.values()]
+            .map((entry) => ({
+                user_id: entry.user_id,
+                email: entry.email,
+                display_name: names.get(entry.user_id) ?? null,
+                messages: entry.messages,
+                by_model: [...entry.byModel.entries()]
+                    .map(([model, count]) => ({ model, count }))
+                    .sort((a, b) => b.count - a.count),
+            }))
+            .sort((a, b) => b.messages - a.messages),
+    });
 });

@@ -35,6 +35,13 @@ type ModelPreferenceField = "titleModel" | "tabularModel";
 
 export default function ModelPreferencesPage() {
     const { profile, updateModelPreference } = useUserProfile();
+    // The firm may allow only some models. When it does, the others stop being
+    // offered here as well as in a chat.
+    const allowedModels = profile?.allowedModels ?? null;
+    const modelChoices = <T extends { id: string }>(models: T[]): T[] =>
+        allowedModels
+            ? models.filter((model) => allowedModels.includes(model.id))
+            : models;
     const ollamaModels = useOllamaModels();
     const [savingField, setSavingField] = useState<ModelPreferenceField | null>(
         null,
@@ -98,7 +105,7 @@ export default function ModelPreferencesPage() {
                             profile?.titleModel ??
                             "gemini-3.1-flash-lite-preview"
                         }
-                        options={[...SETTINGS_MODELS, ...ollamaModels]}
+                        options={modelChoices([...SETTINGS_MODELS, ...ollamaModels])}
                         apiKeys={profile?.apiKeys}
                         isSaving={savingField === "titleModel"}
                         isSaved={savedField === "titleModel"}
@@ -119,7 +126,7 @@ export default function ModelPreferencesPage() {
                             profile?.tabularModel ??
                             "ollama/glm-5.2"
                         }
-                        options={[...MODELS, ...ollamaModels]}
+                        options={modelChoices([...MODELS, ...ollamaModels])}
                         apiKeys={profile?.apiKeys}
                         isSaving={savingField === "tabularModel"}
                         isSaved={savedField === "tabularModel"}
