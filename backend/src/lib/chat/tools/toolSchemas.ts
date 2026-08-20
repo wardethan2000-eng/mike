@@ -52,6 +52,45 @@ export const PROJECT_EXTRA_TOOLS = [
       },
     },
   },
+  {
+    type: "function",
+    function: {
+      name: "save_to_law",
+      description:
+        "File one or more legal sources — cases retrieved from CourtListener, or statutes retrieved with a statute tool — into this matter's documents as permanent, viewable files. By default they land in the matter's \"Law\" folder; give folder to file them somewhere else (created if it does not exist). Use whenever the user asks to save, file, keep or add case law or statutes to the matter, its law bank or library, or a named folder. A case must have been fetched or verified in this conversation so its cluster id is known; a statute must have been retrieved this conversation or cited earlier in this chat.",
+      parameters: {
+        type: "object",
+        properties: {
+          sources: {
+            type: "array",
+            description:
+              "The sources to file, one entry per case or statute.",
+            items: {
+              type: "object",
+              properties: {
+                cluster_id: {
+                  type: "integer",
+                  description:
+                    "CourtListener cluster id of a case, from courtlistener_verify_citations or courtlistener_get_cases results in this conversation.",
+                },
+                statute: {
+                  type: "string",
+                  description:
+                    'A statute citation exactly as the statute tool\'s result labels it, e.g. "K.S.A. 58-2540".',
+                },
+              },
+            },
+          },
+          folder: {
+            type: "string",
+            description:
+              'Folder to file the documents in, by name. Omit for the matter\'s "Law" folder.',
+          },
+        },
+        required: ["sources"],
+      },
+    },
+  },
 ];
 
 export const TABULAR_TOOLS = [

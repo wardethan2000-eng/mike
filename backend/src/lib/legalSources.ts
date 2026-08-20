@@ -45,7 +45,15 @@ export type SaveLegalSourceInput =
       url?: string | null;
       pdfUrl?: string | null;
     }
-  | { kind: "legislation"; legId: string; chatId: string };
+  | {
+      kind: "legislation";
+      legId: string;
+      chatId: string;
+      /** Statute text already in hand (the chat's save tool passes what it
+       *  fetched this turn), so the save does not depend on the citation
+       *  having been persisted to the conversation yet. */
+      direct?: { title?: string | null; url?: string | null; text: string };
+    };
 
 export type SaveLegalSourceResult =
   | {
@@ -78,6 +86,8 @@ export async function saveLegalSourceToProject(args: {
   projectId: string;
   input: SaveLegalSourceInput;
   courtlistenerToken?: string | null;
+  /** Root folder to file the document in. Defaults to the Law folder. */
+  folderName?: string | null;
 }): Promise<SaveLegalSourceResult> {
   const { db, userId, userEmail, projectId, input } = args;
 
@@ -129,6 +139,7 @@ export async function saveLegalSourceToProject(args: {
             chatId: input.chatId,
             userId,
             userEmail,
+            direct: input.direct,
           });
   } catch (err) {
     return {
@@ -137,7 +148,8 @@ export async function saveLegalSourceToProject(args: {
     };
   }
 
-  const folder = await ensureLawFolder(db, projectId, userId);
+  const targetFolderName = (args.folderName ?? "").trim() || LAW_FOLDER_NAME;
+  const folder = await ensureFolder(db, projectId, userId, targetFolderName);
   const folderId = folder.id;
 
   let documentId: string;
@@ -169,7 +181,7 @@ export async function saveLegalSourceToProject(args: {
     documentId,
     filename: resolved.filename,
     folderId,
-    folderName: LAW_FOLDER_NAME,
+    folderName: targetFolderName,
     title: resolved.title,
   };
 }
@@ -178,10 +190,11 @@ export async function saveLegalSourceToProject(args: {
 // The "Law" folder
 // ---------------------------------------------------------------------------
 
-async function ensureLawFolder(
+async function ensureFolder(
   db: Db,
   projectId: string,
   userId: string,
+  name: string,
 ): Promise<{ id: string | null; created: boolean }> {
   const { data: folders } = await db
     .from("project_subfolders")
@@ -191,7 +204,7 @@ async function ensureLawFolder(
   const match = (folders ?? []).find(
     (folder) =>
       String(folder.name ?? "").trim().toLowerCase() ===
-      LAW_FOLDER_NAME.toLowerCase(),
+      name.trim().toLowerCase(),
   );
   if (match) return { id: match.id as string, created: false };
 
@@ -200,13 +213,13 @@ async function ensureLawFolder(
     .insert({
       project_id: projectId,
       user_id: userId,
-      name: LAW_FOLDER_NAME,
+      name: name.trim(),
       parent_folder_id: null,
     })
     .select("id")
     .single();
   if (error || !data) {
-    console.error("[legal-source] could not create the Law folder", error);
+    console.error("[legal-source] could not create the folder", name, error);
     // A missing folder is not worth failing the save over — the document still
     // belongs to the matter, it just sits at the top level.
     return { id: null, created: false };
@@ -366,9 +379,29 @@ async function resolveLegislation(
     chatId: string;
     userId: string;
     userEmail?: string | null;
+    direct?: { title?: string | null; url?: string | null; text: string };
   },
 ): Promise<ResolvedSource> {
   const legId = normalizeLegId(args.legId);
+
+  // Text handed over directly needs no lookup in the stored conversation.
+  if (args.direct?.text) {
+    const title = stringOrNull(args.direct.title ?? null) ?? args.legId;
+    const url = stringOrNull(args.direct.url ?? null);
+    const content = await buildDocx({
+      title,
+      facts: url ? [{ label: "Source", value: url }] : [],
+      sections: [{ heading: null, body: args.direct.text }],
+    });
+    return {
+      sourceRef: legId,
+      title,
+      sourceUrl: url,
+      content,
+      suffix: "docx",
+      filename: `${safeFileBase(title)}.docx`,
+    };
+  }
   const { data: chat } = await db
     .from("chats")
     .select("id, user_id, project_id")

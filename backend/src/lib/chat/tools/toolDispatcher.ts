@@ -91,8 +91,10 @@ import {
 import {
   ingestLegislationToolResult,
   newLegislationTurnState,
+  normalizeLegId,
   type LegislationTurnState,
 } from "./legislationTurnState";
+import { saveLegalSourceToProject } from "../../legalSources";
 
 function sourceMaterialNotice(
   sourceKind: "document" | "library_template" | "workflow_asset" | undefined,
@@ -273,6 +275,7 @@ export async function runToolCalls(
   apiKeys?: import("../../llm").UserApiKeys,
   nonce?: string,
   legislationState?: LegislationTurnState,
+  chatId?: string | null,
 ): Promise<{
   toolResults: unknown[];
   docsRead: { filename: string; document_id?: string }[];
@@ -589,6 +592,95 @@ export async function runToolCalls(
         role: "tool",
         tool_call_id: tc.id,
         content: formatForAssistant(query, hits),
+      });
+    } else if (tc.function.name === "save_to_law") {
+      // File cases/statutes pulled in this conversation into the matter's
+      // documents (the "law bank"), optionally into a named folder.
+      const rawSources = Array.isArray(args.sources) ? args.sources : [];
+      const folder =
+        typeof args.folder === "string" && args.folder.trim()
+          ? args.folder.trim()
+          : null;
+      const results: unknown[] = [];
+      if (!projectId) {
+        results.push({
+          error: "Sources can only be filed from a chat inside a matter.",
+        });
+      }
+      for (const raw of rawSources) {
+        if (!projectId) break;
+        const src = recordFromUnknown(raw) ?? {};
+        const clusterId =
+          typeof src.cluster_id === "number" && Number.isFinite(src.cluster_id)
+            ? Math.floor(src.cluster_id)
+            : null;
+        const statute =
+          typeof src.statute === "string" && src.statute.trim()
+            ? src.statute.trim()
+            : null;
+        try {
+          let input: import("../../legalSources").SaveLegalSourceInput | null =
+            null;
+          if (clusterId) {
+            const caseRecord = courtState.casesByClusterId.get(clusterId);
+            input = {
+              kind: "case",
+              clusterId,
+              caseName: caseRecord?.caseName ?? null,
+              citation: caseRecord?.citations?.[0] ?? null,
+              dateFiled: caseRecord?.dateFiled ?? null,
+              url: caseRecord?.url ?? null,
+              pdfUrl: caseRecord?.pdfUrl ?? null,
+            };
+          } else if (statute) {
+            const record = legState.byId.get(normalizeLegId(statute)) ?? null;
+            input = {
+              kind: "legislation",
+              legId: record?.label ?? statute,
+              chatId: chatId ?? "",
+              direct: record
+                ? { title: record.label, url: record.url, text: record.text }
+                : undefined,
+            };
+          }
+          if (!input) {
+            results.push({
+              error: "Each source needs a cluster_id or a statute citation.",
+            });
+          } else {
+            const saved = await saveLegalSourceToProject({
+              db,
+              userId,
+              projectId,
+              input,
+              courtlistenerToken: apiKeys?.courtlistener ?? null,
+              folderName: folder,
+            });
+            results.push(
+              "error" in saved
+                ? { source: statute ?? clusterId, error: saved.error }
+                : {
+                    source: statute ?? clusterId,
+                    status: saved.status,
+                    filename: saved.filename,
+                    folder: saved.folderName,
+                  },
+            );
+          }
+        } catch (err) {
+          results.push({
+            source: statute ?? clusterId,
+            error:
+              err instanceof Error
+                ? err.message
+                : "Could not save this source",
+          });
+        }
+      }
+      toolResults.push({
+        role: "tool",
+        tool_call_id: tc.id,
+        content: JSON.stringify({ results }),
       });
     } else if (tc.function.name === "fetch_documents") {
       const rawDocIds = (args.doc_ids as string[]) ?? [];

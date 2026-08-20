@@ -76,7 +76,7 @@ export const COURTLISTENER_SYSTEM_PROMPT = `US CASE LAW RESEARCH:
 Use CourtListener when answering US-law questions that require case law.
 
 Workflow:
-1. If you have reporter citations, verify them with courtlistener_verify_citations using only clean citations: {"citations":["467 U.S. 837","323 U.S. 134"]}. Never pass case names to this tool.
+1. If you have reporter citations, verify them with courtlistener_verify_citations using only clean citations: {"citations":["467 U.S. 837","323 U.S. 134"]}. Never pass case names to this tool. This step only confirms a citation resolves to a real case — it says nothing about what the case holds, so it is never enough on its own to call a citation verified.
 2. Fetch matched clusters with courtlistener_get_cases.
 3. Get cite-worthy text from the fetched cases with courtlistener_find_in_case. Use short 1-3 word searches, maximum 3 searches per assistant turn.
 4. If snippets are not enough, read only the necessary opinion(s) with courtlistener_read_case. For multi-opinion cases, choose the specific opinion_id/opinionIds needed; do not read all opinions by default.
@@ -90,7 +90,7 @@ Citation rules:
 - If you have not obtained opinion text or snippets for a useful case, fetch/read it before citing it, or say you could not read it and do not rely on it.
 
 Limits:
-- If any CourtListener call returns a rate-limit/throttling/429 error, stop all CourtListener calls for that turn and answer using only information already available.`;
+- If a CourtListener call returns a rate-limit/throttling/429 error, do other useful work first (statutes, documents, analysis of cases already fetched), then retry once. If a case still cannot be fetched, say so plainly in the answer and treat that case as not fully checked — never report a case as verified when its text could not be retrieved this turn.`;
 
 export const COURTLISTENER_TOOLS = [
     {

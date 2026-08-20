@@ -1,5 +1,6 @@
 import {
   streamChatWithTools,
+  completeText,
   resolveModel,
   stopReasonLabel,
   DEFAULT_MAIN_MODEL,
@@ -466,6 +467,7 @@ export async function runLLMStream(params: {
           apiKeys,
           nonce,
           legislationTurnState,
+          chatId,
         );
         throwIfAborted(signal);
         for (const r of docsRead) {
@@ -600,8 +602,69 @@ export async function runLLMStream(params: {
   }
 
   // Parse and emit citations from <CITATIONS> block
-  const { citations: parsedCitations, diagnostics: citationDiagnostics } =
+  const { citations: parsedCitationsInitial, diagnostics: citationDiagnostics } =
     parseCitationsWithDiagnostics(fullText);
+  let parsedCitations = parsedCitationsInitial;
+
+  // Repair pass: the answer carries [N] markers but no usable <CITATIONS>
+  // block (the model dropped it, or its JSON failed to parse). Without the
+  // block every marker renders as dead text — nothing opens, nothing can be
+  // checked, nothing can be filed — so ask the model once, off-stream, for
+  // just the block and use that instead.
+  const proseBeforeBlock = fullText.split(CITATIONS_OPEN_TAG)[0] ?? fullText;
+  if (
+    !buildCitations &&
+    parsedCitations.length === 0 &&
+    /\[\d{1,2}\]/.test(proseBeforeBlock)
+  ) {
+    try {
+      const sourceLines: string[] = [];
+      for (const [label, doc] of Object.entries(docIndex ?? {})) {
+        sourceLines.push(`document doc_id "${label}" = ${doc.filename}`);
+      }
+      for (const rec of courtlistenerTurnState.casesByClusterId.values()) {
+        const opinions = getCachedCaseOpinionTexts(
+          courtlistenerTurnState,
+          rec.clusterId,
+        );
+        const opinionIds = (opinions ?? [])
+          .map((o) => o.opinion_id)
+          .filter((id): id is number => typeof id === "number");
+        sourceLines.push(
+          `case cluster_id ${rec.clusterId} = ${rec.caseName ?? "?"}${
+            rec.citations[0] ? `, ${rec.citations[0]}` : ""
+          }${opinionIds.length ? ` (opinion_ids: ${opinionIds.join(", ")})` : ""}`,
+        );
+      }
+      const seenLegs = new Set<string>();
+      for (const rec of legislationTurnState.byId.values()) {
+        if (seenLegs.has(rec.legId)) continue;
+        seenLegs.add(rec.legId);
+        sourceLines.push(`legislation leg_id "${rec.label}"`);
+      }
+      if (sourceLines.length > 0) {
+        const block = await completeText({
+          model: selectedModel,
+          systemPrompt:
+            'A legal chat answer below uses [N] citation markers but is missing its machine-readable citations block, so none of its citations work. Reconstruct the block. Output ONLY a <CITATIONS>[ ... ]</CITATIONS> block containing a valid JSON array with exactly one entry per distinct [N] marker, matching each marker to the source it cites using the AVAILABLE SOURCES list. Entry shapes: document {"ref": N, "doc_id": "doc-0", "quotes": [{"page": 3, "quote": "exact text quoted in the answer"}]}; case {"ref": N, "cluster_id": 123, "quotes": [{"opinion_id": 456, "quote": "exact opinion text quoted in the answer"}]}; legislation {"ref": N, "leg_id": "K.S.A. 58-2540", "quotes": [{"quote": "exact statute text quoted in the answer"}]}. Use only sources from the list. Take quotes verbatim from quoted material near each marker in the answer; if no quote is given there, use a short phrase the answer attributes to that source. Output nothing before or after the block.',
+          user: `AVAILABLE SOURCES:\n${sourceLines.join("\n")}\n\n--- ANSWER ---\n${proseBeforeBlock}`,
+          maxTokens: 8000,
+          apiKeys,
+        });
+        const reparsed = parseCitationsWithDiagnostics(block);
+        if (reparsed.citations.length > 0) {
+          parsedCitations = reparsed.citations;
+        }
+        devLog("[chat/stream] citations repair pass", {
+          repairedCount: reparsed.citations.length,
+          repairError: reparsed.diagnostics.error,
+        });
+      }
+    } catch (err) {
+      devLog("[chat/stream] citations repair pass failed", err);
+    }
+  }
+
   let citations: unknown[];
   if (buildCitations) {
     // Custom builders (tabular) bypass document-citation verification.
