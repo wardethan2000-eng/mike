@@ -246,3 +246,127 @@ describe("tracked table insertion", () => {
         );
     });
 });
+
+// ---------------------------------------------------------------------------
+// Footnotes
+// ---------------------------------------------------------------------------
+
+const FOOTNOTES_XML =
+    `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>` +
+    `<w:footnotes ${W_NS}>` +
+    `<w:footnote w:type="separator" w:id="-1"><w:p><w:r><w:separator/></w:r></w:p></w:footnote>` +
+    `<w:footnote w:id="1"><w:p><w:r><w:t xml:space="preserve">See Kan. Stat. Ann. 60-206.</w:t></w:r></w:p></w:footnote>` +
+    `<w:footnote w:id="2"><w:p><w:r><w:t xml:space="preserve">Doe v. Roe, 123 F.3d 456 (10th Cir. 1997).</w:t></w:r></w:p></w:footnote>` +
+    `</w:footnotes>`;
+
+const FN_REF =
+    `<w:r><w:rPr><w:rStyle w:val="FootnoteReference"/></w:rPr><w:footnoteReference w:id="1"/></w:r>`;
+
+async function makeFootnotedDocx(): Promise<Buffer> {
+    return makeDocx(
+        [
+            `<w:p>${run("Deadlines are computed under Rule 6.")}${FN_REF}${run(" The motion is timely.")}</w:p>`,
+            para(run("Nothing else here.")),
+        ],
+        { "word/footnotes.xml": FOOTNOTES_XML },
+    );
+}
+
+describe("footnotes", () => {
+    it("reads the notes and shows the reference mark inline", async () => {
+        const bytes = await makeFootnotedDocx();
+        const { extractDocxFootnotes, extractDocxBodyParagraphsMarked } =
+            await import("../docxTrackedChanges");
+        const notes = await extractDocxFootnotes(bytes);
+        expect(notes).toEqual([
+            { id: "1", text: "See Kan. Stat. Ann. 60-206." },
+            { id: "2", text: "Doe v. Roe, 123 F.3d 456 (10th Cir. 1997)." },
+        ]);
+        const marked = await extractDocxBodyParagraphsMarked(bytes);
+        expect(marked[0]).toBe(
+            "Deadlines are computed under Rule 6.[fn 1] The motion is timely.",
+        );
+        // The plain (anchor) text carries no marker.
+        await expect(extractDocxBodyText(bytes)).resolves.toContain(
+            "Deadlines are computed under Rule 6. The motion is timely.",
+        );
+    });
+
+    it("keeps the reference when a tracked rewrite echoes the token", async () => {
+        const bytes = await makeFootnotedDocx();
+        const applied = await applyTrackedEdits(bytes, [
+            {
+                find: "Deadlines are computed under Rule 6. The motion is timely.",
+                replace:
+                    "All deadlines are computed under Rule 6.[fn 1] The motion is therefore timely.",
+                context_before: "",
+                context_after: "",
+            },
+        ]);
+        expect(applied.errors).toEqual([]);
+        const xml = await (await JSZip.loadAsync(applied.bytes))
+            .file("word/document.xml")!
+            .async("string");
+        // The original mark is a tracked deletion; the new one a tracked insert.
+        expect(xml).toMatch(
+            /<w:del [^>]*>(?:(?!<\/w:del>).)*footnoteReference(?:(?!<\/w:del>).)*<\/w:del>/s,
+        );
+        expect(xml).toMatch(
+            /<w:ins [^>]*>(?:(?!<\/w:ins>).)*footnoteReference(?:(?!<\/w:ins>).)*<\/w:ins>/s,
+        );
+
+        const change = applied.changes[0];
+        const ids = [
+            change.delId,
+            change.insId,
+            ...(change.extraInsIds ?? []),
+            ...(change.extraDelIds ?? []),
+        ].filter((v): v is string => !!v);
+
+        // Accepting leaves exactly one reference; so does rejecting.
+        const { bytes: accepted } = await resolveTrackedChange(
+            applied.bytes,
+            ids,
+            "accept",
+        );
+        const acceptedXml = await (await JSZip.loadAsync(accepted))
+            .file("word/document.xml")!
+            .async("string");
+        expect(
+            (acceptedXml.match(/<w:footnoteReference /g) ?? []).length,
+        ).toBe(1);
+        await expect(extractDocxBodyText(accepted)).resolves.toContain(
+            "therefore timely",
+        );
+
+        const { bytes: rejected } = await resolveTrackedChange(
+            applied.bytes,
+            ids,
+            "reject",
+        );
+        const rejectedXml = await (await JSZip.loadAsync(rejected))
+            .file("word/document.xml")!
+            .async("string");
+        expect(
+            (rejectedXml.match(/<w:footnoteReference /g) ?? []).length,
+        ).toBe(1);
+        await expect(extractDocxBodyText(rejected)).resolves.toContain(
+            "The motion is timely.",
+        );
+    });
+
+    it("edits a footnote's own text in place", async () => {
+        const bytes = await makeFootnotedDocx();
+        const { bytes: out, applied } = await applyHeaderFooterEdits(bytes, [
+            {
+                index: 0,
+                find: "Kan. Stat. Ann. 60-206",
+                replace: "Kan. Stat. Ann. 60-206(a)",
+            },
+        ]);
+        expect(applied).toEqual([{ index: 0, part: "footnote" }]);
+        const { extractDocxFootnotes } = await import("../docxTrackedChanges");
+        const notes = await extractDocxFootnotes(out);
+        expect(notes[0].text).toBe("See Kan. Stat. Ann. 60-206(a).");
+    });
+});

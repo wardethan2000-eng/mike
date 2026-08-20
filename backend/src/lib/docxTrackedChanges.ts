@@ -315,6 +315,8 @@ interface RunSlot {
      * the char stream but left in place via their surrounding w:r.
      */
     textNodes: { wtEl: XNode; text: string; paraStart: number; paraEnd: number }[];
+    /** The footnote this run references, when it carries a w:footnoteReference. */
+    footnoteId?: string;
 }
 
 interface Flattened {
@@ -361,7 +363,16 @@ function flattenParagraph(paraChildren: XNode[]): Flattened {
             }
             // other run children (w:tab, w:br, w:sym, …) are left alone
         }
-        runs.push({ childIndex: topChildIdx, rPr, textNodes });
+        const fnRef = findChildByName(rKids, "w:footnoteReference");
+        const footnoteId = fnRef
+            ? String(elAttrs(fnRef)["@_w:id"] ?? "")
+            : undefined;
+        runs.push({
+            childIndex: topChildIdx,
+            rPr,
+            textNodes,
+            ...(footnoteId ? { footnoteId } : {}),
+        });
     };
 
     for (let ci = 0; ci < paraChildren.length; ci++) {
@@ -578,12 +589,16 @@ function reconstructParagraph(
         for (let i = 0; i < pieces.length; i++) {
             if (i > 0) newRunGroup.push(makeParagraphBreakMarker());
             if (!pieces[i]) continue;
-            const segs = inlineEditRuns(pieces[i]).filter((s) => s.text);
+            const segs = inlineEditRuns(pieces[i]).filter(
+                (s) => s.text || s.footnoteRef,
+            );
             newRunGroup.push(
                 makeEl(
                     "w:ins",
                     segs.map((seg) =>
-                        buildRun(rPrWithMarks(rPr, seg), seg.text, "w:t"),
+                        seg.footnoteRef
+                            ? buildFootnoteReferenceRun(seg.footnoteRef)
+                            : buildRun(rPrWithMarks(rPr, seg), seg.text, "w:t"),
                     ),
                     {
                         "w:id": wId,
@@ -595,18 +610,74 @@ function reconstructParagraph(
         }
     };
 
+    // Footnote-reference runs carry no characters, so the char walk below
+    // would silently drop any that sit inside the touched span. Collect them
+    // with their positions (the start of the next text after them) so each
+    // one is re-emitted where it belongs: as-is in untouched stretches, and
+    // wrapped in w:del where the words around it are deleted — rejecting the
+    // change then restores the reference, accepting removes it.
+    const refEmits: { pos: number; slotIdx: number; consumed: boolean }[] = [];
+    for (let r = firstRunIdx; r <= lastRunIdx; r++) {
+        const slot = flat.runs[r];
+        if (slot.textNodes.length > 0 || !slot.footnoteId) continue;
+        let pos = spanEnd;
+        for (let k = r + 1; k <= lastRunIdx; k++) {
+            if (flat.runs[k].textNodes.length > 0) {
+                pos = flat.runs[k].textNodes[0].paraStart;
+                break;
+            }
+        }
+        refEmits.push({ pos, slotIdx: r, consumed: false });
+    }
+    const refNode = (e: { slotIdx: number }): XNode => {
+        const slot = flat.runs[e.slotIdx];
+        const child = paraChildren[slot.childIndex];
+        return elName(child) === "w:r"
+            ? cloneNode(child)
+            : buildFootnoteReferenceRun(slot.footnoteId!);
+    };
+    const emitNormalWithRefs = (a: number, b: number) => {
+        let start = a;
+        for (const e of refEmits) {
+            if (e.consumed || e.pos < a || e.pos > b) continue;
+            emitNormal(start, Math.min(e.pos, b));
+            e.consumed = true;
+            newRunGroup.push(refNode(e));
+            start = Math.min(e.pos, b);
+        }
+        emitNormal(start, b);
+    };
+    const emitDeletedRefs = (p: PlannedChange) => {
+        for (const e of refEmits) {
+            if (e.consumed || e.pos < p.deleteStart || e.pos > p.deleteEnd)
+                continue;
+            e.consumed = true;
+            const wId = allocWId();
+            p.markDelWIds.push(wId);
+            newRunGroup.push(
+                makeEl("w:del", [refNode(e)], {
+                    "w:id": wId,
+                    "w:author": author,
+                    "w:date": now,
+                }),
+            );
+        }
+    };
+
     let cursor = spanStart;
     for (const p of plan) {
         // Untouched slice before this edit
-        emitNormal(cursor, p.deleteStart);
+        emitNormalWithRefs(cursor, p.deleteStart);
         // Insertion fires at the edit boundary
         if (p.insertedText) emitIns(p.deleteStart, p.insertedText, p.insWId!);
         // Deletion wraps the span
-        if (p.deleteEnd > p.deleteStart)
+        if (p.deleteEnd > p.deleteStart) {
             emitDel(p.deleteStart, p.deleteEnd, p.delWId!);
+            emitDeletedRefs(p);
+        }
         cursor = p.deleteEnd;
     }
-    emitNormal(cursor, spanEnd);
+    emitNormalWithRefs(cursor, spanEnd);
 
     // Replace only the w:r children that the edits touch; preserve any other
     // interleaved elements (bookmarks, existing tracked-changes, w:sdt …) at
@@ -1100,6 +1171,12 @@ export async function extractDocxBodyParagraphsMarked(
         // Word split across runs is not wrapped piecemeal.
         const spans: { text: string; marker: "" | "**" | "*" | "_" }[] = [];
         for (const slot of flat.runs) {
+            // A footnote reference mark reads as [fn N] — the same token the
+            // drafting tools parse back into a real reference.
+            if (slot.footnoteId) {
+                spans.push({ text: `[fn ${slot.footnoteId}]`, marker: "" });
+                continue;
+            }
             const text = slot.textNodes.map((tn) => tn.text).join("");
             if (!text) continue;
             const marker = toggleOn(slot.rPr, "w:b")
@@ -1148,7 +1225,60 @@ export async function extractDocxBodyTextMarked(
     return (await extractDocxBodyParagraphsMarked(bytes)).join("\n");
 }
 
-const HEADER_FOOTER_PART_RE = /^word\/(header|footer)\d*\.xml$/;
+const HEADER_FOOTER_PART_RE = /^word\/(header\d*|footer\d*|footnotes)\.xml$/;
+
+function partKind(partName: string): "header" | "footer" | "footnote" {
+    if (partName.startsWith("header")) return "header";
+    if (partName.startsWith("footer")) return "footer";
+    return "footnote";
+}
+
+/** Footnote wrappers that hold layout plumbing rather than a real note. */
+const FOOTNOTE_PLUMBING_TYPES = new Set([
+    "separator",
+    "continuationSeparator",
+    "continuationNotice",
+]);
+
+/**
+ * The document's footnotes, in file order: id and text (paragraphs joined
+ * with newlines). Separator plumbing entries are skipped. Empty when the
+ * document has no word/footnotes.xml.
+ */
+export async function extractDocxFootnotes(
+    bytes: Buffer,
+): Promise<{ id: string; text: string }[]> {
+    const zip = await JSZip.loadAsync(bytes);
+    const file = getZipEntry(zip, "word/footnotes.xml");
+    if (!file) return [];
+    const parser = createParser();
+    const tree = parser.parse(await file.async("string")) as XNode[];
+    const out: { id: string; text: string }[] = [];
+    const visit = (nodes: XNode[]) => {
+        for (const n of nodes) {
+            const name = elName(n);
+            if (!name) continue;
+            if (name === "w:footnote") {
+                const attrs = elAttrs(n);
+                const type = String(attrs["@_w:type"] ?? "");
+                if (FOOTNOTE_PLUMBING_TYPES.has(type)) continue;
+                const id = String(attrs["@_w:id"] ?? "");
+                const paras: XNode[] = [];
+                collectParagraphNodes(elChildren(n), paras);
+                const text = paras
+                    .map((p) => flattenParagraph(elChildren(p)).paraText)
+                    .filter((line) => line.trim())
+                    .join("\n")
+                    .trim();
+                if (id && text) out.push({ id, text });
+            } else {
+                visit(elChildren(n));
+            }
+        }
+    };
+    visit(tree);
+    return out;
+}
 
 /** Every w:p under `nodes`, depth-first — headers nest them in tables too. */
 function collectParagraphNodes(nodes: XNode[], out: XNode[]): void {
@@ -1185,7 +1315,9 @@ export async function extractDocxHeadersFooters(bytes: Buffer): Promise<{
             .filter((line) => line.trim())
             .join("\n");
         if (!text) continue;
-        const bucket = m[1] === "header" ? headers : footers;
+        const kind = partKind(m[1]);
+        if (kind === "footnote") continue; // footnotes are read separately
+        const bucket = kind === "header" ? headers : footers;
         if (!bucket.includes(text)) bucket.push(text);
     }
     return { headers, footers };
@@ -1200,9 +1332,9 @@ function setWtText(wtEl: XNode, text: string): void {
 }
 
 /**
- * Apply plain find/replace edits to the page headers and footers. Tracked
- * changes are not written here — a letterhead correction is not something to
- * accept word by word — so the text is simply replaced, keeping every run,
+ * Apply plain find/replace edits to the page headers, footers and footnote
+ * text. Tracked changes are not written here — these parts sit outside the
+ * body's review pipeline — so the text is simply replaced, keeping every run,
  * logo and layout element in place: only the matched characters change, and
  * the replacement takes the look of the run the match starts in.
  *
@@ -1215,9 +1347,10 @@ export async function applyHeaderFooterEdits(
     edits: { index: number; find: string; replace: string }[],
 ): Promise<{
     bytes: Buffer;
-    applied: { index: number; part: "header" | "footer" }[];
+    applied: { index: number; part: "header" | "footer" | "footnote" }[];
 }> {
-    const applied: { index: number; part: "header" | "footer" }[] = [];
+    const applied: { index: number; part: "header" | "footer" | "footnote" }[] =
+        [];
     const todo = edits.filter((e) => e.find);
     if (todo.length === 0) return { bytes, applied };
 
@@ -1274,7 +1407,7 @@ export async function applyHeaderFooterEdits(
                     done.add(edit.index);
                     applied.push({
                         index: edit.index,
-                        part: m[1] as "header" | "footer",
+                        part: partKind(m[1]),
                     });
                     partChanged = true;
                 }
@@ -2019,6 +2152,11 @@ export interface EditRun {
     underline?: boolean;
     color?: string; // 6-hex, no leading '#'
     size?: number; // points
+    /**
+     * A footnote reference mark, written in text as `[fn N]`. Carries no
+     * characters of its own; N is the footnote's id in word/footnotes.xml.
+     */
+    footnoteRef?: string;
 }
 
 export interface EditParagraph {
@@ -2064,11 +2202,12 @@ export interface FormattedEditResult {
 
 /**
  * Split a line into runs on the inline markers the assistant uses when
- * writing document text: **bold**, _underline_, *italic*.
+ * writing document text: **bold**, _underline_, *italic*, and `[fn N]` for a
+ * footnote reference mark (which carries no characters of its own).
  */
 export function inlineEditRuns(line: string): EditRun[] {
     const runs: EditRun[] = [];
-    const pattern = /(\*\*[^*]+\*\*|_[^_\n]+_|\*[^*\n]+\*)/g;
+    const pattern = /(\*\*[^*]+\*\*|_[^_\n]+_|\*[^*\n]+\*|\[fn \d+\])/g;
     const push = (text: string, marks: Partial<EditRun>) => {
         if (!text) return;
         runs.push({ text, ...marks });
@@ -2079,6 +2218,8 @@ export function inlineEditRuns(line: string): EditRun[] {
         push(line.slice(last, at), {});
         const token = match[0];
         if (token.startsWith("**")) push(token.slice(2, -2), { bold: true });
+        else if (token.startsWith("[fn "))
+            runs.push({ text: "", footnoteRef: token.slice(4, -1) });
         else if (token.startsWith("_"))
             push(token.slice(1, -1), { underline: true });
         else push(token.slice(1, -1), { italic: true });
@@ -2120,6 +2261,7 @@ export function stripInlineMarkers(line: string): string {
 export function runsToMarkedText(runs: EditRun[]): string {
     return runs
         .map((run) => {
+            if (run.footnoteRef) return `[fn ${run.footnoteRef}]`;
             const marker = run.bold ? "**" : run.underline ? "_" : run.italic ? "*" : "";
             return marker ? wrapMarked(run.text, marker) : run.text;
         })
@@ -2569,6 +2711,10 @@ function buildFormattedParagraph(
     if (pPr) children.push(pPr);
     const runs = para.runs && para.runs.length ? para.runs : [{ text: para.text }];
     for (const run of runs) {
+        if (run.footnoteRef) {
+            children.push(buildFootnoteReferenceRun(run.footnoteRef));
+            continue;
+        }
         if (!run.text) continue;
         const rPr = buildRunProps(baseRPr, run);
         children.push(buildRun(rPr, run.text, "w:t"));
@@ -2770,6 +2916,16 @@ export async function insertTrackedTables(
     );
     const out = await zip.generateAsync({ type: "nodebuffer" });
     return { bytes: Buffer.from(out), changes };
+}
+
+/** A run holding a footnote reference mark, styled the way Word writes them. */
+function buildFootnoteReferenceRun(footnoteId: string): XNode {
+    return makeEl("w:r", [
+        makeEl("w:rPr", [
+            makeEl("w:rStyle", [], { "w:val": "FootnoteReference" }),
+        ]),
+        makeEl("w:footnoteReference", [], { "w:id": footnoteId }),
+    ]);
 }
 
 /** The first run's rPr in a paragraph, if any (used as the formatting base). */
@@ -2985,7 +3141,18 @@ export async function applyFormattedEdits(
                 (ep.runs || []).some(
                     (r) => r.bold || r.italic || r.underline || r.color || r.size,
                 );
-            if (hasFormatting || (ep.runs && ep.runs.length > 1)) {
+            // A paragraph whose runs are only split around [fn N] tokens is
+            // still a plain unchanged paragraph: keep the original node — it
+            // already carries the real reference and its formatting, whether
+            // or not the model echoed the tokens. (The multi-run rebuild rule
+            // exists for the in-app editor, which never sends footnote runs.)
+            const splitByFootnotes = (ep.runs || []).some(
+                (r) => r.footnoteRef,
+            );
+            if (
+                hasFormatting ||
+                (!splitByFootnotes && ep.runs && ep.runs.length > 1)
+            ) {
                 newBodyParas.push(
                     buildFormattedParagraph(
                         ep,

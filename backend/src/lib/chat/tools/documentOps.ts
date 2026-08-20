@@ -10,6 +10,7 @@ import {
   applyHeaderFooterEdits,
   applyTrackedEdits,
   canonicalParagraphText,
+  extractDocxFootnotes,
   extractDocxHeadersFooters,
   extractDocxBodyParagraphs,
   extractDocxBodyText,
@@ -1772,10 +1773,13 @@ export async function runEditDocument(params: {
   let editedBytes = applied.bytes;
 
   // An edit whose anchor is nowhere in the body may belong to the page
-  // header or footer (the letterhead). Those are applied directly — a
-  // letterhead correction is not reviewed word by word — and reported
-  // alongside the body changes.
-  let headerFooterApplied: { index: number; part: "header" | "footer" }[] = [];
+  // header or footer (the letterhead) or to a footnote's text. Those are
+  // applied directly — they sit outside the body's review pipeline — and
+  // reported alongside the body changes.
+  let headerFooterApplied: {
+    index: number;
+    part: "header" | "footer" | "footnote";
+  }[] = [];
   if (errors.length > 0) {
     const failed = new Set(errors.map((e) => e.index));
     const candidates = normalizedEdits
@@ -2677,6 +2681,16 @@ export async function readDocumentContent(
       // emphasis and layout when it rewrites. Anchors that echo the
       // decorations are normalised back in runEditDocument.
       text = await extractDocxBodyTextMarked(Buffer.from(raw));
+      try {
+        const footnotes = await extractDocxFootnotes(Buffer.from(raw));
+        if (footnotes.length > 0) {
+          text +=
+            "\n\n--- Footnotes ---\n" +
+            footnotes.map((f) => `[fn ${f.id}] ${f.text}`).join("\n");
+        }
+      } catch {
+        // A malformed footnotes part never blocks reading the body.
+      }
       try {
         const hf = await extractDocxHeadersFooters(Buffer.from(raw));
         for (const header of hf.headers) {
