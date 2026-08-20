@@ -20,7 +20,7 @@ type DocumentQuote = {
   cell?: string;
 };
 
-type ParsedDocumentCitation = {
+export type ParsedDocumentCitation = {
   kind: "document";
   ref: number;
   doc_id: string;
@@ -50,7 +50,7 @@ type ParsedLegislationCitation = {
   quotes: { quote: string }[];
 };
 
-type ParsedCitation =
+export type ParsedCitation =
   | ParsedDocumentCitation
   | ParsedCaseCitation
   | ParsedLegislationCitation;

@@ -697,7 +697,27 @@ export function getDocumentCitationQuotes(
  */
 export function expandCitationToEntries(a: Citation): CitationQuote[] {
     if (a.kind === "case" || a.kind === "legislation") return [];
-    return getDocumentCitationQuotes(a).flatMap(expandDocumentQuoteEntry);
+    return getDocumentCitationQuotes(a)
+        .flatMap(expandDocumentQuoteEntry)
+        .filter((entry) => entry.quote.trim().length > 0);
+}
+
+/**
+ * The page to open a citation at when it has no quoted words to find — a
+ * citation that names a document and a page but nothing to highlight. Null
+ * when there is a quote to look for, since the quote finds its own page.
+ */
+export function citationOpenPage(a: Citation): number | undefined {
+    if (a.kind === "case" || a.kind === "legislation") return undefined;
+    if (expandCitationToEntries(a).length > 0) return undefined;
+    const page = getDocumentCitationQuotes(a)
+        .map((entry) =>
+            typeof entry.page === "number"
+                ? entry.page
+                : parseInt(String(entry.page), 10),
+        )
+        .find((value) => Number.isFinite(value));
+    return page;
 }
 
 /**

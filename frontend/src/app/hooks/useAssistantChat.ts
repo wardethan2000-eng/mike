@@ -1221,6 +1221,42 @@ export function useAssistantChat({
               continue;
             }
 
+            // The answer wrote its references out in the prose ("[doc-3,
+            // p. 1]") and the server turned them into real citations. Put the
+            // numbered markers in place of what was streamed, so the reference
+            // becomes something that opens rather than dead text.
+            if (data.type === "citation_markers") {
+              const incoming: unknown[] = Array.isArray(data.replacements)
+                ? data.replacements
+                : [];
+              const replacements = incoming.filter(
+                (item: unknown): item is { find: string; replace: string } =>
+                  !!item &&
+                  typeof item === "object" &&
+                  typeof (item as { find?: unknown }).find === "string" &&
+                  typeof (item as { replace?: unknown }).replace === "string",
+              );
+              if (!replacements.length) continue;
+              const rewrite = (text: string) => {
+                let out = text;
+                for (const { find, replace } of replacements) {
+                  out = out.split(find).join(replace);
+                }
+                return out;
+              };
+              eventsRef.current = eventsRef.current.map((event) =>
+                event.type === "content"
+                  ? { ...event, text: rewrite(event.text) }
+                  : event,
+              );
+              const snapshot = [...eventsRef.current];
+              updateLatestAssistantMessage((message) => ({
+                ...message,
+                events: snapshot,
+              }));
+              continue;
+            }
+
             if (data.type === "citations") {
               const status =
                 data.status === "started" ||

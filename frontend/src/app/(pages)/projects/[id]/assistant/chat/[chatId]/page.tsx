@@ -80,6 +80,7 @@ import type {
     Project,
 } from "@/app/components/shared/types";
 import {
+    citationOpenPage,
     expandCitationToEntries,
     isDocxFilename,
     isSpreadsheetFilename,
@@ -702,10 +703,16 @@ export default function ProjectAssistantChatPage({ params }: Props) {
             openLegalSourceTab(citation);
             return;
         }
+        // A citation with quoted words finds its own page by looking for them.
+        // One that names only a document and a page — because the answer did
+        // not quote anything there — opens at that page instead of hunting for
+        // a passage that was never given.
         openTab(
             citation.document_id,
             citation.filename,
             expandCitationToEntries(citation),
+            undefined,
+            citationOpenPage(citation),
         );
     };
 

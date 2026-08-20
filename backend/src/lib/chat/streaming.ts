@@ -37,6 +37,11 @@ import {
   createCitation,
   CITATIONS_OPEN_TAG,
 } from "./citations";
+import {
+  applyMarkerRewrites,
+  extractProseCitations,
+  type MarkerRewrite,
+} from "./proseCitations";
 import { runToolCalls } from "./tools/toolDispatcher";
 import { newLegislationTurnState } from "./tools/legislationTurnState";
 import {
@@ -612,6 +617,45 @@ export async function runLLMStream(params: {
   // checked, nothing can be filed — so ask the model once, off-stream, for
   // just the block and use that instead.
   const proseBeforeBlock = fullText.split(CITATIONS_OPEN_TAG)[0] ?? fullText;
+
+  // The answer wrote its references into the prose — "[doc-3, p. 1]" — instead
+  // of using numbered markers and the block. Everything a citation needs is in
+  // there, so build them from what was written and renumber the prose to
+  // match, rather than leaving the reader with dead text naming a document
+  // they cannot open.
+  let markerRewrites: MarkerRewrite[] = [];
+  if (
+    !buildCitations &&
+    parsedCitations.length === 0 &&
+    !/\[\d{1,2}\]/.test(proseBeforeBlock)
+  ) {
+    const fromProse = extractProseCitations(proseBeforeBlock, docIndex ?? {});
+    if (fromProse.citations.length > 0) {
+      parsedCitations = fromProse.citations;
+      markerRewrites = fromProse.rewrites;
+      fullText = applyMarkerRewrites(fullText, markerRewrites);
+      for (let i = 0; i < events.length; i += 1) {
+        const event = events[i];
+        if (event.type === "content") {
+          events[i] = {
+            ...event,
+            text: applyMarkerRewrites(event.text, markerRewrites),
+          };
+        }
+      }
+      // The answer on screen was streamed as it was written, so tell the
+      // client what to put in place of each reference. Without this the
+      // markers only come right when the chat is next opened.
+      write(
+        `data: ${JSON.stringify({ type: "citation_markers", replacements: markerRewrites })}\n\n`,
+      );
+      devLog("[chat/stream] citations rebuilt from prose references", {
+        citationCount: parsedCitations.length,
+        rewriteCount: markerRewrites.length,
+      });
+    }
+  }
+
   if (
     !buildCitations &&
     parsedCitations.length === 0 &&
@@ -703,6 +747,55 @@ export async function runLLMStream(params: {
         getCachedCaseOpinionTexts(courtlistenerTurnState, clusterId),
     );
   }
+  // Diligence check: legal authorities named in the answer that were never
+  // retrieved this turn. A cite written from memory or copied out of a
+  // document is exactly where a wrong or hallucinated authority hides, so
+  // the answer says plainly that its wording was never checked.
+  if (!buildCitations) {
+    try {
+      const normCite = (s: string) => s.replace(/[\s.]/g, "").toUpperCase();
+      const baseStatute = (s: string) => s.replace(/\(.*$/, "");
+      const covered = new Set<string>();
+      for (const rec of courtlistenerTurnState.casesByClusterId.values()) {
+        for (const c of rec.citations) covered.add(normCite(c));
+      }
+      for (const key of legislationTurnState.byId.keys()) {
+        covered.add(baseStatute(normCite(key)));
+      }
+      const reporterRe =
+        /\b\d{1,4}\s+(?:U\.S\.|F\.(?:2d|3d|4th)|F\.\s?Supp\.(?:\s?[23]d)?|Kan\.\s?App\.\s?2d|Kan\.|P\.(?:2d|3d))\s+\d{1,5}\b/g;
+      const statuteRe =
+        /\bK\.S\.A\.\s?(?:\u00a7+\s?)?\d+[a-z]?-[\d]+[a-z0-9]*(?:\([^)\s]{1,8}\))*/g;
+      const missing = new Map<string, string>();
+      for (const match of proseBeforeBlock.matchAll(reporterRe)) {
+        const key = normCite(match[0]);
+        if (!covered.has(key) && !missing.has(key)) {
+          missing.set(key, match[0].replace(/\s+/g, " "));
+        }
+      }
+      for (const match of proseBeforeBlock.matchAll(statuteRe)) {
+        const key = baseStatute(normCite(match[0]));
+        if (!covered.has(key) && !missing.has(key)) {
+          missing.set(key, match[0].replace(/\s+/g, " "));
+        }
+      }
+      if (missing.size > 0) {
+        const shown = [...missing.values()].slice(0, 8);
+        const suffix =
+          missing.size > shown.length
+            ? ` and ${missing.size - shown.length} more`
+            : "";
+        const note = `\n\n*Not retrieved in this conversation, so the wording has not been checked: ${shown.join("; ")}${suffix}.*`;
+        events.push({ type: "content", text: note });
+        write(
+          `data: ${JSON.stringify({ type: "content_delta", text: note })}\n\n`,
+        );
+      }
+    } catch (err) {
+      devLog("[chat/stream] authority coverage check failed", err);
+    }
+  }
+
   devLog("[chat/stream] final citations", {
     hasCitationsBlock: citationDiagnostics.hasBlock,
     citationsBlockLength: citationDiagnostics.rawLength,
