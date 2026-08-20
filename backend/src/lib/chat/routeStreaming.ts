@@ -105,7 +105,12 @@ export function openAssistantSse(res: Response): {
 
   return {
     signal: controller.signal,
-    write: (line) => res.write(line),
+    write: (line) => {
+      // Once the reader has gone there is nothing to write to, and writing
+      // anyway throws from inside the stream.
+      if (res.writableEnded || res.destroyed) return false;
+      return res.write(line);
+    },
     finish: () => {
       finished = true;
       forget();

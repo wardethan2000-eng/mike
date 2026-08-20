@@ -1272,7 +1272,13 @@ tabularRouter.post("/:reviewId/generate", requireAuth, async (req, res) => {
     res.setHeader("X-Accel-Buffering", "no");
     res.flushHeaders();
 
-    const write = (line: string) => res.write(line);
+    const write = (line: string) => {
+        // Once the reader has gone, there is nothing to write to. Writing
+        // anyway throws from inside the stream and takes the turn's own error
+        // handling down with it, so the answer is neither finished nor saved.
+        if (res.writableEnded || res.destroyed) return false;
+        return res.write(line);
+    };
 
     try {
         await Promise.all(
@@ -1732,7 +1738,13 @@ tabularRouter.post("/:reviewId/chat", requireAuth, async (req, res) => {
     res.setHeader("Connection", "keep-alive");
     res.setHeader("X-Accel-Buffering", "no");
     res.flushHeaders();
-    const write = (line: string) => res.write(line);
+    const write = (line: string) => {
+        // Once the reader has gone, there is nothing to write to. Writing
+        // anyway throws from inside the stream and takes the turn's own error
+        // handling down with it, so the answer is neither finished nor saved.
+        if (res.writableEnded || res.destroyed) return false;
+        return res.write(line);
+    };
     const streamAbort = new AbortController();
     let streamFinished = false;
     res.on("close", () => {
