@@ -262,7 +262,7 @@ documentsRouter.get("/:documentId/text", requireAuth, async (req, res) => {
     .single();
   if (!doc)
     return void res.status(404).json({ detail: "Document not found" });
-  const access = await ensureDocAccess(doc, userId, userEmail, db);
+  const access = await ensureDocReadAccess(doc, userId, userEmail, db);
   if (!access.ok)
     return void res.status(404).json({ detail: "Document not found" });
 

@@ -1774,6 +1774,16 @@ export async function resolveDocumentEdit(
     );
 }
 
+export async function getDocumentText(documentId: string): Promise<string> {
+    const authHeaders = await getAuthHeader();
+    const response = await fetch(
+        `${API_BASE}/single-documents/${documentId}/text`,
+        { headers: { ...authHeaders }, cache: "no-store" },
+    );
+    if (!response.ok) throw new Error(await response.text());
+    return response.text();
+}
+
 export async function getDocumentUrl(
     documentId: string,
     versionId?: string | null,

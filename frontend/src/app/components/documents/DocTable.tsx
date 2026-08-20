@@ -16,6 +16,7 @@ import { createPortal } from "react-dom";
 import { Loader2, AlertCircle, ChevronDown, ChevronRight } from "lucide-react";
 import {
     deleteDocument,
+    getDocumentText,
     getDocumentUrl,
     downloadDocumentsZip,
     listDocumentVersions,
@@ -463,10 +464,7 @@ export function DocTable({
         setEditTextDoc(doc);
         setEditTextValue(null);
         try {
-            const resolved = await getDocumentUrl(doc.id);
-            const response = await fetch(resolved.url);
-            if (!response.ok) throw new Error(await response.text());
-            const text = await response.text();
+            const text = await getDocumentText(doc.id);
             if (editTextDocIdRef.current === doc.id) setEditTextValue(text);
         } catch (e) {
             console.error("Could not open text for editing:", e);
