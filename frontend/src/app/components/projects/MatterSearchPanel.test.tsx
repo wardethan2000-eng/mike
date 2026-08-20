@@ -68,6 +68,7 @@ describe("MatterSearchPanel", () => {
                 },
             ],
         });
+        searchMatter.mockResolvedValue({ results: [] });
         const onOpenSource = vi.fn();
         render(
             <MatterSearchPanel
@@ -76,11 +77,13 @@ describe("MatterSearchPanel", () => {
             />,
         );
 
-        fireEvent.click(screen.getByText("Ask the matter"));
-        fireEvent.change(screen.getByPlaceholderText(/Ask a question of the whole matter/), {
-            target: { value: "When is rent due?" },
-        });
-        fireEvent.click(screen.getByRole("button", { name: "Ask" }));
+        fireEvent.change(
+            screen.getByPlaceholderText(/Ask the matter a question/),
+            {
+                target: { value: "When is rent due?" },
+            },
+        );
+        fireEvent.click(screen.getByRole("button", { name: "Search" }));
 
         const citation = await screen.findByRole("button", {
             name: "Lease.pdf, page 4",

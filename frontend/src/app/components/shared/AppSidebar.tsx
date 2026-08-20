@@ -425,7 +425,7 @@ export function AppSidebar({ isOpen, onToggle }: AppSidebarProps) {
                                                             }
                                                             title={project.name}
                                                             className={cn(
-                                                                "flex h-8 w-full items-center gap-2 rounded-md px-2.5 py-1 text-left text-xs transition-colors",
+                                                                "flex h-8 w-full items-center gap-2 rounded-md px-2.5 py-1 text-left text-sm transition-colors",
                                                                 isActive
                                                                     ? `${APP_SURFACE_ACTIVE_CLASS} text-gray-900`
                                                                     : `text-gray-700 ${APP_SURFACE_HOVER_CLASS}`,

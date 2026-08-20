@@ -1,5 +1,5 @@
 import type { Metadata } from "next";
-import { Inter, EB_Garamond } from "next/font/google";
+import { Inter, Source_Serif_4 } from "next/font/google";
 import "./globals.css";
 import { Providers } from "@/app/components/providers";
 
@@ -8,8 +8,8 @@ const inter = Inter({
     subsets: ["latin"],
 });
 
-const ebGaramond = EB_Garamond({
-    variable: "--font-eb-garamond",
+const sourceSerif = Source_Serif_4({
+    variable: "--font-source-serif",
     subsets: ["latin"],
     weight: ["400", "500", "600", "700"],
 });
@@ -59,7 +59,7 @@ export default function RootLayout({
     return (
         <html lang="en">
             <body
-                className={`${inter.variable} ${ebGaramond.variable} font-sans antialiased`}
+                className={`${inter.variable} ${sourceSerif.variable} font-sans antialiased`}
             >
                 <Providers>{children}</Providers>
             </body>

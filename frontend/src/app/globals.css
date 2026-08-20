@@ -1,6 +1,10 @@
 @import "tailwindcss";
 @import "tw-animate-css";
 
+html {
+    font-size: 17px;
+}
+
 @custom-variant dark (&:is(.dark *));
 
 @layer utilities {
@@ -16,6 +20,9 @@
 }
 
 @theme inline {
+    --color-white: #fdfcf9;
+    --color-gray-50: #f7f5f0;
+    --color-gray-100: #f0eee7;
     --color-background: var(--background);
     --color-foreground: var(--foreground);
     --color-app-background: var(--app-background);
@@ -24,7 +31,7 @@
     --color-app-surface-active: var(--app-surface-active);
     --color-app-floating: var(--app-floating);
     --font-sans: var(--font-inter);
-    --font-serif: var(--font-eb-garamond);
+    --font-serif: var(--font-source-serif);
     --color-blue: rgb(0, 136, 255);
     --color-blue-50: rgba(0, 136, 255, 0.05);
     --color-blue-100: rgba(0, 136, 255, 0.1);
@@ -69,41 +76,41 @@
 :root {
     --radius: 0.625rem;
     --color-azure: 0, 136, 255;
-    --app-background: #f9fafb;
-    --app-surface: #fdfdfe;
-    --app-surface-hover: #f9fafb;
-    --app-surface-active: #eff0f3;
-    --app-floating: #fefefe;
-    --background: oklch(0.985 0 0);
-    --foreground: oklch(0.145 0 0);
-    --card: oklch(1 0 0);
-    --card-foreground: oklch(0.145 0 0);
-    --popover: oklch(1 0 0);
-    --popover-foreground: oklch(0.145 0 0);
+    --app-background: #faf9f5;
+    --app-surface: #fcfbf7;
+    --app-surface-hover: #f5f4ed;
+    --app-surface-active: #edebe0;
+    --app-floating: #fffefa;
+    --background: #faf9f5;
+    --foreground: #1a1915;
+    --card: #fdfcf9;
+    --card-foreground: #1a1915;
+    --popover: #fdfcf9;
+    --popover-foreground: #1a1915;
     --primary: oklch(0.205 0 0);
     --primary-foreground: oklch(0.985 0 0);
-    --secondary: oklch(0.97 0 0);
+    --secondary: #f0eee6;
     --secondary-foreground: oklch(0.205 0 0);
-    --muted: oklch(0.97 0 0);
-    --muted-foreground: oklch(0.556 0 0);
-    --accent: oklch(0.97 0 0);
+    --muted: #f0eee6;
+    --muted-foreground: #6f6c64;
+    --accent: #f0eee6;
     --accent-foreground: oklch(0.205 0 0);
     --destructive: oklch(0.577 0.245 27.325);
-    --border: oklch(0.922 0 0);
-    --input: oklch(0.922 0 0);
+    --border: #e5e2d9;
+    --input: #e5e2d9;
     --ring: oklch(0.708 0 0);
     --chart-1: oklch(0.646 0.222 41.116);
     --chart-2: oklch(0.6 0.118 184.704);
     --chart-3: oklch(0.398 0.07 227.392);
     --chart-4: oklch(0.828 0.189 84.429);
     --chart-5: oklch(0.769 0.188 70.08);
-    --sidebar: oklch(0.985 0 0);
-    --sidebar-foreground: oklch(0.145 0 0);
+    --sidebar: #f5f3ec;
+    --sidebar-foreground: #1a1915;
     --sidebar-primary: oklch(0.205 0 0);
     --sidebar-primary-foreground: oklch(0.985 0 0);
-    --sidebar-accent: oklch(0.97 0 0);
+    --sidebar-accent: #ebe9e0;
     --sidebar-accent-foreground: oklch(0.205 0 0);
-    --sidebar-border: oklch(0.922 0 0);
+    --sidebar-border: #e5e2d9;
     --sidebar-ring: oklch(0.708 0 0);
 }
 
@@ -300,7 +307,7 @@
 
 @layer utilities {
     .font-eb-garamond {
-        font-family: var(--font-eb-garamond);
+        font-family: var(--font-serif);
     }
 
     .sidebar-fade-in {

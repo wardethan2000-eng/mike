@@ -77,6 +77,7 @@ import {
     type TableSortDirection,
 } from "@/app/components/shared/TablePrimitive";
 import { isExternalFileDrag } from "@/app/lib/fileDrag";
+import { invalidateDocFile } from "@/app/lib/docFileCache";
 
 export type DocTableFolder = ProjectFolder | LibraryFolder;
 export type DocTableFolderBreadcrumb = {
@@ -493,6 +494,7 @@ export function DocTable({
     async function submitNewVersion(doc: Document, file: File, filename: string) {
         try {
             await uploadDocumentVersion(doc.id, file, filename);
+            invalidateDocFile(doc.id);
             await refreshDocumentVersionState(doc.id);
         } catch (e) {
             console.error("uploadDocumentVersion failed", e);
@@ -501,6 +503,7 @@ export function DocTable({
 
     async function replaceVersionFile(docId: string, versionId: string, file: File, filename: string) {
         await replaceDocumentVersionFile(docId, versionId, file, filename);
+        invalidateDocFile(docId);
         const res = await refreshDocumentVersionState(docId);
         const replaced = res.versions.find((version) => version.id === versionId);
         if (replaced) {
@@ -561,6 +564,7 @@ export function DocTable({
     async function handleDeleteVersion(docId: string, versionId: string) {
         try {
             await deleteDocumentVersion(docId, versionId);
+            invalidateDocFile(docId);
             const res = await refreshDocumentVersionState(docId);
             const activeVersions = res.versions.filter((version) => version.deleted_at == null);
             const nextVersion =
@@ -1292,6 +1296,7 @@ export function DocTable({
         try {
             for (const file of supported) {
                 await uploadDocumentVersion(doc.id, file, file.name);
+                invalidateDocFile(doc.id);
             }
             await refreshDocumentVersionState(doc.id);
         } catch (err) {
@@ -1468,7 +1473,7 @@ export function DocTable({
                         <SubfolderSvgIcon className="mr-2 h-4 w-4 shrink-0" />
                         <input
                             autoFocus
-                            className="flex-1 min-w-0 text-xs text-gray-800 bg-transparent outline-none border-b border-gray-300"
+                            className="flex-1 min-w-0 text-sm text-gray-800 bg-transparent outline-none border-b border-gray-300"
                             placeholder="Folder name"
                             value={newFolderName}
                             onChange={(e) => setNewFolderName(e.target.value)}
@@ -1517,16 +1522,16 @@ export function DocTable({
                         <span className="mr-2 shrink-0">
                             <DocIcon fileType={fileType ?? filename} muted />
                         </span>
-                        <span className="text-xs text-gray-400 truncate">{filename}</span>
+                        <span className="text-sm text-gray-400 truncate">{filename}</span>
                     </div>
                 </div>
-                <div className="ml-auto w-20 shrink-0 text-xs text-gray-300 lowercase truncate">
+                <div className="ml-auto w-20 shrink-0 text-sm text-gray-300 lowercase truncate">
                     {fileType ?? (filename.includes(".") ? filename.split(".").pop() : "file")}
                 </div>
-                <div className="w-24 shrink-0 text-xs text-gray-300">{statusLabel}</div>
-                <div className="w-20 shrink-0 text-xs text-gray-300">—</div>
-                <div className="w-32 shrink-0 text-xs text-gray-300">—</div>
-                <div className="w-32 shrink-0 text-xs text-gray-300">—</div>
+                <div className="w-24 shrink-0 text-sm text-gray-300">{statusLabel}</div>
+                <div className="w-20 shrink-0 text-sm text-gray-300">—</div>
+                <div className="w-32 shrink-0 text-sm text-gray-300">—</div>
+                <div className="w-32 shrink-0 text-sm text-gray-300">—</div>
                 <div className="w-8 shrink-0" />
             </div>
         );
@@ -1808,7 +1813,7 @@ export function DocTable({
                                                     {renamingDocumentId === doc.id ? (
                                                         <input
                                                             autoFocus
-                                                            className="min-w-0 flex-1 text-xs text-gray-800 bg-transparent outline-none border-b border-gray-300"
+                                                            className="min-w-0 flex-1 text-sm text-gray-800 bg-transparent outline-none border-b border-gray-300"
                                                             value={renameDocumentValue}
                                                             onClick={(e) => e.stopPropagation()}
                                                             onDragStart={(e) => {
@@ -1827,16 +1832,16 @@ export function DocTable({
                                                             onBlur={() => void submitDocumentRename(doc.id)}
                                                         />
                                                     ) : (
-                                                        <span className="text-xs text-gray-800 truncate">
+                                                        <span className="text-sm text-gray-800 truncate">
                                                             {docName}
                                                         </span>
                                                     )}
                                                 </div>
                                             </div>
-                                            <div className="ml-auto w-20 shrink-0 text-xs text-gray-500 lowercase truncate">
+                                            <div className="ml-auto w-20 shrink-0 text-sm text-gray-500 lowercase truncate">
                                                 {doc.file_type ?? <span className="text-gray-300">—</span>}
                                             </div>
-                                            <div className="w-24 shrink-0 text-xs text-gray-500 truncate">
+                                            <div className="w-24 shrink-0 text-sm text-gray-500 truncate">
                                                 {doc.size_bytes != null ? (
                                                     formatBytes(doc.size_bytes)
                                                 ) : (
@@ -1844,7 +1849,7 @@ export function DocTable({
                                                 )}
                                             </div>
                                             <div
-                                                className="w-20 shrink-0 text-xs text-gray-500 flex items-center gap-1"
+                                                className="w-20 shrink-0 text-sm text-gray-500 flex items-center gap-1"
                                                 onClick={(e) => e.stopPropagation()}
                                             >
                                                 {hasVersions ? (
@@ -1863,14 +1868,14 @@ export function DocTable({
                                                     <span className="text-gray-300 pl-1">—</span>
                                                 )}
                                             </div>
-                                            <div className="w-32 shrink-0 text-xs text-gray-500 truncate">
+                                            <div className="w-32 shrink-0 text-sm text-gray-500 truncate">
                                                 {doc.created_at ? (
                                                     formatDate(doc.created_at)
                                                 ) : (
                                                     <span className="text-gray-300">—</span>
                                                 )}
                                             </div>
-                                            <div className="w-32 shrink-0 text-xs text-gray-500 truncate">
+                                            <div className="w-32 shrink-0 text-sm text-gray-500 truncate">
                                                 {doc.updated_at ? (
                                                     formatDate(doc.updated_at)
                                                 ) : (
@@ -2124,7 +2129,7 @@ export function DocTable({
                                         {isRenaming ? (
                                             <input
                                                 autoFocus
-                                                className="flex-1 min-w-0 text-xs text-gray-800 bg-transparent outline-none"
+                                                className="flex-1 min-w-0 text-sm text-gray-800 bg-transparent outline-none"
                                                 value={renameFolderValue}
                                                 onDragStart={(e) => {
                                                     e.preventDefault();
@@ -2139,17 +2144,17 @@ export function DocTable({
                                                 onClick={(e) => e.stopPropagation()}
                                             />
                                         ) : (
-                                            <span className="text-xs text-gray-800 truncate">{folder.name}</span>
+                                            <span className="text-sm text-gray-800 truncate">{folder.name}</span>
                                         )}
                                     </div>
                                 </div>
-                                <div className="ml-auto w-20 shrink-0 text-xs text-gray-300">—</div>
-                                <div className="w-24 shrink-0 text-xs text-gray-300">—</div>
-                                <div className="w-20 shrink-0 text-xs text-gray-300">—</div>
-                                <div className="w-32 shrink-0 truncate text-xs text-gray-500">
+                                <div className="ml-auto w-20 shrink-0 text-sm text-gray-300">—</div>
+                                <div className="w-24 shrink-0 text-sm text-gray-300">—</div>
+                                <div className="w-20 shrink-0 text-sm text-gray-300">—</div>
+                                <div className="w-32 shrink-0 truncate text-sm text-gray-500">
                                     {formatDate(folder.created_at)}
                                 </div>
-                                <div className="w-32 shrink-0 truncate text-xs text-gray-500">
+                                <div className="w-32 shrink-0 truncate text-sm text-gray-500">
                                     {formatDate(
                                         folder.updated_at ?? folder.created_at,
                                     )}
@@ -2637,6 +2642,50 @@ export function DocTable({
                 warning={documentUploadWarning}
                 onWarningClose={() => setDocumentUploadWarning(null)}
             />
+            {selectedDocIds.length > 0 && (
+                <div className="absolute bottom-4 left-1/2 z-[115] flex -translate-x-1/2 items-center gap-1 rounded-full border border-gray-200 bg-white px-2 py-1.5 shadow-lg">
+                    <span className="px-2 text-sm font-medium text-gray-700">
+                        {selectedDocIds.length} selected
+                    </span>
+                    <button
+                        type="button"
+                        onClick={() => void handleDownloadSelectedDocs()}
+                        className="rounded-full px-3 py-1 text-sm text-gray-700 transition-colors hover:bg-gray-100"
+                    >
+                        Download
+                    </button>
+                    {selectedDocIds.some(
+                        (id) => docs.find((d) => d.id === id)?.folder_id != null,
+                    ) && (
+                        <button
+                            type="button"
+                            onClick={() => void handleRemoveSelectedFromFolder()}
+                            className="rounded-full px-3 py-1 text-sm text-gray-700 transition-colors hover:bg-gray-100"
+                        >
+                            Remove from subfolder
+                        </button>
+                    )}
+                    <button
+                        type="button"
+                        onClick={() => setConfirmDeleteAllOpen(true)}
+                        className="rounded-full px-3 py-1 text-sm text-red-600 transition-colors hover:bg-red-50"
+                    >
+                        Delete
+                    </button>
+                    <button
+                        type="button"
+                        onClick={() => {
+                            setSelectedDocIds([]);
+                            setSelectedFolderIds(new Set());
+                            setSelectionCameFromSelectAll(false);
+                        }}
+                        className="rounded-full px-3 py-1 text-sm text-gray-500 transition-colors hover:bg-gray-100"
+                        title="Clear selection"
+                    >
+                        Clear
+                    </button>
+                </div>
+            )}
             <WarningPopup
                 open={!!documentRenameWarning}
                 onClose={() => setDocumentRenameWarning(null)}
@@ -2650,7 +2699,9 @@ export function DocTable({
             <ConfirmPopup
                 open={confirmDeleteAllOpen && selectedDocIds.length > 0}
                 title="Delete all selected files?"
-                message={`This will permanently delete every selected file you own, including selected files not currently shown in the table. Files owned by others will be skipped. ${selectedDocIds.length} files are selected.`}
+                message={selectionCameFromSelectAll
+                    ? `This will permanently delete every selected file you own, including selected files not currently shown in the table. Files owned by others will be skipped. ${selectedDocIds.length} files are selected.`
+                    : `This will permanently delete the ${selectedDocIds.length} selected ${selectedDocIds.length === 1 ? "file" : "files"} you own. Files owned by others will be skipped.`}
                 confirmLabel="Delete"
                 cancelLabel="Cancel"
                 onCancel={() => setConfirmDeleteAllOpen(false)}
@@ -2999,7 +3050,7 @@ export function DocTable({
                                                                     {renamingDocumentId === doc.id ? (
                                                                         <input
                                                                             autoFocus
-                                                                            className="min-w-0 flex-1 text-xs text-gray-800 bg-transparent outline-none border-b border-gray-300"
+                                                                            className="min-w-0 flex-1 text-sm text-gray-800 bg-transparent outline-none border-b border-gray-300"
                                                                             value={renameDocumentValue}
                                                                             onClick={(e) => e.stopPropagation()}
                                                                             onDragStart={(e) => {
@@ -3022,18 +3073,18 @@ export function DocTable({
                                                                             }
                                                                         />
                                                                     ) : (
-                                                                        <span className="text-xs text-gray-800 truncate">
+                                                                        <span className="text-sm text-gray-800 truncate">
                                                                             {docName}
                                                                         </span>
                                                                     )}
                                                                 </div>
                                                             </div>
-                                                            <div className="ml-auto w-20 shrink-0 text-xs text-gray-500 lowercase truncate">
+                                                            <div className="ml-auto w-20 shrink-0 text-sm text-gray-500 lowercase truncate">
                                                                 {doc.file_type ?? (
                                                                     <span className="text-gray-300">—</span>
                                                                 )}
                                                             </div>
-                                                            <div className="w-24 shrink-0 text-xs text-gray-500 truncate">
+                                                            <div className="w-24 shrink-0 text-sm text-gray-500 truncate">
                                                                 {doc.size_bytes != null ? (
                                                                     formatBytes(doc.size_bytes)
                                                                 ) : (
@@ -3041,7 +3092,7 @@ export function DocTable({
                                                                 )}
                                                             </div>
                                                             <div
-                                                                className="w-20 shrink-0 text-xs text-gray-500 flex items-center gap-1"
+                                                                className="w-20 shrink-0 text-sm text-gray-500 flex items-center gap-1"
                                                                 onClick={(e) => e.stopPropagation()}
                                                             >
                                                                 {hasVersions ? (
@@ -3060,14 +3111,14 @@ export function DocTable({
                                                                     <span className="text-gray-300 pl-1">—</span>
                                                                 )}
                                                             </div>
-                                                            <div className="w-32 shrink-0 text-xs text-gray-500 truncate">
+                                                            <div className="w-32 shrink-0 text-sm text-gray-500 truncate">
                                                                 {doc.created_at ? (
                                                                     formatDate(doc.created_at)
                                                                 ) : (
                                                                     <span className="text-gray-300">—</span>
                                                                 )}
                                                             </div>
-                                                            <div className="w-32 shrink-0 text-xs text-gray-500 truncate">
+                                                            <div className="w-32 shrink-0 text-sm text-gray-500 truncate">
                                                                 {doc.updated_at ? (
                                                                     formatDate(doc.updated_at)
                                                                 ) : (
@@ -3275,6 +3326,7 @@ export function DocTable({
                         type: "text/plain",
                     });
                     await uploadDocumentVersion(editTextDoc.id, file, filename);
+                    invalidateDocFile(editTextDoc.id);
                     await refreshDocumentVersionState(editTextDoc.id);
                 }}
             />

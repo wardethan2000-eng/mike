@@ -220,7 +220,7 @@ export function TableHeaderRow({ children, className, ...props }: DivProps) {
     return (
         <div
             className={cn(
-                "z-[70] flex h-10 min-w-max items-center bg-app-surface pr-3 text-xs font-medium text-gray-500 select-none backdrop-blur-xl",
+                "z-[70] flex h-10 min-w-max items-center bg-app-surface pr-3 text-sm font-medium text-gray-500 select-none backdrop-blur-xl",
                 className,
             )}
             {...props}

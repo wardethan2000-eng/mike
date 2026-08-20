@@ -103,7 +103,7 @@ export function SidebarChatItem({ chat, isActive, onSelect, projectName }: Props
                             e.currentTarget.scrollTo({ left: 0, behavior: "smooth" });
                         }}
                         className={cn(
-                            "min-w-0 flex-1 overflow-x-hidden whitespace-nowrap scrollbar-none py-1 pl-2 text-left text-xs",
+                            "min-w-0 flex-1 overflow-x-hidden whitespace-nowrap scrollbar-none py-1 pl-2 text-left text-sm",
                             isActive
                                 ? "pr-3 text-gray-900"
                                 : "pr-0 text-gray-700 group-hover:pr-3",
