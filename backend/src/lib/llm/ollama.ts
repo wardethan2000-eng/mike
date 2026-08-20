@@ -248,7 +248,7 @@ export async function completeOllamaText(params: {
       messages: initialMessages(params.systemPrompt ?? "", [
         { role: "user", content: params.user },
       ]),
-      max_tokens: params.maxTokens ?? 512,
+      max_tokens: params.maxTokens ?? 2048,
       stream: false,
     },
     undefined,

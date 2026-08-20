@@ -94,7 +94,7 @@ export async function answerMatter(
       `Question: ${question}\n\n` +
       `Passages found in the matter's documents:\n${context}\n\n` +
       "Answer the question using only these passages, citing the document and page for each point.",
-    maxTokens: 800,
+    maxTokens: 4000,
     apiKeys: params.apiKeys,
   });
 
