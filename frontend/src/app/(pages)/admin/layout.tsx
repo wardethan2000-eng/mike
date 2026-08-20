@@ -16,6 +16,7 @@ interface TabDef {
 const TABS: TabDef[] = [
     { id: "people", label: "People", href: "/admin" },
     { id: "firm", label: "Firm", href: "/admin/firm" },
+    { id: "content", label: "Content", href: "/admin/content" },
 ];
 
 export default function AdminLayout({

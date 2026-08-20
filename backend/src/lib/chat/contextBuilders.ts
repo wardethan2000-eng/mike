@@ -16,6 +16,7 @@ import { buildSystemPrompt } from "./prompts";
 import { parseCitations, createCitation } from "./citations";
 import type { AssistantEvent } from "./streaming";
 import { ensureDefaultWorkflows } from "../workflowCatalog";
+import { filterAccessibleDocumentIds } from "../access";
 
 // ---------------------------------------------------------------------------
 // Prompt-injection spotlighting helpers
@@ -514,6 +515,7 @@ export async function buildDocContext(
   db: ReturnType<typeof createServerSupabase>,
   chatId?: string | null,
   messageTable = "chat_messages",
+  userEmail?: string | null,
 ): Promise<{ docIndex: DocIndex; docStore: DocStore }> {
   const docIndex: DocIndex = {};
   const docStore: DocStore = new Map();
@@ -566,12 +568,23 @@ export async function buildDocContext(
 
   const ids = [...documentIds];
   if (ids.length > 0) {
-    const { data: docs } = await db
-      .from("documents")
-      .select("id, current_version_id, status, library_kind")
-      .in("id", ids)
-      .eq("user_id", userId)
-      .eq("status", "ready");
+    // Which of these the person may actually read: their own, anything in a
+    // matter they can open, and anything on the firm's library shelves. A
+    // firm template attached by a colleague used to vanish here, because the
+    // only question asked was "did you upload it yourself".
+    const readableIds = await filterAccessibleDocumentIds(
+      ids,
+      userId,
+      userEmail,
+      db,
+    );
+    const { data: docs } = readableIds.length
+      ? await db
+          .from("documents")
+          .select("id, current_version_id, status, library_kind")
+          .in("id", readableIds)
+          .eq("status", "ready")
+      : { data: [] as unknown[] };
 
     const docList = (docs ?? []) as unknown as {
       id: string;
@@ -823,6 +836,7 @@ export async function mergeChatOnlyDocs(
   userId: string,
   db: ReturnType<typeof createServerSupabase>,
   target: { docIndex: DocIndex; docStore: DocStore },
+  userEmail?: string | null,
 ): Promise<void> {
   const hasAttachedFile = messages.some((m) =>
     (m.files ?? []).some((f) => f.document_id),
@@ -833,7 +847,14 @@ export async function mergeChatOnlyDocs(
   );
   // A chat must never fail because of an attachment lookup.
   try {
-    const { docIndex, docStore } = await buildDocContext(messages, userId, db);
+    const { docIndex, docStore } = await buildDocContext(
+      messages,
+      userId,
+      db,
+      null,
+      "chat_messages",
+      userEmail,
+    );
     let i = 0;
     for (const [label, info] of Object.entries(docIndex)) {
       if (projectDocumentIds.has(info.document_id)) continue;

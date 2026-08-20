@@ -3,7 +3,7 @@ import { requireAuth } from "../middleware/auth";
 import { createServerSupabase } from "../lib/supabase";
 import { buildContentDisposition, downloadFile } from "../lib/storage";
 import { verifyDownload } from "../lib/downloadTokens";
-import { ensureDocAccess } from "../lib/access";
+import { ensureDocReadAccess } from "../lib/access";
 import { contentTypeForDocumentType } from "../lib/documentTypes";
 
 export const downloadsRouter = Router();
@@ -52,7 +52,7 @@ downloadsRouter.get("/:token", requireAuth, async (req, res) => {
     if (!doc)
         return void res.status(404).json({ detail: "File not found" });
 
-    const access = await ensureDocAccess(doc, userId, userEmail, db);
+    const access = await ensureDocReadAccess(doc, userId, userEmail, db);
     if (!access.ok)
         return void res.status(404).json({ detail: "File not found" });
 

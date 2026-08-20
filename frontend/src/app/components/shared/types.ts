@@ -881,6 +881,8 @@ export interface Workflow {
     shared_by_name?: string | null;
     allow_edit?: boolean;
     is_owner?: boolean;
+    /** Where it came from: yours, someone who shared it, or the firm's list. */
+    scope?: "personal" | "shared" | "firm";
     open_source_submission?: WorkflowOpenSourceSubmission | null;
 }
 

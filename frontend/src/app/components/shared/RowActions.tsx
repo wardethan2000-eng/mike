@@ -9,6 +9,7 @@ import {
 } from "react";
 import { createPortal } from "react-dom";
 import {
+    Building2,
     Download,
     Eye,
     FileText,
@@ -44,6 +45,7 @@ interface Props {
     onRemoveFromFolder?: () => void;
     onShowAllVersions?: () => void;
     onUploadNewVersion?: () => void;
+    onPublishToFirm?: () => void;
     onNewSubfolder?: () => void;
     deleting?: boolean;
     deleteDisabled?: boolean;
@@ -52,6 +54,7 @@ interface Props {
     onRename?: () => void;
     onUpdateCmNumber?: () => void;
     newSubfolderLabel?: string;
+    publishToFirmLabel?: string;
     renameLabel?: string;
     uploadNewVersionLabel?: string;
     deleteLabel?: string;
@@ -76,6 +79,7 @@ export const RowActionMenuItems = forwardRef<
     onRemoveFromFolder,
     onShowAllVersions,
     onUploadNewVersion,
+    onPublishToFirm,
     onNewSubfolder,
     deleting,
     deleteDisabled = false,
@@ -84,6 +88,7 @@ export const RowActionMenuItems = forwardRef<
     onRename,
     onUpdateCmNumber,
     newSubfolderLabel = "New subfolder",
+    publishToFirmLabel = "Add to firm library",
     renameLabel = "Rename",
     uploadNewVersionLabel = "Upload new version",
     deleteLabel = "Delete",
@@ -169,6 +174,15 @@ export const RowActionMenuItems = forwardRef<
                 >
                     <Upload className="h-3.5 w-3.5 shrink-0" />
                     {uploadNewVersionLabel}
+                </LiquidDropdownButton>
+            )}
+            {onPublishToFirm && (
+                <LiquidDropdownButton
+                    onClick={() => { onClose(); onPublishToFirm(); }}
+                    className={ROW_ACTION_LEFT_ITEM_CLASS}
+                >
+                    <Building2 className="h-3.5 w-3.5 shrink-0" />
+                    {publishToFirmLabel}
                 </LiquidDropdownButton>
             )}
             {onRemoveFromFolder && (

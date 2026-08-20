@@ -12,8 +12,8 @@ import {
     useRef,
     useState,
 } from "react";
-import { useRouter } from "next/navigation";
-import { ChevronLeft, Plus, Upload } from "lucide-react";
+import { useRouter, useSearchParams } from "next/navigation";
+import { Building2, ChevronLeft, Plus, Upload, User } from "lucide-react";
 import { DocTable } from "@/app/components/documents/DocTable";
 import type {
   DocTableFolderBreadcrumb,
@@ -38,11 +38,14 @@ import {
     renameLibraryDocument,
     renameLibraryFolder,
   searchLibraryDocuments,
+    publishDocumentToFirm,
     uploadLibraryDocument,
     type LibraryKind,
+    type LibraryScope,
 } from "@/app/lib/mikeApi";
 import type { Document } from "@/app/components/shared/types";
 import { useDebouncedValue } from "@/app/hooks/useDebouncedValue";
+import { useUserProfile } from "@/app/contexts/UserProfileContext";
 
 type LibraryViewCollection = {
     documents: Document[];
@@ -50,6 +53,8 @@ type LibraryViewCollection = {
 };
 
 type LibraryWorkspaceContextValue = {
+    /** Whose shelves this page is showing: your own, or the firm's. */
+    scope: LibraryScope;
     collections: Record<LibraryKind, LibraryViewCollection | null>;
     loadingByKind: Record<LibraryKind, boolean>;
     searchByKind: Record<LibraryKind, string>;
@@ -111,8 +116,10 @@ function useLibraryWorkspace() {
 
 export function LibraryWorkspaceProvider({
     children,
+    scope = "personal",
 }: {
     children: ReactNode;
+    scope?: LibraryScope;
 }) {
     const [collections, setCollections] = useState<
         Record<LibraryKind, LibraryViewCollection | null>
@@ -179,16 +186,20 @@ export function LibraryWorkspaceProvider({
             try {
                 const loadedFolderIds = [...loadedFolderIdsByKind[kind]];
                 const limits = documentLimitByKind[kind];
-        const response = await getLibraryLevels(kind, [
-          {
-            parentId: null,
-                        limit: limits[ROOT_LEVEL_KEY] ?? DOCUMENT_PAGE_SIZE,
-          },
-          ...loadedFolderIds.map((folderId) => ({
-            parentId: folderId,
-                                limit: limits[folderId] ?? DOCUMENT_PAGE_SIZE,
-          })),
-                ]);
+        const response = await getLibraryLevels(
+          kind,
+          [
+            {
+              parentId: null,
+              limit: limits[ROOT_LEVEL_KEY] ?? DOCUMENT_PAGE_SIZE,
+            },
+            ...loadedFolderIds.map((folderId) => ({
+              parentId: folderId,
+              limit: limits[folderId] ?? DOCUMENT_PAGE_SIZE,
+            })),
+          ],
+          scope,
+        );
         const root = response.levels.find((level) => level.parentId === null);
         if (!root) throw new Error("Library root was not returned");
 
@@ -262,7 +273,7 @@ export function LibraryWorkspaceProvider({
                 }
             }
         },
-        [loadedFolderIdsByKind, documentLimitByKind],
+        [loadedFolderIdsByKind, documentLimitByKind, scope],
     );
 
     const loadFolderChildren = useCallback(
@@ -274,9 +285,12 @@ export function LibraryWorkspaceProvider({
 
             const request = (async () => {
                 try {
-          const children = await getLibraryFolderChildren(kind, folderId, {
-            limit: DOCUMENT_PAGE_SIZE,
-          });
+          const children = await getLibraryFolderChildren(
+            kind,
+            folderId,
+            { limit: DOCUMENT_PAGE_SIZE },
+            scope,
+          );
                     setCollections((prev) => {
                         const current = prev[kind] ?? EMPTY_COLLECTION;
             const existingDocIds = new Set(current.documents.map((d) => d.id));
@@ -325,7 +339,7 @@ export function LibraryWorkspaceProvider({
             folderChildrenRequestsRef.current.set(key, request);
             return request;
         },
-        [loadedFolderIdsByKind],
+        [loadedFolderIdsByKind, scope],
     );
 
   // Fetches a fixed-size next page for one level. The old implementation
@@ -348,14 +362,17 @@ export function LibraryWorkspaceProvider({
                 try {
                     const page =
                         parentId === null
-              ? await getLibrary(kind, {
-                  limit: DOCUMENT_PAGE_SIZE,
-                  offset,
-                })
-                            : await getLibraryFolderChildren(kind, parentId, {
-                  limit: DOCUMENT_PAGE_SIZE,
-                  offset,
-                              });
+              ? await getLibrary(
+                  kind,
+                  { limit: DOCUMENT_PAGE_SIZE, offset },
+                  scope,
+                )
+                            : await getLibraryFolderChildren(
+                  kind,
+                  parentId,
+                  { limit: DOCUMENT_PAGE_SIZE, offset },
+                  scope,
+                              );
 
                     setCollections((prev) => {
                         const current = prev[kind] ?? EMPTY_COLLECTION;
@@ -406,7 +423,7 @@ export function LibraryWorkspaceProvider({
             loadMoreDocumentsRequestsRef.current.set(requestKey, request);
             return request;
         },
-        [documentLimitByKind],
+        [documentLimitByKind, scope],
     );
 
     const setSearchForKind = useCallback((kind: LibraryKind, value: string) => {
@@ -451,6 +468,7 @@ export function LibraryWorkspaceProvider({
 
     const value = useMemo(
         () => ({
+            scope,
             collections,
             loadingByKind,
             searchByKind,
@@ -465,6 +483,7 @@ export function LibraryWorkspaceProvider({
             setFoldersForKind,
         }),
         [
+            scope,
             collections,
             loadingByKind,
             loadedFolderIdsByKind,
@@ -487,8 +506,20 @@ export function LibraryWorkspaceProvider({
     );
 }
 
+/**
+ * The two halves of the library are held apart on purpose: switching between
+ * your own shelves and the firm's starts a fresh load rather than mixing the
+ * two lists together.
+ */
 export function LibraryWorkspaceLayout({ children }: { children: ReactNode }) {
-    return <LibraryWorkspaceProvider>{children}</LibraryWorkspaceProvider>;
+    const searchParams = useSearchParams();
+    const scope: LibraryScope =
+        searchParams.get("scope") === "firm" ? "firm" : "personal";
+    return (
+        <LibraryWorkspaceProvider key={scope} scope={scope}>
+            {children}
+        </LibraryWorkspaceProvider>
+    );
 }
 
 export function LibraryCollectionPage({
@@ -499,7 +530,9 @@ export function LibraryCollectionPage({
     folderId?: string | null;
 }) {
     const router = useRouter();
+    const { profile } = useUserProfile();
     const {
+        scope,
         collections,
         loadingByKind,
         searchByKind,
@@ -515,7 +548,17 @@ export function LibraryCollectionPage({
     const collection = collections[kind];
     const collectionLoaded = collection !== null;
     const search = searchByKind[kind];
-    const collectionRootPath = kind === "files" ? "/library" : "/library/templates";
+    const scopeSuffix = scope === "firm" ? "?scope=firm" : "";
+    const collectionBasePath =
+        kind === "files" ? "/library" : "/library/templates";
+    const collectionRootPath = `${collectionBasePath}${scopeSuffix}`;
+    // Everyone at the firm can read the firm's shelves; only administrators
+    // and the people they give the job to can change what is on them.
+    const inAFirm = !!profile?.firm;
+    const canChangeThisLibrary =
+        scope === "personal" ||
+        profile?.firmRole === "admin" ||
+        profile?.canEditFirmLibrary === true;
   const debouncedSearch = useDebouncedValue(search, 250);
     const title = kind === "files" ? "Files" : "Templates";
   const [documentTypeOptions, setDocumentTypeOptions] = useState<string[]>([]);
@@ -560,7 +603,7 @@ export function LibraryCollectionPage({
 
         const loadRoute = folderAvailableRef.current
             ? Promise.resolve()
-            : getLibraryFolderPath(kind, folderId).then(
+            : getLibraryFolderPath(kind, folderId, scope).then(
                   ({ folders: path }) => {
                       if (cancelled) return;
                       setFoldersForKind(kind, (current) => {
@@ -606,17 +649,18 @@ export function LibraryCollectionPage({
         folderId,
         kind,
         router,
+        scope,
         setFoldersForKind,
     ]);
 
     const handleFolderViewIdChange = useCallback(
         (nextFolderId: string | null) => {
             const nextPath = nextFolderId
-                ? `${collectionRootPath}/folders/${encodeURIComponent(nextFolderId)}`
+                ? `${collectionBasePath}/folders/${encodeURIComponent(nextFolderId)}${scopeSuffix}`
                 : collectionRootPath;
             router.push(nextPath, { scroll: false });
         },
-        [collectionRootPath, router],
+        [collectionBasePath, collectionRootPath, router, scopeSuffix],
     );
 
     const setDocuments: Dispatch<SetStateAction<Document[]>> = useCallback(
@@ -698,16 +742,20 @@ export function LibraryCollectionPage({
 
   const handleSelectAllMatching = useCallback(
     (query: DocTableQuery) =>
-      listLibraryDocumentIds(kind, {
-        search: query.search.trim() || undefined,
-        fileType: query.fileType ?? undefined,
-      }),
-    [kind],
+      listLibraryDocumentIds(
+        kind,
+        {
+          search: query.search.trim() || undefined,
+          fileType: query.fileType ?? undefined,
+        },
+        scope,
+      ),
+    [kind, scope],
   );
 
   useEffect(() => {
     let cancelled = false;
-    void getLibraryFilterOptions(kind)
+    void getLibraryFilterOptions(kind, scope)
       .then((options) => {
         if (!cancelled) setDocumentTypeOptions(options.fileTypes);
       })
@@ -717,7 +765,7 @@ export function LibraryCollectionPage({
     return () => {
       cancelled = true;
     };
-  }, [kind]);
+  }, [kind, scope]);
 
   const serverQueryActive =
     debouncedSearch.trim().length > 0 ||
@@ -738,14 +786,18 @@ export function LibraryCollectionPage({
     setServerDocuments([]);
     setServerQueryLoading(true);
     setServerQueryLoadingMore(false);
-    void searchLibraryDocuments(kind, {
-      limit: DOCUMENT_PAGE_SIZE,
-      search: debouncedSearch.trim() || undefined,
-      fileType: tableQuery.fileType ?? undefined,
-      sortKey: tableQuery.sort?.key,
-      sortDirection: tableQuery.sort?.direction,
-      signal: controller.signal,
-    })
+    void searchLibraryDocuments(
+      kind,
+      {
+        limit: DOCUMENT_PAGE_SIZE,
+        search: debouncedSearch.trim() || undefined,
+        fileType: tableQuery.fileType ?? undefined,
+        sortKey: tableQuery.sort?.key,
+        sortDirection: tableQuery.sort?.direction,
+        signal: controller.signal,
+      },
+      scope,
+    )
       .then((result) => {
         if (requestVersion !== serverQueryRequestRef.current) return;
         setServerDocuments(result.documents);
@@ -773,6 +825,7 @@ export function LibraryCollectionPage({
   }, [
     debouncedSearch,
     kind,
+    scope,
     serverQueryActive,
     serverQueryRefreshVersion,
     tableQuery.fileType,
@@ -792,14 +845,18 @@ export function LibraryCollectionPage({
     const offset = serverDocuments?.length ?? 0;
     setServerQueryLoadingMore(true);
     try {
-      const result = await searchLibraryDocuments(kind, {
-        limit: DOCUMENT_PAGE_SIZE,
-        offset,
-        search: debouncedSearch.trim() || undefined,
-        fileType: tableQuery.fileType ?? undefined,
-        sortKey: tableQuery.sort?.key,
-        sortDirection: tableQuery.sort?.direction,
-      });
+      const result = await searchLibraryDocuments(
+        kind,
+        {
+          limit: DOCUMENT_PAGE_SIZE,
+          offset,
+          search: debouncedSearch.trim() || undefined,
+          fileType: tableQuery.fileType ?? undefined,
+          sortKey: tableQuery.sort?.key,
+          sortDirection: tableQuery.sort?.direction,
+        },
+        scope,
+      );
       if (requestVersion !== serverQueryRequestRef.current) return;
       setServerDocuments((current) => {
         if (current === null) return result.documents;
@@ -822,6 +879,7 @@ export function LibraryCollectionPage({
   }, [
     debouncedSearch,
     kind,
+    scope,
     serverDocuments?.length,
     serverQueryActive,
     serverQueryHasMore,
@@ -833,26 +891,39 @@ export function LibraryCollectionPage({
 
     const operations = useMemo(
         () => ({
-            uploadDocument: (file: File) => uploadLibraryDocument(kind, file),
+            uploadDocument: (file: File) =>
+                uploadLibraryDocument(kind, file, scope),
       refreshCollection: async () => {
         await loadLibrary(kind);
         setServerQueryRefreshVersion((current) => current + 1);
       },
             createFolder: (name: string, parentFolderId?: string | null) =>
-                createLibraryFolder(kind, name, parentFolderId),
+                createLibraryFolder(kind, name, parentFolderId, scope),
             renameFolder: (folderId: string, name: string) =>
-                renameLibraryFolder(kind, folderId, name),
-      deleteFolder: (folderId: string) => deleteLibraryFolder(kind, folderId),
+                renameLibraryFolder(kind, folderId, name, scope),
+      deleteFolder: (folderId: string) =>
+        deleteLibraryFolder(kind, folderId, scope),
             moveFolder: (folderId: string, parentFolderId: string | null) =>
-                moveLibraryFolder(kind, folderId, parentFolderId),
+                moveLibraryFolder(kind, folderId, parentFolderId, scope),
             moveDocument: (documentId: string, folderId: string | null) =>
-                moveLibraryDocument(kind, documentId, folderId),
+                moveLibraryDocument(kind, documentId, folderId, scope),
             renameDocument: (documentId: string, filename: string) =>
-                renameLibraryDocument(kind, documentId, filename),
+                renameLibraryDocument(kind, documentId, filename, scope),
       bulkDeleteDocuments: (documentIds: string[]) =>
-        bulkDeleteLibraryDocuments(kind, documentIds),
+        bulkDeleteLibraryDocuments(kind, documentIds, scope),
+            // Offered on your own shelves only — something already in the firm
+            // library has nowhere else to go.
+            publishToFirm:
+                inAFirm && scope === "personal"
+                    ? async (documentId: string) => {
+                          await publishDocumentToFirm(documentId, {
+                              libraryKind:
+                                  kind === "templates" ? "template" : "file",
+                          });
+                      }
+                    : undefined,
         }),
-        [kind, loadLibrary],
+        [inAFirm, kind, loadLibrary, scope],
     );
 
     return (
@@ -860,8 +931,9 @@ export function LibraryCollectionPage({
             <PageHeader
                 breadcrumbs={[
                     {
-                        label: "Library",
-                        onClick: () => router.push("/library"),
+                        label: scope === "firm" ? "Firm library" : "Library",
+                        onClick: () =>
+                            router.push(`/library${scopeSuffix}`),
                     },
                     {
                         label: title,
@@ -887,9 +959,16 @@ export function LibraryCollectionPage({
                                 label: (
                   <span className="hidden sm:inline">{addCollectionLabel}</span>
                                 ),
-                                title: `Add ${addCollectionLabel}`,
-                                onClick: addDocumentsAction ?? undefined,
-                                disabled: !addDocumentsAction || loading,
+                                title: canChangeThisLibrary
+                                    ? `Add ${addCollectionLabel}`
+                                    : "Only an administrator can add to the firm library",
+                                onClick: canChangeThisLibrary
+                                    ? (addDocumentsAction ?? undefined)
+                                    : undefined,
+                                disabled:
+                                    !canChangeThisLibrary ||
+                                    !addDocumentsAction ||
+                                    loading,
                             },
                         ],
                     },
@@ -902,11 +981,41 @@ export function LibraryCollectionPage({
                     active={kind}
                     onChange={(next) =>
                         router.push(
-                            next === "files" ? "/library" : "/library/templates",
+                            next === "files"
+                                ? `/library${scopeSuffix}`
+                                : `/library/templates${scopeSuffix}`,
                         )
                     }
                     actions={
                         <>
+                            {inAFirm && (
+                                <div className="flex items-center gap-1 rounded-full border border-gray-200 p-0.5">
+                                    <TabPillButton
+                                        active={scope === "personal"}
+                                        onClick={() =>
+                                            router.push(collectionBasePath)
+                                        }
+                                    >
+                                        <User className="h-3.5 w-3.5" />
+                                        <span className="hidden sm:inline">
+                                            My library
+                                        </span>
+                                    </TabPillButton>
+                                    <TabPillButton
+                                        active={scope === "firm"}
+                                        onClick={() =>
+                                            router.push(
+                                                `${collectionBasePath}?scope=firm`,
+                                            )
+                                        }
+                                    >
+                                        <Building2 className="h-3.5 w-3.5" />
+                                        <span className="hidden sm:inline">
+                                            Firm library
+                                        </span>
+                                    </TabPillButton>
+                                </div>
+                            )}
                             {folderBackAction && (
                                 <TabPillButton onClick={folderBackAction}>
                                     <ChevronLeft className="h-3.5 w-3.5" />
@@ -914,8 +1023,21 @@ export function LibraryCollectionPage({
                                 </TabPillButton>
                             )}
                             <TabPillButton
-                                onClick={createFolderAction ?? undefined}
-                                disabled={!createFolderAction || loading}
+                                onClick={
+                                    canChangeThisLibrary
+                                        ? (createFolderAction ?? undefined)
+                                        : undefined
+                                }
+                                disabled={
+                                    !canChangeThisLibrary ||
+                                    !createFolderAction ||
+                                    loading
+                                }
+                                title={
+                                    canChangeThisLibrary
+                                        ? undefined
+                                        : "Only an administrator can add to the firm library"
+                                }
                             >
                                 <Plus className="h-3.5 w-3.5" />
                                 <span className="hidden sm:inline">Folder</span>
@@ -923,6 +1045,12 @@ export function LibraryCollectionPage({
                         </>
                     }
                 />
+                {scope === "firm" && !canChangeThisLibrary && (
+                    <p className="px-4 pb-1 text-xs text-gray-500">
+                        Everyone at the firm can use what is here. Only an
+                        administrator can add to it or change it.
+                    </p>
+                )}
                 <DocTable
                     scopeKey={kind}
                     documents={collection?.documents ?? []}

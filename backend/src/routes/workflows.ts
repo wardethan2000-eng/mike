@@ -35,6 +35,8 @@ import {
   uploadFile,
   workflowReferenceKey,
 } from "../lib/storage";
+import { getActiveFirmId, getMembership, isActiveMember } from "../lib/firm";
+import { recordAudit } from "../lib/audit";
 
 export const workflowsRouter = Router();
 
@@ -326,21 +328,38 @@ async function resolveWorkflowAccess(
   }
 
   const normalizedUserEmail = (userEmail ?? "").trim().toLowerCase();
-  if (!normalizedUserEmail) return null;
+  if (normalizedUserEmail) {
+    const { data: share } = await db
+      .from("workflow_shares")
+      .select("allow_edit")
+      .eq("workflow_id", workflowId)
+      .eq("shared_with_email", normalizedUserEmail)
+      .maybeSingle();
+    if (share) {
+      return {
+        workflow: workflowRecord,
+        allowEdit: !!share.allow_edit,
+        isOwner: false,
+      };
+    }
+  }
 
-  const { data: share } = await db
-    .from("workflow_shares")
-    .select("allow_edit")
-    .eq("workflow_id", workflowId)
-    .eq("shared_with_email", normalizedUserEmail)
-    .maybeSingle();
-  if (!share) return null;
+  // A workflow the firm has published is there for everyone still working at
+  // the firm to use. Only the person who wrote it can change it — everyone
+  // else reads it and runs it.
+  const firmId = workflowRecord.firm_id;
+  if (typeof firmId === "string" && firmId) {
+    const callersFirmId = await getActiveFirmId(db, userId);
+    if (callersFirmId && callersFirmId === firmId) {
+      return {
+        workflow: workflowRecord,
+        allowEdit: false,
+        isOwner: false,
+      };
+    }
+  }
 
-  return {
-    workflow: workflowRecord,
-    allowEdit: !!share.allow_edit,
-    isOwner: false,
-  };
+  return null;
 }
 
 function toOpenSourceSubmissionSummary(
@@ -700,6 +719,81 @@ async function handleWorkflowUpdate(req: Request, res: Response) {
     }),
   );
 }
+
+// POST /workflows/:workflowId/publish-to-firm
+// Copy one of your own workflows onto the firm's list, where everyone can run
+// it. Your original stays yours and stays editable; the firm's copy is a
+// separate thing, so changing yours afterwards does not change theirs.
+workflowsRouter.post(
+  "/:workflowId/publish-to-firm",
+  requireAuth,
+  asyncRoute(async (req, res) => {
+    const userId = res.locals.userId as string;
+    const userEmail = res.locals.userEmail as string | undefined;
+    const { workflowId } = req.params;
+    const db = createServerSupabase();
+
+    const membership = await getMembership(db, userId);
+    if (!isActiveMember(membership)) {
+      return void res
+        .status(403)
+        .json({ detail: "Only people at the firm can publish a workflow." });
+    }
+
+    const { data: workflow } = await db
+      .from("workflows")
+      .select("*")
+      .eq("id", workflowId)
+      .eq("user_id", userId)
+      .maybeSingle();
+    if (!workflow) {
+      return void res.status(404).json({ detail: "Workflow not found" });
+    }
+    const source = workflow as WorkflowRecord;
+    if (source.firm_id) {
+      return void res
+        .status(409)
+        .json({ detail: "That workflow is already the firm's." });
+    }
+
+    const { data: published, error } = await db
+      .from("workflows")
+      .insert({
+        user_id: userId,
+        firm_id: membership.firmId,
+        title: source.title,
+        type: source.type,
+        prompt_md: source.prompt_md ?? null,
+        columns_config: source.columns_config ?? null,
+        language: source.language ?? null,
+        practice: source.practice ?? null,
+        jurisdictions: source.jurisdictions ?? null,
+      })
+      .select("*")
+      .single();
+    if (error || !published) {
+      return void res
+        .status(500)
+        .json({ detail: "Could not publish that to the firm." });
+    }
+
+    await recordAudit(db, {
+      userId,
+      userEmail: userEmail ?? "",
+      action: "firm_workflow_publish",
+      surface: "workflows",
+      title: `Published "${source.title ?? "Untitled"}" to the firm`,
+      detail: { from_workflow_id: workflowId, workflow_id: published.id },
+    });
+
+    res.status(201).json(
+      withWorkflowAccess(withDatabaseWorkflow(published as WorkflowRecord), {
+        allowEdit: true,
+        isOwner: true,
+      }),
+    );
+  }),
+);
 
 // PUT /workflows/:workflowId
 workflowsRouter.put(

@@ -561,6 +561,14 @@ export async function getUserProfile(): Promise<UserProfile> {
 export type FirmRole = "admin" | "attorney" | "paralegal";
 export type FirmMemberStatus = "active" | "deactivated";
 
+/** How the firm likes a document to look when Mike builds one from nothing. */
+export interface FirmDraftingDefaults {
+    font?: string;
+    font_size_pt?: number;
+    line_spacing?: "single" | "1.5" | "double";
+    paragraph_style_notes?: string;
+}
+
 export interface Firm {
     id: string;
     name: string;
@@ -569,6 +577,21 @@ export interface Firm {
     website: string | null;
     default_jurisdiction: string | null;
     citation_style: string | null;
+    /** Sent quietly with every chat anyone at the firm has. */
+    standing_instructions: string | null;
+    drafting_defaults: FirmDraftingDefaults | null;
+}
+
+/** One of the workflows the firm has published for everyone to run. */
+export interface FirmWorkflow {
+    id: string;
+    user_id: string | null;
+    title: string | null;
+    type: string | null;
+    practice: string | null;
+    language: string | null;
+    created_at: string;
+    author_name: string;
 }
 
 export interface FirmMember {
@@ -616,12 +639,33 @@ export async function updateFirm(updates: {
     website?: string | null;
     default_jurisdiction?: string | null;
     citation_style?: string | null;
+    standing_instructions?: string | null;
+    drafting_defaults?: FirmDraftingDefaults | null;
 }): Promise<Firm> {
     return apiRequest<Firm>("/admin/firm", {
         method: "PATCH",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(updates),
     });
+}
+
+export async function getFirmWorkflows(): Promise<FirmWorkflow[]> {
+    return apiRequest<FirmWorkflow[]>("/admin/workflows");
+}
+
+export async function renameFirmWorkflow(
+    workflowId: string,
+    title: string,
+): Promise<{ id: string; title: string }> {
+    return apiRequest(`/admin/workflows/${workflowId}`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ title }),
+    });
+}
+
+export async function removeFirmWorkflow(workflowId: string): Promise<void> {
+    await apiRequest(`/admin/workflows/${workflowId}`, { method: "DELETE" });
 }
 
 export async function getFirmMembers(): Promise<FirmMember[]> {
@@ -1251,6 +1295,25 @@ export async function renameProjectDocument(
 
 export type LibraryKind = "files" | "templates";
 
+/**
+ * Whose shelves a library call is about: your own, or the firm's shared ones.
+ * Leaving it out means your own, which is how the library behaved before the
+ * firm had one.
+ */
+export type LibraryScope = "personal" | "firm";
+
+function scopeParam(scope?: LibraryScope): string | null {
+    return scope === "firm" ? "firm" : null;
+}
+
+/**
+ * Only says "firm" when it means it. A personal request sends nothing extra,
+ * so it looks on the wire exactly as it did before the firm had a library.
+ */
+function scopeBody(scope?: LibraryScope): { scope?: string } {
+    return scope === "firm" ? { scope: "firm" } : {};
+}
+
 export interface LibraryCollection {
     documents: Document[];
     folders: LibraryFolder[];
@@ -1275,12 +1338,17 @@ export interface LibrarySearchResults {
     documentsHasMore: boolean;
 }
 
-function libraryPaginationQuery(pagination?: LibraryPagination): string {
+function libraryPaginationQuery(
+    pagination?: LibraryPagination,
+    scope?: LibraryScope,
+): string {
     const params = new URLSearchParams();
     if (pagination?.limit != null)
         params.set("limit", String(pagination.limit));
     if (pagination?.offset != null)
         params.set("offset", String(pagination.offset));
+    const which = scopeParam(scope);
+    if (which) params.set("scope", which);
     const qs = params.toString();
     return qs ? `?${qs}` : "";
 }
@@ -1288,9 +1356,10 @@ function libraryPaginationQuery(pagination?: LibraryPagination): string {
 export async function getLibrary(
     kind: LibraryKind,
     pagination?: LibraryPagination,
+    scope?: LibraryScope,
 ): Promise<LibraryCollection> {
     return apiRequest<LibraryCollection>(
-        `/library/${kind}${libraryPaginationQuery(pagination)}`,
+        `/library/${kind}${libraryPaginationQuery(pagination, scope)}`,
     );
 }
 
@@ -1298,12 +1367,15 @@ export async function getLibraryFolderChildren(
     kind: LibraryKind,
     folderId: string,
     pagination?: LibraryPagination,
+    scope?: LibraryScope,
 ): Promise<LibraryCollection> {
     const params = new URLSearchParams({ parent_folder_id: folderId });
     if (pagination?.limit != null)
         params.set("limit", String(pagination.limit));
     if (pagination?.offset != null)
         params.set("offset", String(pagination.offset));
+    const which = scopeParam(scope);
+    if (which) params.set("scope", which);
     return apiRequest<LibraryCollection>(
         `/library/${kind}?${params.toString()}`,
     );
@@ -1312,30 +1384,36 @@ export async function getLibraryFolderChildren(
 export async function getLibraryFolderPath(
     kind: LibraryKind,
     folderId: string,
+    scope?: LibraryScope,
 ): Promise<{ folders: LibraryFolder[] }> {
+    const which = scopeParam(scope);
     return apiRequest<{ folders: LibraryFolder[] }>(
-        `/library/${kind}/folders/${folderId}`,
+        `/library/${kind}/folders/${folderId}${which ? `?scope=${which}` : ""}`,
     );
 }
 
 export async function getLibraryLevels(
     kind: LibraryKind,
     levels: { parentId: string | null; limit: number }[],
+    scope?: LibraryScope,
 ): Promise<{
     levels: Array<LibraryCollection & { parentId: string | null }>;
 }> {
     return apiRequest(`/library/${kind}/levels`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ levels }),
+        body: JSON.stringify({ levels, ...scopeBody(scope) }),
     });
 }
 
 export async function searchLibraryDocuments(
     kind: LibraryKind,
     options: LibrarySearchParams,
+    scope?: LibraryScope,
 ): Promise<LibrarySearchResults> {
     const params = new URLSearchParams({ view: "search" });
+    const which = scopeParam(scope);
+    if (which) params.set("scope", which);
     if (options.limit != null) params.set("limit", String(options.limit));
     if (options.offset != null) params.set("offset", String(options.offset));
     if (options.search) params.set("search", options.search);
@@ -1351,19 +1429,24 @@ export async function searchLibraryDocuments(
 
 export async function getLibraryFilterOptions(
     kind: LibraryKind,
+    scope?: LibraryScope,
 ): Promise<{ fileTypes: string[] }> {
+    const which = scopeParam(scope);
     return apiRequest<{ fileTypes: string[] }>(
-        `/library/${kind}/filter-options`,
+        `/library/${kind}/filter-options${which ? `?scope=${which}` : ""}`,
     );
 }
 
 export async function listLibraryDocumentIds(
     kind: LibraryKind,
     options?: { search?: string; fileType?: string; signal?: AbortSignal },
+    scope?: LibraryScope,
 ): Promise<string[]> {
     const params = new URLSearchParams();
     if (options?.search) params.set("search", options.search);
     if (options?.fileType) params.set("file_type", options.fileType);
+    const which = scopeParam(scope);
+    if (which) params.set("scope", which);
     const query = params.toString();
     return apiRequest<string[]>(
         `/library/${kind}/ids${query ? `?${query}` : ""}`,
@@ -1374,13 +1457,32 @@ export async function listLibraryDocumentIds(
 export async function bulkDeleteLibraryDocuments(
     kind: LibraryKind,
     ids: string[],
+    scope?: LibraryScope,
 ): Promise<{ deletedIds: string[] }> {
     return apiRequest<{ deletedIds: string[] }>(
         `/library/${kind}/documents/bulk-delete`,
         {
             method: "POST",
             headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ ids }),
+            body: JSON.stringify({ ids, ...scopeBody(scope) }),
+        },
+    );
+}
+
+/** Put a copy of a document on the firm's shelves. The original stays put. */
+export async function publishDocumentToFirm(
+    documentId: string,
+    options?: { libraryKind?: "file" | "template"; folderId?: string | null },
+): Promise<{ id: string; filename: string }> {
+    return apiRequest<{ id: string; filename: string }>(
+        `/library/documents/${documentId}/publish`,
+        {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+                library_kind: options?.libraryKind ?? "template",
+                folder_id: options?.folderId ?? null,
+            }),
         },
     );
 }
@@ -1388,10 +1490,13 @@ export async function bulkDeleteLibraryDocuments(
 export async function uploadLibraryDocument(
     kind: LibraryKind,
     file: File,
+    scope?: LibraryScope,
 ): Promise<Document> {
     const authHeaders = await getAuthHeader();
     const form = new FormData();
     form.append("file", file);
+    const which = scopeParam(scope);
+    if (which) form.append("scope", which);
     const response = await fetch(`${API_BASE}/library/${kind}/documents`, {
         method: "POST",
         headers: { ...authHeaders },
@@ -1405,6 +1510,7 @@ export async function createLibraryFolder(
     kind: LibraryKind,
     name: string,
     parentFolderId?: string | null,
+    scope?: LibraryScope,
 ): Promise<LibraryFolder> {
     return apiRequest<LibraryFolder>(`/library/${kind}/folders`, {
         method: "POST",
@@ -1412,6 +1518,7 @@ export async function createLibraryFolder(
         body: JSON.stringify({
             name,
             parent_folder_id: parentFolderId ?? null,
+            ...scopeBody(scope),
         }),
     });
 }
@@ -1420,32 +1527,40 @@ export async function renameLibraryFolder(
     kind: LibraryKind,
     folderId: string,
     name: string,
+    scope?: LibraryScope,
 ): Promise<LibraryFolder> {
     return apiRequest<LibraryFolder>(`/library/${kind}/folders/${folderId}`, {
         method: "PATCH",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ name }),
+        body: JSON.stringify({ name, ...scopeBody(scope) }),
     });
 }
 
 export async function deleteLibraryFolder(
     kind: LibraryKind,
     folderId: string,
+    scope?: LibraryScope,
 ): Promise<void> {
-    await apiRequest(`/library/${kind}/folders/${folderId}`, {
-        method: "DELETE",
-    });
+    const which = scopeParam(scope);
+    await apiRequest(
+        `/library/${kind}/folders/${folderId}${which ? `?scope=${which}` : ""}`,
+        { method: "DELETE" },
+    );
 }
 
 export async function moveLibraryFolder(
     kind: LibraryKind,
     folderId: string,
     parentFolderId: string | null,
+    scope?: LibraryScope,
 ): Promise<LibraryFolder> {
     return apiRequest<LibraryFolder>(`/library/${kind}/folders/${folderId}`, {
         method: "PATCH",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ parent_folder_id: parentFolderId }),
+        body: JSON.stringify({
+            parent_folder_id: parentFolderId,
+            ...scopeBody(scope),
+        }),
     });
 }
 
@@ -1453,13 +1568,17 @@ export async function moveLibraryDocument(
     kind: LibraryKind,
     documentId: string,
     folderId: string | null,
+    scope?: LibraryScope,
 ): Promise<Document> {
     return apiRequest<Document>(
         `/library/${kind}/documents/${documentId}/folder`,
         {
             method: "PATCH",
             headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ folder_id: folderId }),
+            body: JSON.stringify({
+                folder_id: folderId,
+                ...scopeBody(scope),
+            }),
         },
     );
 }
@@ -1468,11 +1587,12 @@ export async function renameLibraryDocument(
     kind: LibraryKind,
     documentId: string,
     filename: string,
+    scope?: LibraryScope,
 ): Promise<Document> {
     return apiRequest<Document>(`/library/${kind}/documents/${documentId}`, {
         method: "PATCH",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ filename }),
+        body: JSON.stringify({ filename, ...scopeBody(scope) }),
     });
 }
 
@@ -2335,6 +2455,20 @@ export async function updateWorkflow(
 
 export async function deleteWorkflow(workflowId: string): Promise<void> {
     await apiRequest(`/workflows/${workflowId}`, { method: "DELETE" });
+}
+
+/**
+ * Copy one of your own workflows onto the firm's list so everyone there can
+ * run it. Yours stays yours; the firm's copy is separate.
+ */
+export async function publishWorkflowToFirm(
+    workflowId: string,
+): Promise<Workflow> {
+    return apiRequest<Workflow>(`/workflows/${workflowId}/publish-to-firm`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({}),
+    });
 }
 
 export async function openSourceWorkflow(

@@ -2,9 +2,16 @@
 
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
-import { ChevronDown, ChevronLeft, ChevronRight, Plus } from "lucide-react";
+import {
+  Building2,
+  ChevronDown,
+  ChevronLeft,
+  ChevronRight,
+  Plus,
+} from "lucide-react";
 import {
   deleteWorkflow,
+  publishWorkflowToFirm,
   getWorkflowFilterOptions,
   type WorkflowFilterOptions,
   getWorkflowAddon,
@@ -12,6 +19,7 @@ import {
   listWorkflowAddons,
 } from "@/app/lib/mikeApi";
 import { useDebouncedValue } from "@/app/hooks/useDebouncedValue";
+import { useUserProfile } from "@/app/contexts/UserProfileContext";
 import { useQueryParamTab } from "@/app/hooks/useQueryParamTab";
 import { usePaginatedWorkflows } from "@/app/hooks/usePaginatedWorkflows";
 import { deleteTabularReviewsWithConcurrency } from "@/app/lib/deleteTabularReviewsWithConcurrency";
@@ -91,6 +99,7 @@ export function WorkflowList({
 }) {
   const router = useRouter();
   const searchParams = useSearchParams();
+  const { profile } = useUserProfile();
   const [addons, setAddons] = useState<WorkflowAddon[]>([]);
   const [addonsLoading, setAddonsLoading] = useState(true);
   const [selected, setSelected] = useState<Workflow | null>(null);
@@ -128,6 +137,13 @@ export function WorkflowList({
   const [deleteStatus, setDeleteStatus] = useState<
     "idle" | "loading" | "complete"
   >("idle");
+  const [publishingWorkflow, setPublishingWorkflow] = useState<Workflow | null>(
+    null,
+  );
+  const [publishStatus, setPublishStatus] = useState<
+    "idle" | "loading" | "complete"
+  >("idle");
+  const [publishError, setPublishError] = useState("");
   const [importingAddonId, setImportingAddonId] = useState<string | null>(null);
   const [bulkImportingAddons, setBulkImportingAddons] = useState(false);
   const [loadError, setLoadError] = useState("");
@@ -354,6 +370,32 @@ export function WorkflowList({
     setDeleteStatus("idle");
   }
 
+  async function confirmWorkflowPublish() {
+    const workflow = publishingWorkflow;
+    if (!workflow || publishStatus === "loading") return;
+    setPublishStatus("loading");
+    setPublishError("");
+    try {
+      const published = await publishWorkflowToFirm(workflow.id);
+      setWorkflows((current) =>
+        current.some((item) => item.id === published.id)
+          ? current
+          : [published, ...current],
+      );
+      setPublishStatus("complete");
+      window.setTimeout(() => {
+        setPublishingWorkflow(null);
+        setPublishStatus("idle");
+      }, 650);
+    } catch (error) {
+      console.error("publish workflow to the firm failed", error);
+      setPublishStatus("idle");
+      setPublishError(
+        "That could not be published to the firm. Try again in a moment.",
+      );
+    }
+  }
+
   async function confirmWorkflowDeletion() {
     const ids = pendingDeleteIds;
     if (ids.length === 0) return;
@@ -534,6 +576,9 @@ export function WorkflowList({
           onOpen={setSelected}
           onEdit={setEditingWorkflow}
           onDelete={(workflow) => requestWorkflowDeletion([workflow])}
+          onPublishToFirm={
+            profile?.firm ? (workflow) => setPublishingWorkflow(workflow) : undefined
+          }
           onCreate={() => setNewModalOpen(true)}
           selectedIds={selectedWorkflowIds}
           onSelectedIdsChange={setSelectedWorkflowIds}
@@ -597,6 +642,34 @@ export function WorkflowList({
       />
 
       <ConfirmPopup
+        open={!!publishingWorkflow}
+        title="Publish to the firm?"
+        message={
+          <div className="space-y-2">
+            <p>
+              A copy of{" "}
+              <span className="font-medium text-gray-950">
+                {publishingWorkflow?.metadata.title}
+              </span>{" "}
+              goes on the firm&apos;s list, where everyone at the firm can run
+              it. Yours stays yours, and changing it later will not change the
+              firm&apos;s copy.
+            </p>
+            {publishError && <p className="text-red-500">{publishError}</p>}
+          </div>
+        }
+        confirmLabel="Publish a copy"
+        confirmStatus={publishStatus}
+        onConfirm={() => void confirmWorkflowPublish()}
+        onCancel={() => {
+          if (publishStatus === "loading") return;
+          setPublishingWorkflow(null);
+          setPublishStatus("idle");
+          setPublishError("");
+        }}
+      />
+
+      <ConfirmPopup
         open={pendingDeleteIds.length > 0}
         title={
           pendingDeleteIds.length === 1
@@ -625,6 +698,7 @@ function WorkflowTable({
   onOpen,
   onEdit,
   onDelete,
+  onPublishToFirm,
   onCreate,
   selectedIds,
   onSelectedIdsChange,
@@ -652,6 +726,7 @@ function WorkflowTable({
   onOpen: (workflow: Workflow) => void;
   onEdit: (workflow: Workflow) => void;
   onDelete: (workflow: Workflow) => void;
+  onPublishToFirm?: (workflow: Workflow) => void;
   onCreate: () => void;
   selectedIds: string[];
   onSelectedIdsChange: (ids: string[]) => void;
@@ -907,6 +982,11 @@ function WorkflowTable({
                           onClose={close}
                           surfaceProps={menuProps}
                           onEditDetails={() => onEdit(workflow)}
+                          onPublishToFirm={
+                            onPublishToFirm && workflow.scope !== "firm"
+                              ? () => onPublishToFirm(workflow)
+                              : undefined
+                          }
                           onDelete={() => onDelete(workflow)}
                         />
                       )
@@ -914,7 +994,19 @@ function WorkflowTable({
                 }
               >
                 <TablePrimaryCell
-                  label={workflow.metadata.title}
+                  label={
+                    workflow.scope === "firm" ? (
+                      <span className="inline-flex items-center gap-2">
+                        {workflow.metadata.title}
+                        <span className="inline-flex items-center gap-1 rounded-full border border-gray-200 px-1.5 py-0.5 text-[10px] font-medium text-gray-500">
+                          <Building2 className="h-3 w-3" />
+                          Firm
+                        </span>
+                      </span>
+                    ) : (
+                      workflow.metadata.title
+                    )
+                  }
                   selected={isSelected}
                   onSelectionChange={() => toggleOne(workflow.id)}
                   selectionIndicator={
@@ -953,6 +1045,11 @@ function WorkflowTable({
                   {canManage && (
                     <RowActions
                       onEditDetails={() => onEdit(workflow)}
+                      onPublishToFirm={
+                        onPublishToFirm && workflow.scope !== "firm"
+                          ? () => onPublishToFirm(workflow)
+                          : undefined
+                      }
                       onDelete={() => onDelete(workflow)}
                     />
                   )}

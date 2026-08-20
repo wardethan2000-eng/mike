@@ -178,7 +178,13 @@ projectChatRouter.post("/", requireAuth, async (req, res) => {
     // Files dropped straight onto the chat live in the chat, not the project,
     // so they are not in the list above. Add them or the assistant cannot
     // open the very file the user just handed it.
-    await mergeChatOnlyDocs(messages, userId, db, { docIndex, docStore });
+    await mergeChatOnlyDocs(
+        messages,
+        userId,
+        db,
+        { docIndex, docStore },
+        userEmail,
+    );
     const docAvailability = Object.entries(docIndex).map(([doc_id, info]) => ({
         doc_id,
         filename: info.filename,

@@ -385,6 +385,9 @@ create table if not exists public.library_folders (
   library_kind text not null default 'file',
   name text not null,
   parent_folder_id uuid references public.library_folders(id) on delete cascade,
+  -- No firm means it is this person's own folder; a firm means it belongs to
+  -- the firm and everyone still working there can read what is in it.
+  firm_id uuid references public.firms(id) on delete cascade,
   created_at timestamptz not null default now(),
   updated_at timestamptz not null default now(),
   constraint library_folders_kind_check
@@ -397,6 +400,10 @@ create index if not exists idx_library_folders_user_kind
 create index if not exists idx_library_folders_parent
   on public.library_folders(parent_folder_id);
 
+create index if not exists library_folders_firm_idx
+  on public.library_folders(firm_id, library_kind)
+  where firm_id is not null;
+
 create table if not exists public.documents (
   id uuid primary key default gen_random_uuid(),
   project_id uuid references public.projects(id) on delete cascade,
@@ -405,6 +412,9 @@ create table if not exists public.documents (
   folder_id uuid references public.project_subfolders(id) on delete set null,
   library_kind text not null default 'file',
   library_folder_id uuid references public.library_folders(id) on delete set null,
+  -- Set only on library documents that belong to the firm rather than to one
+  -- person. Documents inside a matter are reached through the matter instead.
+  firm_id uuid references public.firms(id) on delete set null,
   created_at timestamptz not null default now(),
   updated_at timestamptz not null default now(),
   constraint documents_library_kind_check
@@ -420,6 +430,10 @@ create index if not exists idx_documents_project_folder
 create index if not exists idx_documents_library_kind_folder
   on public.documents(user_id, library_kind, library_folder_id)
   where project_id is null;
+
+create index if not exists documents_firm_library_idx
+  on public.documents(firm_id, library_kind, library_folder_id)
+  where firm_id is not null and project_id is null;
 
 create table if not exists public.document_versions (
   id uuid primary key default gen_random_uuid(),
@@ -522,11 +536,18 @@ create table if not exists public.workflows (
   language text default 'English',
   practice text default 'General Transactions',
   jurisdictions text[] default array['General']::text[],
+  -- Set when the workflow has been published to the firm. The person who wrote
+  -- it stays recorded in user_id.
+  firm_id uuid references public.firms(id) on delete cascade,
   created_at timestamptz not null default now()
 );
 
 create index if not exists idx_workflows_user
   on public.workflows(user_id);
+
+create index if not exists workflows_firm_idx
+  on public.workflows(firm_id)
+  where firm_id is not null;
 
 create table if not exists public.hidden_workflows (
   id uuid primary key default gen_random_uuid(),
@@ -790,6 +811,92 @@ create index if not exists idx_workflow_open_source_submissions_submitter
 
 alter table public.workflow_open_source_submissions enable row level security;
 
+create or replace function public.visible_workflows(
+  p_user_id text,
+  p_user_email text default null,
+  p_type text default null
+)
+returns table (
+  id uuid,
+  user_id text,
+  title text,
+  type text,
+  prompt_md text,
+  columns_config jsonb,
+  language text,
+  practice text,
+  jurisdictions text[],
+  is_system boolean,
+  created_at timestamptz,
+  allow_edit boolean,
+  is_owner boolean,
+  shared_by_name text,
+  scope text,
+  sort_bucket integer
+)
+language sql
+stable
+as $$
+  with mine as (
+    select
+      w.id, w.user_id::text as user_id, w.title, w.type, w.prompt_md,
+      w.columns_config, w.language, w.practice, w.jurisdictions,
+      false as is_system, w.created_at,
+      true as allow_edit, true as is_owner, null::text as shared_by_name,
+      case when w.firm_id is null then 'personal' else 'firm' end as scope,
+      0 as sort_bucket
+    from public.workflows w
+    where w.user_id::text = p_user_id
+      and (p_type is null or w.type = p_type)
+  ),
+  shared as (
+    select
+      w.id, w.user_id::text as user_id, w.title, w.type, w.prompt_md,
+      w.columns_config, w.language, w.practice, w.jurisdictions,
+      false as is_system, w.created_at,
+      ws.allow_edit, false as is_owner,
+      nullif(trim(up.display_name), '') as shared_by_name,
+      'shared' as scope,
+      1 as sort_bucket
+    from public.workflow_shares ws
+    join public.workflows w
+      on w.id = ws.workflow_id
+    left join public.user_profiles up
+      on up.user_id::text = ws.shared_by_user_id::text
+    where lower(ws.shared_with_email) = lower(coalesce(p_user_email, ''))
+      and (p_type is null or w.type = p_type)
+  ),
+  published as (
+    select
+      w.id, w.user_id::text as user_id, w.title, w.type, w.prompt_md,
+      w.columns_config, w.language, w.practice, w.jurisdictions,
+      false as is_system, w.created_at,
+      false as allow_edit, false as is_owner,
+      nullif(trim(up.display_name), '') as shared_by_name,
+      'firm' as scope,
+      2 as sort_bucket
+    from public.workflows w
+    left join public.user_profiles up
+      on up.user_id::text = w.user_id::text
+    where w.firm_id is not null
+      and w.firm_id = public.active_member_firm_id(p_user_id)
+      and (p_type is null or w.type = p_type)
+  ),
+  everything as (
+    select * from mine
+    union all
+    select * from shared
+    union all
+    select * from published
+  )
+  select distinct on (e.id)
+    e.id, e.user_id, e.title, e.type, e.prompt_md, e.columns_config,
+    e.language, e.practice, e.jurisdictions, e.is_system, e.created_at,
+    e.allow_edit, e.is_owner, e.shared_by_name, e.scope, e.sort_bucket
+  from everything e
+  order by e.id, e.sort_bucket asc;
+$$;
+
 create or replace function public.get_workflows_overview(
   p_user_id text,
   p_user_email text default null,
@@ -809,79 +916,18 @@ returns table (
   created_at timestamptz,
   allow_edit boolean,
   is_owner boolean,
-  shared_by_name text
+  shared_by_name text,
+  scope text
 )
 language sql
 stable
 as $$
-  with owned as (
-    select
-      w.id,
-      w.user_id::text as user_id,
-      w.title,
-      w.type,
-      w.prompt_md,
-      w.columns_config,
-      w.language,
-      w.practice,
-      w.jurisdictions,
-      false as is_system,
-      w.created_at,
-      true as allow_edit,
-      true as is_owner,
-      null::text as shared_by_name,
-      0 as sort_bucket
-    from public.workflows w
-    where w.user_id::text = p_user_id
-      and (p_type is null or w.type = p_type)
-  ),
-  shared as (
-    select
-      w.id,
-      w.user_id::text as user_id,
-      w.title,
-      w.type,
-      w.prompt_md,
-      w.columns_config,
-      w.language,
-      w.practice,
-      w.jurisdictions,
-      false as is_system,
-      w.created_at,
-      ws.allow_edit,
-      false as is_owner,
-      nullif(trim(up.display_name), '') as shared_by_name,
-      1 as sort_bucket
-    from public.workflow_shares ws
-    join public.workflows w
-      on w.id = ws.workflow_id
-    left join public.user_profiles up
-      on up.user_id::text = ws.shared_by_user_id::text
-    where lower(ws.shared_with_email) = lower(coalesce(p_user_email, ''))
-      and (p_type is null or w.type = p_type)
-  ),
-  visible_workflows as (
-    select * from owned
-    union all
-    select * from shared
-  )
   select
-    vw.id,
-    vw.user_id,
-    vw.title,
-    vw.type,
-    vw.prompt_md,
-    vw.columns_config,
-    vw.language,
-    vw.practice,
-    vw.jurisdictions,
-    vw.is_system,
-    vw.created_at,
-    vw.allow_edit,
-    vw.is_owner,
-    vw.shared_by_name
-  from visible_workflows vw
-  order by vw.sort_bucket asc, vw.created_at desc;
+    vw.id, vw.user_id, vw.title, vw.type, vw.prompt_md, vw.columns_config,
+    vw.language, vw.practice, vw.jurisdictions, vw.is_system, vw.created_at,
+    vw.allow_edit, vw.is_owner, vw.shared_by_name, vw.scope
+  from public.visible_workflows(p_user_id, p_user_email, p_type) vw
+  order by vw.sort_bucket asc, vw.created_at desc, vw.id asc;
 $$;
 
 -- ---------------------------------------------------------------------------
@@ -1535,12 +1581,14 @@ create or replace function public.search_library_documents(
   p_search_term text default null,
   p_file_type text default null,
   p_sort_key text default 'updated',
-  p_sort_direction text default 'desc'
+  p_sort_direction text default 'desc',
+  p_firm_id text default null
 )
 returns table (
   id uuid,
   project_id uuid,
   user_id text,
+  firm_id uuid,
   status text,
   folder_id uuid,
   library_kind text,
@@ -1563,6 +1611,7 @@ as $$
     d.id,
     d.project_id,
     d.user_id::text as user_id,
+    d.firm_id,
     d.status,
     d.folder_id,
     d.library_kind,
@@ -1581,8 +1630,13 @@ as $$
   left join public.document_versions v
     on v.id = d.current_version_id
    and v.deleted_at is null
-  where d.user_id::text = p_user_id
-    and d.project_id is null
+  where d.project_id is null
+    and (
+      case when p_firm_id is null
+        then d.user_id::text = p_user_id and d.firm_id is null
+        else d.firm_id::text = p_firm_id
+      end
+    )
     and (
       (p_library_kind = 'file' and coalesce(d.library_kind, 'file') = 'file')
       or d.library_kind = p_library_kind
@@ -1603,23 +1657,24 @@ as $$
     case when p_sort_key = 'name' and p_sort_direction = 'desc' then lower(coalesce(v.filename, '')) else null end desc,
     case when p_sort_key = 'type' and p_sort_direction = 'asc' then lower(coalesce(v.file_type, '')) else null end asc,
     case when p_sort_key = 'type' and p_sort_direction = 'desc' then lower(coalesce(v.file_type, '')) else null end desc,
-    case when p_sort_key = 'size' and p_sort_direction = 'asc' then coalesce(v.size_bytes, 0) else null end asc,
-    case when p_sort_key = 'size' and p_sort_direction = 'desc' then coalesce(v.size_bytes, 0) else null end desc,
-    case when p_sort_key = 'version' and p_sort_direction = 'asc' then coalesce(v.version_number, 0) else null end asc,
-    case when p_sort_key = 'version' and p_sort_direction = 'desc' then coalesce(v.version_number, 0) else null end desc,
+    case when p_sort_key = 'size' and p_sort_direction = 'asc' then v.size_bytes else null end asc,
+    case when p_sort_key = 'size' and p_sort_direction = 'desc' then v.size_bytes else null end desc,
+    case when p_sort_key = 'version' and p_sort_direction = 'asc' then v.version_number else null end asc,
+    case when p_sort_key = 'version' and p_sort_direction = 'desc' then v.version_number else null end desc,
     case when p_sort_key = 'created' and p_sort_direction = 'asc' then d.created_at else null end asc,
     case when p_sort_key = 'created' and p_sort_direction = 'desc' then d.created_at else null end desc,
     case when p_sort_key = 'updated' and p_sort_direction = 'asc' then d.updated_at else null end asc,
     case when p_sort_key = 'updated' and p_sort_direction = 'desc' then d.updated_at else null end desc,
     d.updated_at desc,
     d.id asc
-  limit greatest(coalesce(p_limit, 50), 1)
+  limit greatest(coalesce(p_limit, 20), 1)
   offset greatest(coalesce(p_offset, 0), 0);
 $$;
 
 create or replace function public.get_library_filter_options(
   p_user_id text,
-  p_library_kind text
+  p_library_kind text,
+  p_firm_id text default null
 )
 returns table (file_types text[])
 language sql
@@ -1634,8 +1689,13 @@ as $$
   left join public.document_versions v
     on v.id = d.current_version_id
    and v.deleted_at is null
-  where d.user_id::text = p_user_id
-    and d.project_id is null
+  where d.project_id is null
+    and (
+      case when p_firm_id is null
+        then d.user_id::text = p_user_id and d.firm_id is null
+        else d.firm_id::text = p_firm_id
+      end
+    )
     and (
       (p_library_kind = 'file' and coalesce(d.library_kind, 'file') = 'file')
       or d.library_kind = p_library_kind
@@ -1706,27 +1766,13 @@ returns table (
 language sql
 stable
 as $$
-  with owned as (
-    select w.practice, w.language, w.jurisdictions, 'owned'::text as source
-    from public.workflows w
-    where w.user_id::text = p_user_id
-      and (p_type is null or w.type = p_type)
-  ),
-  shared as (
-    select w.practice, w.language, w.jurisdictions, 'shared'::text as source
-    from public.workflow_shares ws
-    join public.workflows w on w.id = ws.workflow_id
-    where lower(ws.shared_with_email) = lower(coalesce(p_user_email, ''))
-      and (p_type is null or w.type = p_type)
-  ),
-  visible as (
-    select * from owned
-    union all
-    select * from shared
-  ),
-  scoped as (
-    select * from visible
-    where coalesce(p_scope, 'all') = 'all' or source = p_scope
+  with scoped as (
+    select vw.practice, vw.language, vw.jurisdictions
+    from public.visible_workflows(p_user_id, p_user_email, p_type) vw
+    where coalesce(p_scope, 'all') = 'all'
+      or (p_scope = 'owned' and vw.is_owner)
+      or (p_scope = 'shared' and vw.sort_bucket = 1)
+      or (p_scope = 'firm' and vw.scope = 'firm')
   )
   select
     coalesce(
@@ -2019,52 +2065,22 @@ returns table (
   created_at timestamptz,
   allow_edit boolean,
   is_owner boolean,
-  shared_by_name text
+  shared_by_name text,
+  scope text
 )
 language sql
 stable
 as $$
-  with owned as (
-    select
-      w.id, w.user_id::text as user_id, w.title, w.type, w.prompt_md,
-      w.columns_config, w.language, w.practice, w.jurisdictions,
-      false as is_system, w.created_at,
-      true as allow_edit, true as is_owner, null::text as shared_by_name,
-      0 as sort_bucket
-    from public.workflows w
-    where w.user_id::text = p_user_id
-      and (p_type is null or w.type = p_type)
-  ),
-  shared as (
-    select
-      w.id, w.user_id::text as user_id, w.title, w.type, w.prompt_md,
-      w.columns_config, w.language, w.practice, w.jurisdictions,
-      false as is_system, w.created_at,
-      ws.allow_edit, false as is_owner,
-      nullif(trim(up.display_name), '') as shared_by_name,
-      1 as sort_bucket
-    from public.workflow_shares ws
-    join public.workflows w
-      on w.id = ws.workflow_id
-    left join public.user_profiles up
-      on up.user_id::text = ws.shared_by_user_id::text
-    where lower(ws.shared_with_email) = lower(coalesce(p_user_email, ''))
-      and (p_type is null or w.type = p_type)
-  ),
-  visible_workflows as (
-    select * from owned
-    union all
-    select * from shared
-  )
   select
     vw.id, vw.user_id, vw.title, vw.type, vw.prompt_md, vw.columns_config,
     vw.language, vw.practice, vw.jurisdictions, vw.is_system, vw.created_at,
-    vw.allow_edit, vw.is_owner, vw.shared_by_name
-  from visible_workflows vw
+    vw.allow_edit, vw.is_owner, vw.shared_by_name, vw.scope
+  from public.visible_workflows(p_user_id, p_user_email, p_type) vw
   where (
       coalesce(p_scope, 'all') = 'all'
-      or (p_scope = 'owned' and vw.sort_bucket = 0)
+      or (p_scope = 'owned' and vw.is_owner)
       or (p_scope = 'shared' and vw.sort_bucket = 1)
+      or (p_scope = 'firm' and vw.scope = 'firm')
     )
     and (
       p_search_term is null
@@ -2116,33 +2132,13 @@ returns table (
 language sql
 stable
 as $$
-  with owned as (
-    select w.id, w.user_id::text as user_id, w.title, w.practice, w.language, w.jurisdictions,
-      w.created_at, 0 as sort_bucket
-    from public.workflows w
-    where w.user_id::text = p_user_id
-      and (p_type is null or w.type = p_type)
-  ),
-  shared as (
-    select w.id, w.user_id::text as user_id, w.title, w.practice, w.language, w.jurisdictions,
-      w.created_at, 1 as sort_bucket
-    from public.workflow_shares ws
-    join public.workflows w
-      on w.id = ws.workflow_id
-    where lower(ws.shared_with_email) = lower(coalesce(p_user_email, ''))
-      and (p_type is null or w.type = p_type)
-  ),
-  visible_workflows as (
-    select * from owned
-    union all
-    select * from shared
-  )
   select vw.id, vw.user_id
-  from visible_workflows vw
+  from public.visible_workflows(p_user_id, p_user_email, p_type) vw
   where (
       coalesce(p_scope, 'all') = 'all'
-      or (p_scope = 'owned' and vw.sort_bucket = 0)
+      or (p_scope = 'owned' and vw.is_owner)
       or (p_scope = 'shared' and vw.sort_bucket = 1)
+      or (p_scope = 'firm' and vw.scope = 'firm')
     )
     and (
       p_search_term is null
@@ -2203,7 +2199,8 @@ create or replace function public.get_library_document_ids(
   p_search_term text,
   p_file_type text,
   p_limit integer,
-  p_offset integer
+  p_offset integer,
+  p_firm_id text default null
 )
 returns table (
   id uuid,
@@ -2217,8 +2214,13 @@ as $$
   left join public.document_versions v
     on v.id = d.current_version_id
    and v.deleted_at is null
-  where d.user_id::text = p_user_id
-    and d.project_id is null
+  where d.project_id is null
+    and (
+      case when p_firm_id is null
+        then d.user_id::text = p_user_id and d.firm_id is null
+        else d.firm_id::text = p_firm_id
+      end
+    )
     and (
       (p_library_kind = 'file' and coalesce(d.library_kind, 'file') = 'file')
       or d.library_kind = p_library_kind

@@ -114,6 +114,8 @@ import {
     saveApiKey,
     bulkDeleteLibraryDocuments,
     searchProjectDirectory,
+    publishDocumentToFirm,
+    publishWorkflowToFirm,
     searchLibraryDocuments,
     setMcpToolEnabled,
     shareWorkflow,
@@ -1343,6 +1345,123 @@ describe("Library search", () => {
         expect(lastFetchCall().url).toBe(
             "http://localhost:3001/library/files/filter-options",
         );
+    });
+});
+
+// ---------------------------------------------------------------------------
+// The firm's half of the library
+// ---------------------------------------------------------------------------
+
+describe("reading the firm's shelves instead of your own", () => {
+    it("asks for the firm when listing", async () => {
+        fetchMock.mockResolvedValue(
+            jsonResponse({ documents: [], folders: [], documentsHasMore: false }),
+        );
+
+        await getLibrary("templates", undefined, "firm");
+
+        expect(lastFetchCall().url).toBe(
+            "http://localhost:3001/library/templates?scope=firm",
+        );
+    });
+
+    it("says nothing extra when the shelves are your own", async () => {
+        fetchMock.mockResolvedValue(
+            jsonResponse({ documents: [], folders: [], documentsHasMore: false }),
+        );
+
+        await getLibrary("templates");
+
+        expect(lastFetchCall().url).toBe(
+            "http://localhost:3001/library/templates",
+        );
+    });
+
+    it("asks for the firm when searching", async () => {
+        fetchMock.mockResolvedValue(
+            jsonResponse({ documents: [], documentsHasMore: false }),
+        );
+
+        await searchLibraryDocuments(
+            "templates",
+            { search: "lease" },
+            "firm",
+        );
+
+        expect(lastFetchCall().url).toContain("scope=firm");
+    });
+
+    it("asks for the firm when reading the file-type list", async () => {
+        fetchMock.mockResolvedValue(jsonResponse({ fileTypes: [] }));
+
+        await getLibraryFilterOptions("templates", "firm");
+
+        expect(lastFetchCall().url).toBe(
+            "http://localhost:3001/library/templates/filter-options?scope=firm",
+        );
+    });
+
+    it("marks a new folder as the firm's", async () => {
+        fetchMock.mockResolvedValue(jsonResponse({ id: "f1" }));
+
+        await createLibraryFolder("templates", "Letterhead", null, "firm");
+
+        expect(JSON.parse(lastFetchCall().init.body as string)).toEqual({
+            name: "Letterhead",
+            parent_folder_id: null,
+            scope: "firm",
+        });
+    });
+
+    it("leaves a personal folder unmarked", async () => {
+        fetchMock.mockResolvedValue(jsonResponse({ id: "f1" }));
+
+        await createLibraryFolder("templates", "Mine");
+
+        expect(JSON.parse(lastFetchCall().init.body as string)).toEqual({
+            name: "Mine",
+            parent_folder_id: null,
+        });
+    });
+
+    it("tells the upload which shelves it is for", async () => {
+        fetchMock.mockResolvedValue(jsonResponse({ id: "d1" }));
+        const file = new File(["x"], "letterhead.docx");
+
+        await uploadLibraryDocument("templates", file, "firm");
+
+        const form = lastFetchCall().init.body as FormData;
+        expect(form.get("scope")).toBe("firm");
+    });
+
+    it("adds a copy of a document to the firm library", async () => {
+        fetchMock.mockResolvedValue(
+            jsonResponse({ id: "copy-1", filename: "letterhead.docx" }),
+        );
+
+        await publishDocumentToFirm("d1", { libraryKind: "template" });
+
+        const { url, init } = lastFetchCall();
+        expect(url).toBe(
+            "http://localhost:3001/library/documents/d1/publish",
+        );
+        expect(init.method).toBe("POST");
+        expect(JSON.parse(init.body as string)).toEqual({
+            library_kind: "template",
+            folder_id: null,
+        });
+    });
+
+    it("publishes a workflow to the firm", async () => {
+        fetchMock.mockResolvedValue(jsonResponse({ id: "w2" }));
+
+        await publishWorkflowToFirm("w1");
+
+        const { url, init } = lastFetchCall();
+        expect(url).toBe(
+            "http://localhost:3001/workflows/w1/publish-to-firm",
+        );
+        expect(init.method).toBe("POST");
     });
 });
 

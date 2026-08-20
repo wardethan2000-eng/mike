@@ -87,6 +87,7 @@ vi.mock("../../lib/userSettings", () => ({
 vi.mock("../../lib/access", () => ({
     checkProjectAccess: (...args: unknown[]) => checkProjectAccess(...args),
     ensureDocAccess: vi.fn(async () => ({ ok: true, isOwner: true })),
+    ensureDocReadAccess: vi.fn(async () => ({ ok: true, isOwner: true })),
     ensureReviewAccess: vi.fn(async () => ({ ok: true, isOwner: true })),
     filterAccessibleDocumentIds: vi.fn(async (ids: string[]) => ids),
     listAccessibleProjectIds: vi.fn(async () => []),

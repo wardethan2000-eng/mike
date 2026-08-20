@@ -1,7 +1,9 @@
 import { describe, expect, it } from "vitest";
 import {
     attorneyContextSection,
+    draftingDefaultsSection,
     normalizeBarAdmissions,
+    normalizeDraftingDefaults,
     EMPTY_PROFESSIONAL_DETAILS,
     type ProfessionalDetails,
 } from "../draftingContext";
@@ -98,5 +100,55 @@ describe("what the model is told about the person asking", () => {
         );
         expect(section).toContain("Name: Sam Clerk, Paralegal");
         expect(section).not.toContain("Admitted to practise");
+    });
+});
+
+describe("the firm's house style for a document built from nothing", () => {
+    it("keeps the settings that make sense", () => {
+        expect(
+            normalizeDraftingDefaults({
+                font: "  Century Schoolbook ",
+                font_size_pt: 12,
+                line_spacing: "double",
+                paragraph_style_notes: " Number every paragraph. ",
+            }),
+        ).toEqual({
+            font: "Century Schoolbook",
+            font_size_pt: 12,
+            line_spacing: "double",
+            paragraph_style_notes: "Number every paragraph.",
+        });
+    });
+
+    it("drops a text size no document would use", () => {
+        expect(normalizeDraftingDefaults({ font_size_pt: 400 })).toEqual({});
+        expect(normalizeDraftingDefaults({ font_size_pt: 0 })).toEqual({});
+    });
+
+    it("drops a spacing it does not recognise", () => {
+        expect(
+            normalizeDraftingDefaults({ line_spacing: "triple" }),
+        ).toEqual({});
+    });
+
+    it("ignores anything that is not a set of settings", () => {
+        expect(normalizeDraftingDefaults(null)).toEqual({});
+        expect(normalizeDraftingDefaults("Times New Roman")).toEqual({});
+        expect(normalizeDraftingDefaults([1, 2, 3])).toEqual({});
+    });
+
+    it("says nothing at all when the firm has set nothing", () => {
+        expect(draftingDefaultsSection({})).toBe("");
+    });
+
+    it("spells the settings out for the model", () => {
+        const section = draftingDefaultsSection({
+            font: "Century Schoolbook",
+            font_size_pt: 12,
+            line_spacing: "double",
+        });
+        expect(section).toContain("Century Schoolbook");
+        expect(section).toContain("12 point");
+        expect(section).toContain("double");
     });
 });

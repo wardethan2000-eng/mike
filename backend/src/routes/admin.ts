@@ -21,6 +21,7 @@ import {
     isFirmMemberStatus,
     type FirmMembership,
 } from "../lib/firm";
+import { normalizeDraftingDefaults } from "../lib/draftingContext";
 import { safeErrorLog } from "../lib/safeError";
 
 export const adminRouter = Router();
@@ -108,6 +109,36 @@ adminRouter.patch("/firm", async (req, res) => {
         "citation_style",
     ] as const) {
         if (field in req.body) updates[field] = trimmedOrNull(req.body[field]);
+    }
+    // Sent quietly with every chat anyone at the firm has, so it is capped at
+    // a length a person would actually read.
+    if ("standing_instructions" in req.body) {
+        const standing = trimmedOrNull(req.body.standing_instructions);
+        if (standing && standing.length > 4000) {
+            return void res.status(400).json({
+                detail: "Standing instructions can be up to 4,000 characters.",
+            });
+        }
+        updates.standing_instructions = standing;
+    }
+    if ("drafting_defaults" in req.body) {
+        const raw = req.body.drafting_defaults;
+        if (raw === null) {
+            updates.drafting_defaults = null;
+        } else if (
+            !raw ||
+            typeof raw !== "object" ||
+            Array.isArray(raw)
+        ) {
+            return void res
+                .status(400)
+                .json({ detail: "Those drafting defaults are not usable." });
+        } else {
+            const cleaned = normalizeDraftingDefaults(raw);
+            updates.drafting_defaults = Object.keys(cleaned).length
+                ? cleaned
+                : null;
+        }
     }
     if (Object.keys(updates).length === 0) {
         return void res.status(400).json({ detail: "Nothing to change." });
@@ -437,4 +468,121 @@ adminRouter.patch("/projects/:projectId/owner", async (req, res) => {
     });
 
     res.json({ ok: true });
+});
+
+// ---------------------------------------------------------------------------
+// The firm's shared content
+// ---------------------------------------------------------------------------
+
+/** Everything the firm has published for everyone to run. */
+adminRouter.get("/workflows", async (_req, res) => {
+    const db = createServerSupabase();
+    const firmId = membership(res).firmId;
+
+    const { data, error } = await db
+        .from("workflows")
+        .select("id, user_id, title, type, practice, language, created_at")
+        .eq("firm_id", firmId)
+        .order("created_at", { ascending: false });
+    if (error) return void res.status(500).json({ detail: error.message });
+
+    const rows = (data ?? []) as {
+        id: string;
+        user_id: string | null;
+        title: string | null;
+        type: string | null;
+        practice: string | null;
+        language: string | null;
+        created_at: string;
+    }[];
+    const authorIds = [
+        ...new Set(rows.map((row) => row.user_id).filter(Boolean)),
+    ] as string[];
+    const names = new Map<string, string>();
+    if (authorIds.length) {
+        const { data: profiles } = await db
+            .from("user_profiles")
+            .select("user_id, display_name, email")
+            .in("user_id", authorIds);
+        for (const profile of (profiles ?? []) as {
+            user_id: string;
+            display_name: string | null;
+            email: string | null;
+        }[]) {
+            names.set(
+                profile.user_id,
+                profile.display_name?.trim() || profile.email || "",
+            );
+        }
+    }
+
+    res.json(
+        rows.map((row) => ({
+            ...row,
+            author_name: row.user_id ? (names.get(row.user_id) ?? "") : "",
+        })),
+    );
+});
+
+/** Rename one of the firm's workflows. */
+adminRouter.patch("/workflows/:workflowId", async (req, res) => {
+    const db = createServerSupabase();
+    const firmId = membership(res).firmId;
+    const title = trimmedOrNull(req.body.title);
+    if (!title) {
+        return void res.status(400).json({ detail: "A workflow needs a name." });
+    }
+
+    const { data, error } = await db
+        .from("workflows")
+        .update({ title: title.slice(0, 200) })
+        .eq("id", req.params.workflowId)
+        .eq("firm_id", firmId)
+        .select("id, title")
+        .maybeSingle();
+    if (error) return void res.status(500).json({ detail: error.message });
+    if (!data) return void res.status(404).json({ detail: "No such workflow." });
+
+    await recordAudit(db, {
+        userId: res.locals.userId as string,
+        userEmail: res.locals.userEmail as string,
+        action: "admin_firm_workflow_update",
+        surface: "admin",
+        title: `Renamed the firm workflow "${title}"`,
+        detail: { workflow_id: req.params.workflowId },
+    });
+    res.json(data);
+});
+
+/** Take one of the firm's workflows off the shared list. The person who wrote
+ *  it keeps their own copy. */
+adminRouter.delete("/workflows/:workflowId", async (req, res) => {
+    const db = createServerSupabase();
+    const firmId = membership(res).firmId;
+
+    const { data: workflow } = await db
+        .from("workflows")
+        .select("id, title")
+        .eq("id", req.params.workflowId)
+        .eq("firm_id", firmId)
+        .maybeSingle();
+    if (!workflow)
+        return void res.status(404).json({ detail: "No such workflow." });
+
+    const { error } = await db
+        .from("workflows")
+        .delete()
+        .eq("id", req.params.workflowId)
+        .eq("firm_id", firmId);
+    if (error) return void res.status(500).json({ detail: error.message });
+
+    await recordAudit(db, {
+        userId: res.locals.userId as string,
+        userEmail: res.locals.userEmail as string,
+        action: "admin_firm_workflow_delete",
+        surface: "admin",
+        title: `Removed the firm workflow "${(workflow as { title: string }).title}"`,
+        detail: { workflow_id: req.params.workflowId },
+    });
+    res.status(204).send();
 });

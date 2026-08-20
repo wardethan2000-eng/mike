@@ -460,6 +460,61 @@ alter table public.user_profiles add column if not exists signature_block text;
 
 ## 5. Phase 3 — Firm content (library, workflows, instructions, styles)
 
+> **STATUS: BUILT AND DEPLOYED 2026-08-20.** What actually shipped, and where
+> it differs from the plan below:
+>
+> - **Migration** `20260820_05_firm_content.sql`, applied live: a `firm_id`
+>   column on `library_folders`, `documents` and `workflows`. No firm on a row
+>   means it is somebody's own and behaves exactly as it always did; a firm on
+>   it means the firm's.
+> - **One scope switch, not two endpoint sets.** Every library route takes a
+>   `scope` of `personal` (the default) or `firm`, and every item comes back
+>   tagged with which it is. Personal requests are byte-for-byte what they were
+>   before, including on the wire — nothing extra is sent.
+> - **Six database functions were rebuilt** because they carried the old
+>   "whose is it" question inside them: the three library ones gained a
+>   `p_firm_id` argument, and the three workflow ones now all read from one new
+>   helper, `public.visible_workflows`, so the list, the id-only list and the
+>   filter choices can never drift apart. That helper is also where a workflow
+>   that reaches you two ways at once is reduced to one row.
+> - **Who may change the firm's shelves**: an administrator, or anyone given
+>   the job through `can_edit_firm_library` on the People screen. Everyone else
+>   at the firm reads them. Publishing is separate and open to every member —
+>   contributing your own document is not administering the library.
+> - **Publishing always copies, never moves**, and copies the bytes into a
+>   fresh file rather than pointing at the original's. Deleting your own copy
+>   can therefore never empty the firm's shelf.
+> - **`ensureDocReadAccess`** is new in `lib/access.ts`, and is deliberately
+>   separate from `ensureDocAccess`. The read-only document routes (preview,
+>   download, versions, the zip) use it so a colleague can open the firm's
+>   letterhead; the routes that *change* a document still use the old one, so
+>   being able to read the letterhead is not permission to write over it.
+> - **The §5.2 must-fix is done**: `buildDocContext` no longer asks "did you
+>   upload this yourself". It runs the same access rules everything else does,
+>   which now let a firm-library document through. Verified in a real chat: a
+>   template uploaded by an administrator, attached by a different member, was
+>   read back correctly.
+> - **Standing instructions and house style** ride `firmContextSection`, which
+>   Phase 2 already wired into all three chat paths, so nothing new had to be
+>   threaded. House style is prompt-level: the firm's typeface, size, spacing
+>   and notes are handed to the model to pass to `generate_docx`, and are
+>   explicitly overridden when it is copying one of the firm's own documents.
+> - **Screens**: the Library page has a My library / Firm library switch (only
+>   for people in a firm), with the add controls disabled and explained for
+>   those who may not use them; "Add to firm library" is on every document's
+>   row menu; the Workflows page shows a Firm badge and a "Publish to the firm"
+>   action; and Administration gained a **Content** tab holding standing
+>   instructions, house style, and the list of workflows the firm has published.
+> - **Verified**: backend suite 841 passing, frontend 365. Three live scripts
+>   on VM 133 — `/tmp/smoke3.sh` (46 checks against the running server),
+>   `/tmp/firm-chat-check.sh` (5 checks through a real chat with a real model),
+>   and `/tmp/letter-check.sh`, which finally closes Phase 2's open item: asking
+>   for a demand letter produced a .docx whose signature block matched line for
+>   line, with no invented bar number or state.
+> - **Not built from the plan below**: nothing, except that the "designate
+>   library editors" control the plan wanted on the Content tab already existed
+>   on the People tab from Phase 1, so it was left there rather than duplicated.
+
 ### 5.1 Migration `<date>_01_firm_content.sql`
 
 ```sql

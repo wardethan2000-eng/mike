@@ -108,6 +108,38 @@ export async function ensureDocAccess(
 }
 
 /**
+ * Reading a document, which reaches one step further than `ensureDocAccess`:
+ * anything on the firm's library shelves can be opened, previewed and
+ * downloaded by everyone still working at the firm.
+ *
+ * Deliberately separate from `ensureDocAccess`, which the routes that *change*
+ * a document use. Being able to read the firm's letterhead is not permission
+ * to write over it — that stays with administrators and the people they give
+ * the job to, through the library routes.
+ */
+export async function ensureDocReadAccess(
+    doc: { id?: string; user_id: string; project_id: string | null },
+    userId: string,
+    userEmail: string | null | undefined,
+    db: Db,
+): Promise<{ ok: true; isOwner: boolean } | { ok: false }> {
+    const access = await ensureDocAccess(doc, userId, userEmail, db);
+    if (access.ok) return access;
+    if (doc.project_id || !doc.id) return { ok: false };
+
+    const firmId = await getActiveFirmId(db, userId);
+    if (!firmId) return { ok: false };
+    const { data } = await db
+        .from("documents")
+        .select("firm_id")
+        .eq("id", doc.id)
+        .maybeSingle();
+    const onTheFirmsShelves =
+        (data as { firm_id: string | null } | null)?.firm_id === firmId;
+    return onTheFirmsShelves ? { ok: true, isOwner: false } : { ok: false };
+}
+
+/**
  * Same shape as `ensureDocAccess`, for tabular_reviews. A review can be
  * shared in two ways:
  *   1. Indirectly — if `project_id` is set, everyone with project access
@@ -147,6 +179,12 @@ export async function ensureReviewAccess(
 /**
  * Filter user-supplied document IDs down to documents the caller can read.
  *
+ * Three sorts of document pass: your own, anything in a matter you can open,
+ * and anything on the firm's library shelves. That last one is why this helper
+ * exists rather than a plain "is it mine" check — a firm template handed to a
+ * chat by a colleague has to stay readable, or it silently disappears from the
+ * conversation.
+ *
  * Tabular review routes accept document IDs from request bodies. Without this
  * check, a caller with access to any review could attach arbitrary document
  * UUIDs and later cause /generate or /regenerate-cell to extract those bytes.
@@ -160,18 +198,22 @@ export async function filterAccessibleDocumentIds(
     if (documentIds.length === 0) return [];
     const { data: docs } = await db
         .from("documents")
-        .select("id, user_id, project_id")
+        .select("id, user_id, project_id, firm_id")
         .in("id", documentIds);
     const rows = (docs ?? []) as {
         id: string;
         user_id: string;
         project_id: string | null;
+        firm_id?: string | null;
     }[];
     if (rows.length === 0) return [];
 
-    const accessibleProjectIds = new Set(
-        await listAccessibleProjectIds(userId, userEmail, db),
-    );
+    const [accessibleProjectIds, firmId] = await Promise.all([
+        listAccessibleProjectIds(userId, userEmail, db).then(
+            (ids) => new Set(ids),
+        ),
+        getActiveFirmId(db, userId),
+    ]);
     const allowed: string[] = [];
     for (const doc of rows) {
         if (doc.user_id === userId) {
@@ -180,6 +222,8 @@ export async function filterAccessibleDocumentIds(
             doc.project_id &&
             accessibleProjectIds.has(doc.project_id)
         ) {
+            allowed.push(doc.id);
+        } else if (!doc.project_id && firmId && doc.firm_id === firmId) {
             allowed.push(doc.id);
         }
     }

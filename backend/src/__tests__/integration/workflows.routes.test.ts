@@ -103,6 +103,7 @@ vi.mock("../../middleware/auth", () => ({
 vi.mock("../../lib/access", () => ({
     checkProjectAccess: (...args: unknown[]) => checkProjectAccess(...args),
     ensureDocAccess: vi.fn(async () => ({ ok: true, isOwner: true })),
+    ensureDocReadAccess: vi.fn(async () => ({ ok: true, isOwner: true })),
     ensureReviewAccess: vi.fn(async () => ({ ok: true, isOwner: true })),
     filterAccessibleDocumentIds: vi.fn(async (ids: string[]) => ids),
     listAccessibleProjectIds: vi.fn(async () => []),
@@ -125,6 +126,7 @@ vi.mock("../../lib/documentVersions", () => ({
 import { app } from "../../app";
 import { createServerSupabase } from "../../lib/supabase";
 import { resetEnsuredDefaultUsersForTests } from "../../lib/workflowCatalog";
+import { clearFirmCaches } from "../../lib/firm";
 
 const AUTH = ["Authorization", "Bearer test"] as const;
 
@@ -151,6 +153,7 @@ describe("workflows.routes", () => {
         vi.clearAllMocks();
         resetSupabaseState();
         resetEnsuredDefaultUsersForTests();
+        clearFirmCaches();
     });
 
     // ── GET /workflows (overview) ─────────────────────────────────────────
@@ -343,4 +346,86 @@ describe("workflows.routes", () => {
       });
     });
   });
+
+    // ── Publishing a workflow to the firm ────────────────────────────────
+    describe("POST /workflows/:id/publish-to-firm", () => {
+        const FIRM = "firm-1";
+
+        function memberIs(role: "admin" | "attorney" | null, status = "active") {
+            supabaseState.tables.firm_members = {
+                data: role
+                    ? {
+                          firm_id: FIRM,
+                          user_id: "u1",
+                          role,
+                          status,
+                          can_edit_firm_library: false,
+                      }
+                    : null,
+                error: null,
+            };
+        }
+
+        it("turns away somebody who does not work at the firm", async () => {
+            memberIs(null);
+
+            const res = await request(app)
+                .post("/workflows/w1/publish-to-firm")
+                .set(...AUTH)
+                .send({});
+
+            expect(res.status).toBe(403);
+        });
+
+        it("copies the workflow onto the firm's list", async () => {
+            memberIs("attorney");
+            supabaseState.tables.workflows = {
+                data: {
+                    id: "w1",
+                    user_id: "u1",
+                    title: "Lease review",
+                    type: "assistant",
+                    prompt_md: "Check the rent.",
+                    firm_id: null,
+                },
+                error: null,
+            };
+
+            const res = await request(app)
+                .post("/workflows/w1/publish-to-firm")
+                .set(...AUTH)
+                .send({});
+
+            expect(res.status).toBe(201);
+            const written = supabaseState.inserts.find(
+                (row) => row.table === "workflows",
+            );
+            expect(written?.payload).toMatchObject({
+                firm_id: FIRM,
+                user_id: "u1",
+                title: "Lease review",
+            });
+        });
+
+        it("refuses to publish the same workflow twice", async () => {
+            memberIs("attorney");
+            supabaseState.tables.workflows = {
+                data: {
+                    id: "w1",
+                    user_id: "u1",
+                    title: "Lease review",
+                    type: "assistant",
+                    firm_id: FIRM,
+                },
+                error: null,
+            };
+
+            const res = await request(app)
+                .post("/workflows/w1/publish-to-firm")
+                .set(...AUTH)
+                .send({});
+
+            expect(res.status).toBe(409);
+        });
+    });
 });

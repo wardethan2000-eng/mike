@@ -107,6 +107,7 @@ vi.mock("../../middleware/auth", () => ({
 vi.mock("../../lib/access", () => ({
     checkProjectAccess: (...args: unknown[]) => checkProjectAccess(...args),
     ensureDocAccess: vi.fn(async () => ({ ok: true, isOwner: true })),
+    ensureDocReadAccess: vi.fn(async () => ({ ok: true, isOwner: true })),
     ensureReviewAccess: vi.fn(async () => ({ ok: true, isOwner: true })),
     filterAccessibleDocumentIds: vi.fn(async (ids: string[]) => ids),
     listAccessibleProjectIds: vi.fn(async () => []),
@@ -457,6 +458,7 @@ describe("projects.routes", () => {
             id: "d1",
             filename: "Agreement.docx",
             folder_id: null,
+            scope: "personal",
           },
         ],
         documentsHasMore: true,
@@ -471,6 +473,7 @@ describe("projects.routes", () => {
         p_file_type: "docx",
         p_sort_key: "name",
         p_sort_direction: "asc",
+        p_firm_id: null,
       });
     });
 
@@ -499,6 +502,7 @@ describe("projects.routes", () => {
       expect(captured.args).toEqual({
         p_user_id: "u1",
         p_library_kind: "file",
+        p_firm_id: null,
       });
     });
   });

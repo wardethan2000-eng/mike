@@ -154,6 +154,71 @@ export function attorneyContextSection(
     return section;
 }
 
+export type DraftingDefaults = {
+    font?: string;
+    font_size_pt?: number;
+    line_spacing?: "single" | "1.5" | "double";
+    paragraph_style_notes?: string;
+};
+
+export const LINE_SPACINGS = ["single", "1.5", "double"] as const;
+
+/**
+ * How the firm likes a document to look when Mike is building one from
+ * nothing. Anything unrecognised is dropped rather than passed on, so a bad
+ * value can never reach the page.
+ */
+export function normalizeDraftingDefaults(value: unknown): DraftingDefaults {
+    if (!value || typeof value !== "object" || Array.isArray(value)) return {};
+    const row = value as Record<string, unknown>;
+    const out: DraftingDefaults = {};
+
+    if (typeof row.font === "string" && row.font.trim()) {
+        out.font = row.font.trim().slice(0, 60);
+    }
+    const size = Number(row.font_size_pt);
+    if (Number.isFinite(size) && size >= 6 && size <= 24) {
+        out.font_size_pt = Math.round(size * 2) / 2;
+    }
+    if (
+        typeof row.line_spacing === "string" &&
+        (LINE_SPACINGS as readonly string[]).includes(row.line_spacing)
+    ) {
+        out.line_spacing = row.line_spacing as DraftingDefaults["line_spacing"];
+    }
+    if (
+        typeof row.paragraph_style_notes === "string" &&
+        row.paragraph_style_notes.trim()
+    ) {
+        out.paragraph_style_notes = row.paragraph_style_notes
+            .trim()
+            .slice(0, 1000);
+    }
+    return out;
+}
+
+/**
+ * The house look, written out for the model. Empty when the firm has not set
+ * one, so a firm that never fills this in reads exactly as it did before.
+ */
+export function draftingDefaultsSection(defaults: DraftingDefaults): string {
+    const lines: string[] = [];
+    if (defaults.font) lines.push(`Typeface: ${defaults.font}`);
+    if (defaults.font_size_pt) {
+        lines.push(`Body text size: ${defaults.font_size_pt} point`);
+    }
+    if (defaults.line_spacing) {
+        lines.push(`Line spacing: ${defaults.line_spacing}`);
+    }
+    if (defaults.paragraph_style_notes) {
+        lines.push(defaults.paragraph_style_notes);
+    }
+    if (!lines.length) return "";
+    return `\nHouse style for a document built from nothing — pass these to generate_docx unless the user or the court asks for something else. When you are copying one of the firm's own documents instead, its own look wins and these are ignored:\n${lines.join(
+        "\n",
+    )}`;
+}
+
 /** The firm's own details, and anything it wants said on every matter. */
 export async function firmContextSection(db: Db): Promise<string> {
     const firm = await getFirm(db);
@@ -177,6 +242,9 @@ export async function firmContextSection(db: Db): Promise<string> {
     if (standing) {
         section += `\nHow this firm wants things done:\n${standing}`;
     }
+    section += draftingDefaultsSection(
+        normalizeDraftingDefaults(firm.drafting_defaults),
+    );
     return section;
 }
 

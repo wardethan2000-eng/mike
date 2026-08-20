@@ -10,8 +10,23 @@ import { singleFileUpload } from "../lib/upload";
 import { handleDocumentUpload } from "./documents";
 import { parsePaginationQuery, type PaginationParams } from "../lib/pagination";
 import { normalizeSearchTerm } from "../lib/search";
+import {
+  applyLibraryScope,
+  publishDocumentToFirm,
+  resolveLibraryScope,
+  type ResolvedLibraryScope,
+} from "../lib/firmLibrary";
+import { checkProjectAccess } from "../lib/access";
+import { recordAudit } from "../lib/audit";
 
 export const libraryRouter = Router();
+
+const NOT_IN_THE_FIRM = {
+  detail: "The firm library is only for people at the firm.",
+};
+const NOT_ALLOWED_TO_EDIT = {
+  detail: "Only an administrator can change the firm library.",
+};
 
 type LibraryKind = "file" | "template";
 type LibraryDocumentSortKey =
@@ -63,26 +78,35 @@ function normalizeDocumentFilename(nextName: unknown, currentName: string) {
   return `${trimmed}${ext}`;
 }
 
-function mapLibraryDocument<T extends Record<string, unknown>>(doc: T) {
+function mapLibraryDocument<T extends Record<string, unknown>>(
+  doc: T,
+  scope: LibraryScopeName = "personal",
+) {
   return {
     ...doc,
     folder_id: (doc.library_folder_id as string | null | undefined) ?? null,
+    scope,
   };
 }
+
+type LibraryScopeName = "personal" | "firm";
 
 async function loadLibraryFolder(
   db: ReturnType<typeof createServerSupabase>,
   userId: string,
   kind: LibraryKind,
   folderId: string,
+  scope: ResolvedLibraryScope,
 ): Promise<{ id: string; parent_folder_id: string | null } | null> {
-  const { data } = await db
-    .from("library_folders")
-    .select("id, parent_folder_id")
-    .eq("id", folderId)
-    .eq("user_id", userId)
-    .eq("library_kind", kind)
-    .maybeSingle();
+  const { data } = await applyLibraryScope(
+    db
+      .from("library_folders")
+      .select("id, parent_folder_id")
+      .eq("id", folderId)
+      .eq("library_kind", kind),
+    scope,
+    userId,
+  ).maybeSingle();
   return (
     (data as { id: string; parent_folder_id: string | null } | null) ?? null
   );
@@ -93,13 +117,14 @@ async function deleteLibraryDocumentsAndVersionFiles(
   userId: string,
   kind: LibraryKind,
   documentIds: string[],
+  scope: ResolvedLibraryScope,
 ) {
   if (documentIds.length === 0) return { error: null, deletedIds: [] };
-  let eligibleQuery = db
-    .from("documents")
-    .select("id")
-    .eq("user_id", userId)
-    .is("project_id", null);
+  let eligibleQuery = applyLibraryScope(
+    db.from("documents").select("id"),
+    scope,
+    userId,
+  ).is("project_id", null);
   eligibleQuery =
     kind === "file"
       ? eligibleQuery.or("library_kind.eq.file,library_kind.is.null")
@@ -132,11 +157,11 @@ async function deleteLibraryDocumentsAndVersionFiles(
   }
   await Promise.all([...paths].map((path) => deleteFile(path).catch(() => {})));
 
-  let deleteQuery = db
-    .from("documents")
-    .delete()
-    .eq("user_id", userId)
-    .is("project_id", null);
+  let deleteQuery = applyLibraryScope(
+    db.from("documents").delete(),
+    scope,
+    userId,
+  ).is("project_id", null);
   deleteQuery =
     kind === "file"
       ? deleteQuery.or("library_kind.eq.file,library_kind.is.null")
@@ -156,12 +181,13 @@ async function loadLibraryLevel(
   kind: LibraryKind,
   parentFolderId: string | null,
   pagination: PaginationParams,
+  scope: ResolvedLibraryScope,
 ) {
-  let documentsQuery = db
-    .from("documents")
-    .select("*")
-    .eq("user_id", userId)
-    .is("project_id", null);
+  let documentsQuery = applyLibraryScope(
+    db.from("documents").select("*"),
+    scope,
+    userId,
+  ).is("project_id", null);
   documentsQuery =
     parentFolderId === null
       ? documentsQuery.is("library_folder_id", null)
@@ -175,11 +201,11 @@ async function loadLibraryLevel(
     pagination.offset + pagination.limit,
   );
 
-  let foldersQuery = db
-    .from("library_folders")
-    .select("*")
-    .eq("user_id", userId)
-    .eq("library_kind", kind);
+  let foldersQuery = applyLibraryScope(
+    db.from("library_folders").select("*").eq("library_kind", kind),
+    scope,
+    userId,
+  );
   foldersQuery =
     parentFolderId === null
       ? foldersQuery.is("parent_folder_id", null)
@@ -213,7 +239,9 @@ async function loadLibraryLevel(
     ? rawDocs.slice(0, pagination.limit)
     : rawDocs;
 
-  const docsTyped = pageDocs.map(mapLibraryDocument) as {
+  const docsTyped = pageDocs.map((doc) =>
+    mapLibraryDocument(doc, scope.scope),
+  ) as {
     id: string;
     current_version_id?: string | null;
   }[];
@@ -222,10 +250,115 @@ async function loadLibraryLevel(
   return {
     error: null,
     documents: docsTyped,
-    folders: folders ?? [],
+    folders: (folders ?? []).map((folder) => ({
+      ...folder,
+      scope: scope.scope,
+    })),
     documentsHasMore,
   };
 }
+
+// POST /library/documents/:documentId/publish
+// Put a copy of one of your own documents — or one out of a matter — on the
+// firm's shelves, where everyone still working at the firm can read it. It is
+// always a copy: the original stays exactly where it was.
+libraryRouter.post(
+  "/documents/:documentId/publish",
+  requireAuth,
+  async (req, res) => {
+    const userId = res.locals.userId as string;
+    const userEmail = res.locals.userEmail as string | undefined;
+    const db = createServerSupabase();
+
+    const scope = await resolveLibraryScope(db, userId, "firm");
+    if (!scope || !scope.firmId)
+      return void res.status(403).json(NOT_IN_THE_FIRM);
+
+    const { documentId } = req.params;
+    const { data: doc } = await db
+      .from("documents")
+      .select("id, user_id, project_id, firm_id")
+      .eq("id", documentId)
+      .maybeSingle();
+    if (!doc) return void res.status(404).json({ detail: "Document not found" });
+    const source = doc as {
+      id: string;
+      user_id: string;
+      project_id: string | null;
+      firm_id: string | null;
+    };
+
+    // You may publish what you can already read: your own files, and anything
+    // in a matter you can open.
+    let mayRead = source.user_id === userId;
+    if (!mayRead && source.project_id) {
+      const access = await checkProjectAccess(
+        source.project_id,
+        userId,
+        userEmail,
+        db,
+      );
+      mayRead = access.ok;
+    }
+    if (!mayRead && source.firm_id === scope.firmId) mayRead = true;
+    if (!mayRead)
+      return void res.status(404).json({ detail: "Document not found" });
+
+    if (source.firm_id === scope.firmId && !source.project_id) {
+      return void res
+        .status(409)
+        .json({ detail: "That is already in the firm library." });
+    }
+
+    const libraryKind =
+      normalizeLibraryKind(req.body?.library_kind) ?? "template";
+    const folderId =
+      typeof req.body?.folder_id === "string" && req.body.folder_id
+        ? req.body.folder_id
+        : null;
+    if (folderId) {
+      const folder = await loadLibraryFolder(
+        db,
+        userId,
+        libraryKind,
+        folderId,
+        scope,
+      );
+      if (!folder)
+        return void res.status(404).json({ detail: "Folder not found" });
+    }
+
+    const result = await publishDocumentToFirm(db, {
+      documentId,
+      firmId: scope.firmId,
+      userId,
+      libraryKind,
+      libraryFolderId: folderId,
+      filename:
+        typeof req.body?.filename === "string" ? req.body.filename : null,
+    });
+    if (!result.ok)
+      return void res.status(result.status).json({ detail: result.detail });
+
+    await recordAudit(db, {
+      userId,
+      userEmail: userEmail ?? "",
+      action: "firm_library_publish",
+      surface: "library",
+      title: `Added "${result.filename}" to the firm library`,
+      documentId: result.documentId,
+      projectId: source.project_id,
+      detail: { library_kind: libraryKind, from_document_id: documentId },
+    });
+
+    res.status(201).json({
+      id: result.documentId,
+      filename: result.filename,
+      library_kind: libraryKind,
+      scope: "firm",
+    });
+  },
+);
 
 // GET /library/:kind
 // Directory mode is the default. Pass parent_folder_id to load one folder
@@ -236,6 +369,8 @@ libraryRouter.get("/:kind", requireAuth, async (req, res) => {
   if (!kind) return void res.status(404).json({ detail: "Library not found" });
 
   const db = createServerSupabase();
+  const scope = await resolveLibraryScope(db, userId, req.query.scope);
+  if (!scope) return void res.status(403).json(NOT_IN_THE_FIRM);
   const pagination = parsePaginationQuery(req.query as Record<string, unknown>);
   if (req.query.view === "search") {
     const searchTerm = normalizeSearchTerm(req.query.search);
@@ -253,19 +388,28 @@ libraryRouter.get("/:kind", requireAuth, async (req, res) => {
       p_file_type: fileType,
       p_sort_key: sort.key,
       p_sort_direction: sort.direction,
+      p_firm_id: scope.firmId,
     });
     if (error) return void res.status(500).json({ detail: error.message });
 
     const rows = (data ?? []) as Record<string, unknown>[];
     return void res.json({
-      documents: rows.slice(0, pagination.limit).map(mapLibraryDocument),
+      documents: rows
+        .slice(0, pagination.limit)
+        .map((row) => mapLibraryDocument(row, scope.scope)),
       documentsHasMore: rows.length > pagination.limit,
     });
   }
 
   const parentFolderId = normalizeSearchTerm(req.query.parent_folder_id);
   if (parentFolderId) {
-    const folder = await loadLibraryFolder(db, userId, kind, parentFolderId);
+    const folder = await loadLibraryFolder(
+      db,
+      userId,
+      kind,
+      parentFolderId,
+      scope,
+    );
     if (!folder)
       return void res.status(404).json({ detail: "Folder not found" });
   }
@@ -275,6 +419,7 @@ libraryRouter.get("/:kind", requireAuth, async (req, res) => {
     kind,
     parentFolderId,
     pagination,
+    scope,
   );
   if (result.error) return void res.status(500).json({ detail: result.error });
   res.json({
@@ -318,6 +463,8 @@ libraryRouter.post("/:kind/levels", requireAuth, async (req, res) => {
   }
 
   const db = createServerSupabase();
+  const scope = await resolveLibraryScope(db, userId, req.body?.scope);
+  if (!scope) return void res.status(403).json(NOT_IN_THE_FIRM);
   const results: Array<{
     parentId: string | null;
     result: Awaited<ReturnType<typeof loadLibraryLevel>>;
@@ -330,10 +477,14 @@ libraryRouter.post("/:kind/levels", requireAuth, async (req, res) => {
         const level = levels[index];
         results[index] = {
           parentId: level.parentId,
-          result: await loadLibraryLevel(db, userId, kind, level.parentId, {
-            limit: level.limit,
-            offset: 0,
-          }),
+          result: await loadLibraryLevel(
+            db,
+            userId,
+            kind,
+            level.parentId,
+            { limit: level.limit, offset: 0 },
+            scope,
+          ),
         };
       }
     }),
@@ -359,9 +510,12 @@ libraryRouter.get("/:kind/filter-options", requireAuth, async (req, res) => {
   if (!kind) return void res.status(404).json({ detail: "Library not found" });
 
   const db = createServerSupabase();
+  const scope = await resolveLibraryScope(db, userId, req.query.scope);
+  if (!scope) return void res.status(403).json(NOT_IN_THE_FIRM);
   const { data, error } = await db.rpc("get_library_filter_options", {
     p_user_id: userId,
     p_library_kind: kind,
+    p_firm_id: scope.firmId,
   });
   if (error) return void res.status(500).json({ detail: error.message });
   const row = (data?.[0] ?? {}) as { file_types?: unknown };
@@ -382,6 +536,8 @@ libraryRouter.get("/:kind/ids", requireAuth, async (req, res) => {
   if (!kind) return void res.status(404).json({ detail: "Library not found" });
 
   const db = createServerSupabase();
+  const scope = await resolveLibraryScope(db, userId, req.query.scope);
+  if (!scope) return void res.status(403).json(NOT_IN_THE_FIRM);
   const searchTerm = normalizeSearchTerm(req.query.search);
   const fileType = normalizeSearchTerm(req.query.file_type)?.toLowerCase() ?? null;
   const ids: string[] = [];
@@ -394,6 +550,7 @@ libraryRouter.get("/:kind/ids", requireAuth, async (req, res) => {
       p_file_type: fileType,
       p_limit: LIBRARY_IDS_PAGE_SIZE,
       p_offset: offset,
+      p_firm_id: scope.firmId,
     });
     if (error) return void res.status(500).json({ detail: error.message });
     const rows = (data ?? []) as { id: string }[];
@@ -425,6 +582,10 @@ libraryRouter.post(
     if (ids.length === 0) return void res.json({ deletedIds: [] });
 
     const db = createServerSupabase();
+    const scope = await resolveLibraryScope(db, userId, req.body?.scope);
+    if (!scope) return void res.status(403).json(NOT_IN_THE_FIRM);
+    if (!scope.canWrite)
+      return void res.status(403).json(NOT_ALLOWED_TO_EDIT);
     const deletedIds: string[] = [];
     for (
       let offset = 0;
@@ -437,6 +598,7 @@ libraryRouter.post(
         userId,
         kind,
         batch,
+        scope,
       );
       if (result.error)
         return void res.status(500).json({ detail: result.error.message });
@@ -457,8 +619,13 @@ libraryRouter.post(
     if (!kind)
       return void res.status(404).json({ detail: "Library not found" });
     const db = createServerSupabase();
+    const scope = await resolveLibraryScope(db, userId, req.body?.scope);
+    if (!scope) return void res.status(403).json(NOT_IN_THE_FIRM);
+    if (!scope.canWrite)
+      return void res.status(403).json(NOT_ALLOWED_TO_EDIT);
     await handleDocumentUpload(req, res, userId, null, db, {
       libraryKind: kind,
+      firmId: scope.firmId,
     });
   },
 );
@@ -474,11 +641,13 @@ libraryRouter.get(
       return void res.status(404).json({ detail: "Library not found" });
 
     const db = createServerSupabase();
-    const { data, error } = await db
-      .from("library_folders")
-      .select("*")
-      .eq("user_id", userId)
-      .eq("library_kind", kind);
+    const scope = await resolveLibraryScope(db, userId, req.query.scope);
+    if (!scope) return void res.status(403).json(NOT_IN_THE_FIRM);
+    const { data, error } = await applyLibraryScope(
+      db.from("library_folders").select("*").eq("library_kind", kind),
+      scope,
+      userId,
+    );
     if (error) return void res.status(500).json({ detail: error.message });
 
     const folders = data ?? [];
@@ -517,8 +686,17 @@ libraryRouter.post("/:kind/folders", requireAuth, async (req, res) => {
     return void res.status(400).json({ detail: "name is required" });
 
   const db = createServerSupabase();
+  const scope = await resolveLibraryScope(db, userId, req.body?.scope);
+  if (!scope) return void res.status(403).json(NOT_IN_THE_FIRM);
+  if (!scope.canWrite) return void res.status(403).json(NOT_ALLOWED_TO_EDIT);
   if (parent_folder_id) {
-    const parent = await loadLibraryFolder(db, userId, kind, parent_folder_id);
+    const parent = await loadLibraryFolder(
+      db,
+      userId,
+      kind,
+      parent_folder_id,
+      scope,
+    );
     if (!parent)
       return void res.status(404).json({ detail: "Parent folder not found" });
   }
@@ -527,6 +705,7 @@ libraryRouter.post("/:kind/folders", requireAuth, async (req, res) => {
     .from("library_folders")
     .insert({
       user_id: userId,
+      firm_id: scope.firmId,
       library_kind: kind,
       name: name.trim(),
       parent_folder_id: parent_folder_id ?? null,
@@ -534,7 +713,7 @@ libraryRouter.post("/:kind/folders", requireAuth, async (req, res) => {
     .select("*")
     .single();
   if (error) return void res.status(500).json({ detail: error.message });
-  res.status(201).json(data);
+  res.status(201).json({ ...data, scope: scope.scope });
 });
 
 // PATCH /library/:kind/folders/:folderId
@@ -551,9 +730,13 @@ libraryRouter.patch(
     const body = req.body as {
       name?: string;
       parent_folder_id?: string | null;
+      scope?: string;
     };
   const db = createServerSupabase();
-  const folder = await loadLibraryFolder(db, userId, kind, folderId);
+  const scope = await resolveLibraryScope(db, userId, body.scope);
+  if (!scope) return void res.status(403).json(NOT_IN_THE_FIRM);
+  if (!scope.canWrite) return void res.status(403).json(NOT_ALLOWED_TO_EDIT);
+  const folder = await loadLibraryFolder(db, userId, kind, folderId, scope);
     if (!folder)
       return void res.status(404).json({ detail: "Folder not found" });
 
@@ -575,7 +758,7 @@ libraryRouter.patch(
             detail: "Cannot move a folder into itself or a descendant",
           });
         }
-        const parent = await loadLibraryFolder(db, userId, kind, cur);
+        const parent = await loadLibraryFolder(db, userId, kind, cur, scope);
         if (!parent)
             return void res
               .status(404)
@@ -586,17 +769,20 @@ libraryRouter.patch(
     updates.parent_folder_id = body.parent_folder_id ?? null;
   }
 
-  const { data, error } = await db
-    .from("library_folders")
-    .update(updates)
-    .eq("id", folderId)
-    .eq("user_id", userId)
-    .eq("library_kind", kind)
+  const { data, error } = await applyLibraryScope(
+    db
+      .from("library_folders")
+      .update(updates)
+      .eq("id", folderId)
+      .eq("library_kind", kind),
+    scope,
+    userId,
+  )
     .select("*")
     .single();
   if (error || !data)
     return void res.status(404).json({ detail: "Folder not found" });
-  res.json(data);
+  res.json({ ...data, scope: scope.scope });
   },
 );
 
@@ -612,11 +798,21 @@ libraryRouter.delete(
 
   const { folderId } = req.params;
   const db = createServerSupabase();
-  const { data: allFolders, error: foldersError } = await db
-    .from("library_folders")
-    .select("id, parent_folder_id")
-    .eq("user_id", userId)
-    .eq("library_kind", kind);
+  const scope = await resolveLibraryScope(
+    db,
+    userId,
+    req.body?.scope ?? req.query.scope,
+  );
+  if (!scope) return void res.status(403).json(NOT_IN_THE_FIRM);
+  if (!scope.canWrite) return void res.status(403).json(NOT_ALLOWED_TO_EDIT);
+  const { data: allFolders, error: foldersError } = await applyLibraryScope(
+    db
+      .from("library_folders")
+      .select("id, parent_folder_id")
+      .eq("library_kind", kind),
+    scope,
+    userId,
+  );
   if (foldersError)
     return void res.status(500).json({ detail: foldersError.message });
   if (!(allFolders ?? []).some((folder) => folder.id === folderId)) {
@@ -641,11 +837,11 @@ libraryRouter.delete(
     stack.push(...(childrenByParent.get(id) ?? []));
   }
 
-  let documentsInFolderQuery = db
-    .from("documents")
-    .select("id")
-    .eq("user_id", userId)
-    .is("project_id", null);
+  let documentsInFolderQuery = applyLibraryScope(
+    db.from("documents").select("id"),
+    scope,
+    userId,
+  ).is("project_id", null);
   documentsInFolderQuery =
     kind === "file"
       ? documentsInFolderQuery.or("library_kind.eq.file,library_kind.is.null")
@@ -663,18 +859,22 @@ libraryRouter.delete(
     userId,
     kind,
     docIds,
+    scope,
   );
     if (deleteDocsResult.error)
       return void res
         .status(500)
         .json({ detail: deleteDocsResult.error.message });
 
-  const { error } = await db
-    .from("library_folders")
-    .delete()
-    .eq("id", folderId)
-    .eq("user_id", userId)
-    .eq("library_kind", kind);
+  const { error } = await applyLibraryScope(
+    db
+      .from("library_folders")
+      .delete()
+      .eq("id", folderId)
+      .eq("library_kind", kind),
+    scope,
+    userId,
+  );
   if (error) return void res.status(500).json({ detail: error.message });
   res.status(204).send();
   },
@@ -691,23 +891,30 @@ libraryRouter.patch(
       return void res.status(404).json({ detail: "Library not found" });
 
     const { documentId } = req.params;
-    const { folder_id } = req.body as { folder_id: string | null };
+    const { folder_id } = req.body as {
+      folder_id: string | null;
+      scope?: string;
+    };
     const db = createServerSupabase();
+    const scope = await resolveLibraryScope(db, userId, req.body?.scope);
+    if (!scope) return void res.status(403).json(NOT_IN_THE_FIRM);
+    if (!scope.canWrite) return void res.status(403).json(NOT_ALLOWED_TO_EDIT);
 
     if (folder_id) {
-      const folder = await loadLibraryFolder(db, userId, kind, folder_id);
+      const folder = await loadLibraryFolder(db, userId, kind, folder_id, scope);
       if (!folder)
         return void res.status(404).json({ detail: "Folder not found" });
     }
 
-    let moveQuery = db
-      .from("documents")
-      .update({
+    let moveQuery = applyLibraryScope(
+      db.from("documents").update({
         library_folder_id: folder_id ?? null,
         updated_at: new Date().toISOString(),
-      })
+      }),
+      scope,
+      userId,
+    )
       .eq("id", documentId)
-      .eq("user_id", userId)
       .is("project_id", null);
     moveQuery =
       kind === "file"
@@ -716,7 +923,7 @@ libraryRouter.patch(
     const { data, error } = await moveQuery.select("*").single();
     if (error || !data)
       return void res.status(404).json({ detail: "Document not found" });
-    res.json(mapLibraryDocument(data));
+    res.json(mapLibraryDocument(data, scope.scope));
   },
 );
 
@@ -732,11 +939,15 @@ libraryRouter.patch(
 
     const { documentId } = req.params;
     const db = createServerSupabase();
-    let docQuery = db
-      .from("documents")
-      .select("id, current_version_id")
+    const scope = await resolveLibraryScope(db, userId, req.body?.scope);
+    if (!scope) return void res.status(403).json(NOT_IN_THE_FIRM);
+    if (!scope.canWrite) return void res.status(403).json(NOT_ALLOWED_TO_EDIT);
+    let docQuery = applyLibraryScope(
+      db.from("documents").select("id, current_version_id"),
+      scope,
+      userId,
+    )
       .eq("id", documentId)
-      .eq("user_id", userId)
       .is("project_id", null);
     docQuery =
       kind === "file"
@@ -762,11 +973,12 @@ libraryRouter.patch(
     if (!filename)
       return void res.status(400).json({ detail: "filename is required" });
 
-    let updateQuery = db
-      .from("documents")
-      .update({ updated_at: new Date().toISOString() })
+    let updateQuery = applyLibraryScope(
+      db.from("documents").update({ updated_at: new Date().toISOString() }),
+      scope,
+      userId,
+    )
       .eq("id", documentId)
-      .eq("user_id", userId)
       .is("project_id", null);
     updateQuery =
       kind === "file"
@@ -784,6 +996,6 @@ libraryRouter.patch(
         .eq("document_id", documentId);
     }
 
-    res.json(mapLibraryDocument({ ...updated, filename }));
+    res.json(mapLibraryDocument({ ...updated, filename }, scope.scope));
   },
 );

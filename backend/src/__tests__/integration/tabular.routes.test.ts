@@ -119,6 +119,7 @@ vi.mock("../../lib/access", () => ({
     filterAccessibleDocumentIds: (...args: unknown[]) =>
         filterAccessibleDocumentIds(...args),
     ensureDocAccess: vi.fn(async () => ({ ok: true, isOwner: true })),
+    ensureDocReadAccess: vi.fn(async () => ({ ok: true, isOwner: true })),
     listAccessibleProjectIds: vi.fn(async () => []),
 }));
 

@@ -3,10 +3,11 @@
 // workflows, so its scope only ever needs to distinguish owned vs. shared
 // DB rows. The UI's separate "source" filter (system/user/shared) is a
 // different, client-side-only concept layered on top.
-export type WorkflowScope = "all" | "owned" | "shared";
+export type WorkflowScope = "all" | "owned" | "shared" | "firm";
 
 export function parseWorkflowScope(value: unknown): WorkflowScope {
-    if (value === "owned" || value === "shared") return value;
+    if (value === "owned" || value === "shared" || value === "firm")
+        return value;
     return "all";
 }
 

@@ -127,6 +127,9 @@ interface DocTableOperations {
     moveDocument: (documentId: string, folderId: string | null) => Promise<Document>;
     renameDocument: (documentId: string, filename: string) => Promise<Document>;
     bulkDeleteDocuments?: (documentIds: string[]) => Promise<{ deletedIds: string[] }>;
+    // Offered as "Add to firm library" on each document when the person is
+    // allowed to put things there. Always a copy — the original stays put.
+    publishToFirm?: (documentId: string) => Promise<void>;
 }
 
 interface DocTableProps {
@@ -616,6 +619,13 @@ export function DocTable({
         sourceDoc: Document;
     } | null>(null);
     const [pendingDeleteDoc, setPendingDeleteDoc] = useState<Document | null>(null);
+    const [pendingPublishDoc, setPendingPublishDoc] = useState<Document | null>(
+        null,
+    );
+    const [publishStatus, setPublishStatus] = useState<
+        "idle" | "publishing" | "published"
+    >("idle");
+    const [publishError, setPublishError] = useState<string | null>(null);
     const [pendingDeleteStatus, setPendingDeleteStatus] = useState<"idle" | "deleting" | "deleted">("idle");
     const [pendingDeleteFolder, setPendingDeleteFolder] = useState<{
         folder: DocTableFolder;
@@ -1111,6 +1121,37 @@ export function DocTable({
                 next.delete(docId);
                 return next;
             });
+        }
+    }
+
+    // Adding to the firm library always makes a copy, so the confirmation says
+    // so plainly: this file stays where it is, and a copy of it becomes visible
+    // to everyone at the firm.
+    function handlePublishToFirm(doc: Document) {
+        setPublishStatus("idle");
+        setPublishError(null);
+        setPendingPublishDoc(doc);
+    }
+
+    async function confirmPublishToFirm() {
+        const pending = pendingPublishDoc;
+        if (!pending || !operations.publishToFirm || publishStatus === "publishing")
+            return;
+        setPublishStatus("publishing");
+        setPublishError(null);
+        try {
+            await operations.publishToFirm(pending.id);
+            setPublishStatus("published");
+            window.setTimeout(() => {
+                setPendingPublishDoc(null);
+                setPublishStatus("idle");
+            }, 650);
+        } catch (error) {
+            console.error("add to firm library failed", error);
+            setPublishStatus("idle");
+            setPublishError(
+                "That could not be added to the firm library. Try again, or ask an administrator.",
+            );
         }
     }
 
@@ -1858,6 +1899,11 @@ export function DocTable({
                                                                 : undefined
                                                         }
                                                         onUploadNewVersion={() => void handleUploadNewVersion(doc)}
+                                                        onPublishToFirm={
+                                                            operations.publishToFirm
+                                                                ? () => void handlePublishToFirm(doc)
+                                                                : undefined
+                                                        }
                                                         onRemoveFromFolder={
                                                             doc.folder_id
                                                                 ? () => handleRemoveDocFromFolder(doc.id)
@@ -2627,6 +2673,42 @@ export function DocTable({
                 }}
             />
             <ConfirmPopup
+                open={!!pendingPublishDoc}
+                title="Add to the firm library?"
+                message={
+                    <div className="space-y-2">
+                        <p>
+                            A copy of{" "}
+                            <span className="font-medium text-gray-950">
+                                {pendingPublishDoc?.filename}
+                            </span>{" "}
+                            goes into the firm library, where everyone at the
+                            firm can read it. This file stays exactly where it
+                            is.
+                        </p>
+                        {publishError && (
+                            <p className="text-red-500">{publishError}</p>
+                        )}
+                    </div>
+                }
+                confirmLabel="Add a copy"
+                confirmStatus={
+                    publishStatus === "publishing"
+                        ? "loading"
+                        : publishStatus === "published"
+                          ? "complete"
+                          : "idle"
+                }
+                cancelLabel="Cancel"
+                onCancel={() => {
+                    if (publishStatus === "publishing") return;
+                    setPendingPublishDoc(null);
+                    setPublishStatus("idle");
+                    setPublishError(null);
+                }}
+                onConfirm={() => void confirmPublishToFirm()}
+            />
+            <ConfirmPopup
                 open={!!pendingDeleteDoc}
                 title="Delete document?"
                 message={pendingDeleteDocMessage}
@@ -3008,6 +3090,11 @@ export function DocTable({
                                                                                 ? () => void toggleVersions(doc.id)
                                                                                 : undefined
                                                                         }
+                                                                        onPublishToFirm={
+                                                                            operations.publishToFirm
+                                                                                ? () => void handlePublishToFirm(doc)
+                                                                                : undefined
+                                                                        }
                                                                         onUploadNewVersion={() =>
                                                                             void handleUploadNewVersion(doc)
                                                                         }
@@ -3108,6 +3195,11 @@ export function DocTable({
                                                         : undefined
                                                 }
                                                 onUploadNewVersion={() => void handleUploadNewVersion(menuDoc)}
+                                                onPublishToFirm={
+                                                    operations.publishToFirm
+                                                        ? () => void handlePublishToFirm(menuDoc)
+                                                        : undefined
+                                                }
                                                 onRemoveFromFolder={
                                                     menuDoc.folder_id
                                                         ? () => void handleRemoveDocFromFolder(menuDoc.id)
