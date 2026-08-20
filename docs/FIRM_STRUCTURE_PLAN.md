@@ -359,6 +359,41 @@ List payloads should mark `isOwner` so the UI can show "yours" vs "firm".
 
 ## 4. Phase 2 — Attorney identity (bar numbers, signature blocks)
 
+> **STATUS: BUILT AND DEPLOYED 2026-08-20.** What shipped, and where it differs
+> from the plan below:
+>
+> - **Migration** `20260820_04_professional_profile.sql`, applied live: five
+>   columns on `user_profiles` — `prof_title`, `prof_phone`, `practice_areas`,
+>   `bar_admissions` (jsonb list of {state, bar_number, status}) and
+>   `signature_block`.
+> - **Read separately, on purpose.** `loadProfessionalDetails` in
+>   `lib/draftingContext.ts` runs its own query rather than widening
+>   `PROFILE_SELECT`, whose fallback cascade for older databases would
+>   otherwise break. A database without the columns yields blanks.
+> - **`lib/draftingContext.ts`** holds the formatting: `attorneyContextSection`
+>   and `firmContextSection`, joined by `whoIsAskingSection`. Both are quiet —
+>   somebody who has filled nothing in adds nothing to the prompt, and a
+>   paralegal with no bar number simply has no bar line.
+> - **Wired into all three chat paths**: `projectChat.ts` (before the case
+>   overview, leaving it untouched), `chat.ts` (which passed no extra at all
+>   before) and `wordChat.ts`.
+> - **One prompt rule added** to DRAFTING FROM AN EXAMPLE: sign with the given
+>   details, reproduce the signature block exactly, and never supply a bar
+>   number, state of admission or title that was not given — leave a marked
+>   blank instead.
+> - **Settings → My Details** is the screen: title, phone, practice areas,
+>   a repeatable state + bar-number list, and a monospace signature block.
+> - **Verified**: backend suite green at 788 (including new formatting tests),
+>   plus a 20-check API smoke test covering saving, reading back, trimming,
+>   and the refusals (a bar number with no state, a state with no number,
+>   an over-long block, an unknown field).
+> - **Not done from the plan below**: §4.2's suggestion of touching
+>   `documentOps.ts` proved unnecessary — the system prompt is the whole
+>   mechanism, exactly as that section predicted. Acceptance item 2 (asking
+>   the assistant for a letter and opening the .docx to confirm the signature
+>   block appears verbatim) has NOT been run end to end and still wants a
+>   human check with a real model.
+
 ### 4.1 Migration `<date>_01_professional_profile.sql`
 
 ```sql
