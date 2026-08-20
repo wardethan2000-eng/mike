@@ -48,4 +48,7 @@ RUN node scripts/warm-embeddings.mjs
 
 ENV NODE_ENV=production
 EXPOSE 3001
-CMD ["npm", "start"]
+# Started directly rather than through npm: npm does not pass the stop signal
+# on to node, so the server never heard it and an answer being written was cut
+# off with nothing saved (see lib/chat/liveAnswers.ts).
+CMD ["node", "dist/index.js"]
