@@ -583,12 +583,13 @@ chatRouter.post("/", requireAuth, async (req, res) => {
             });
         }
     }
-    // Resolved rather than taken as sent: a request that names no model still
-    // runs on one, and the answer should say which.
-    const runModel = resolveModel(
-        resumeState ? resumeState.model : model,
-        DEFAULT_MAIN_MODEL,
-    );
+    const runModel = resumeState ? resumeState.model : model;
+    // What the answer will actually run on. The request may name nothing, or
+    // name something this deployment does not have, and the answer still runs
+    // on a model — that is the one worth recording. Resolved the same way the
+    // stream resolves it, and only used for the record, so what is passed to
+    // the stream is unchanged.
+    const recordedModel = resolveModel(runModel, DEFAULT_MAIN_MODEL);
 
     const workflowStore = await buildWorkflowStore(userId, userEmail, db);
 
@@ -608,7 +609,7 @@ chatRouter.post("/", requireAuth, async (req, res) => {
             table: "chat_messages",
             id: assistantMessageId,
             chatId,
-            model: runModel,
+            model: recordedModel,
         });
         if (reserveError) {
             console.error(
@@ -637,7 +638,7 @@ chatRouter.post("/", requireAuth, async (req, res) => {
             `data: ${JSON.stringify({
                 type: "chat_id",
                 chatId,
-                model: runModel,
+                model: recordedModel,
                 ...(assistantMessageId ? { assistantMessageId } : {}),
             })}\n\n`,
         );
