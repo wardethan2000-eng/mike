@@ -757,10 +757,39 @@ export async function updateProject(
         overview?: string | null;
         /** Let Mike save the facts it finds without asking first. */
         auto_remember?: boolean;
+        /** Whether Mike looks for facts worth remembering at all. */
+        suggest_facts?: boolean;
         shared_with?: string[];
     },
 ): Promise<Project> {
     return apiRequest<Project>(`/projects/${projectId}`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(payload),
+    });
+}
+
+/**
+ * The case overview and how this matter handles suggested facts.
+ *
+ * Separate from updateProject on purpose: renaming a matter or changing who it
+ * is shared with belongs to whoever owns it, but the standing instructions for
+ * the case are work product, and anyone working the matter can fix them.
+ */
+export async function updateCaseContext(
+    projectId: string,
+    payload: {
+        overview?: string | null;
+        auto_remember?: boolean;
+        suggest_facts?: boolean;
+    },
+): Promise<{
+    id: string;
+    overview: string | null;
+    auto_remember: boolean;
+    suggest_facts: boolean;
+}> {
+    return apiRequest(`/projects/${projectId}/case-context`, {
         method: "PATCH",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(payload),

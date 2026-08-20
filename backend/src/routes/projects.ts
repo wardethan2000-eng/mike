@@ -738,6 +738,47 @@ projectsRouter.get("/:projectId/people", requireAuth, async (req, res) => {
   res.json({ owner, members });
 });
 
+// PATCH /projects/:projectId/case-context
+// The case overview and what Mike does about remembering — separate from the
+// rest of a project's details on purpose. Renaming a matter or changing who it
+// is shared with belongs to whoever owns it; the standing instructions for the
+// case are work product, and anyone working the matter needs to be able to fix
+// them without going and finding the owner.
+projectsRouter.patch("/:projectId/case-context", requireAuth, async (req, res) => {
+  const userId = res.locals.userId as string;
+  const userEmail = res.locals.userEmail as string | undefined;
+  const { projectId } = req.params;
+  const db = createServerSupabase();
+
+  const access = await checkProjectAccess(projectId, userId, userEmail, db);
+  if (!access.ok) return void res.status(404).json({ detail: "Project not found" });
+
+  const updates: Record<string, unknown> = {};
+  if ("overview" in req.body) {
+    updates.overview = normalizeOverview(req.body.overview);
+  }
+  if ("auto_remember" in req.body) {
+    updates.auto_remember = req.body.auto_remember === true;
+  }
+  if ("suggest_facts" in req.body) {
+    updates.suggest_facts = req.body.suggest_facts === true;
+  }
+  if (Object.keys(updates).length === 0) {
+    return void res.status(400).json({ detail: "Nothing to change." });
+  }
+
+  const { data, error } = await db
+    .from("projects")
+    .update({ ...updates, updated_at: new Date().toISOString() })
+    .eq("id", projectId)
+    .select("id, overview, auto_remember, suggest_facts")
+    .single();
+  if (error || !data) {
+    return void res.status(500).json({ detail: "Could not save that." });
+  }
+  res.json(data);
+});
+
 // PATCH /projects/:projectId
 projectsRouter.patch("/:projectId", requireAuth, async (req, res) => {
   const userId = res.locals.userId as string;
@@ -754,6 +795,9 @@ projectsRouter.patch("/:projectId", requireAuth, async (req, res) => {
   }
   if ("auto_remember" in req.body) {
     updates.auto_remember = req.body.auto_remember === true;
+  }
+  if ("suggest_facts" in req.body) {
+    updates.suggest_facts = req.body.suggest_facts === true;
   }
   if (Array.isArray(req.body.shared_with)) {
     // Normalise: lowercase + dedupe + drop empties.

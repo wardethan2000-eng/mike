@@ -124,6 +124,20 @@ export async function proposeMemoriesForTurn(args: {
   if (!userMessage && !assistantMessage) return;
 
   try {
+    // How this matter wants suggestions handled. Read first: a matter with
+    // suggestions turned off should cost nothing at all.
+    const { data: project } = await db
+      .from("projects")
+      .select("auto_remember, suggest_facts")
+      .eq("id", projectId)
+      .maybeSingle();
+    const settings = project as {
+      auto_remember?: boolean;
+      suggest_facts?: boolean;
+    } | null;
+    if (settings?.suggest_facts === false) return;
+    const autoRemember = settings?.auto_remember === true;
+
     // Everything the matter has already been told or has already turned down,
     // so the same suggestion does not come round again.
     const { data: existing } = await db
@@ -171,16 +185,8 @@ export async function proposeMemoriesForTurn(args: {
     });
     if (facts.length === 0) return;
 
-    // A matter can be set to keep what Mike finds without asking. Either way
-    // the fact is marked as Mike's own rather than passed off as someone's.
-    const { data: project } = await db
-      .from("projects")
-      .select("auto_remember")
-      .eq("id", projectId)
-      .maybeSingle();
-    const autoRemember =
-      (project as { auto_remember?: boolean } | null)?.auto_remember === true;
-
+    // A fact kept without asking is still marked as Mike's own rather than
+    // passed off as someone's.
     const room = autoRemember
       ? facts.length
       : Math.max(0, MAX_PENDING_PROPOSALS - pending);

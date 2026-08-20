@@ -21,7 +21,12 @@ import {
     TABULAR_TOOLS,
     type ChatMessage,
     type TabularCellStore,
+    generateSpotlightNonce,
 } from "../lib/chat";
+import {
+    loadProjectContext,
+    caseOverviewPromptSection,
+} from "../lib/projectOverview";
 import {
     completeText,
     providerForModel,
@@ -1464,6 +1469,8 @@ function buildTabularMessages(
     messages: ChatMessage[],
     tabularStore: TabularCellStore,
     reviewTitle: string,
+    /** The matter's standing instructions and remembered facts, if it has any. */
+    caseContext = "",
 ): unknown[] {
     const docList = tabularStore.documents
         .map((d, i) => `- ROW:${i} "${d.filename}"`)
@@ -1503,7 +1510,9 @@ Rules:
 - Do not fabricate cell content
 - Answer in clear, concise prose. You may use markdown formatting.`;
 
-    const formatted: unknown[] = [{ role: "system", content: systemContent }];
+    const formatted: unknown[] = [
+        { role: "system", content: systemContent + caseContext },
+    ];
     for (const msg of messages) {
         formatted.push({ role: msg.role, content: msg.content ?? "" });
     }
@@ -1628,10 +1637,25 @@ tabularRouter.post("/:reviewId/chat", requireAuth, async (req, res) => {
         });
     }
 
+    // A review that belongs to a matter is part of that matter's work, so the
+    // same standing instructions and remembered facts apply here as in the
+    // matter's own chats. A review that belongs to no matter gets nothing.
+    const nonce = generateSpotlightNonce();
+    const caseContext = await loadProjectContext(
+        db,
+        (review as { project_id?: string | null }).project_id ?? null,
+        lastUser.content ?? "",
+    );
     const apiMessages = buildTabularMessages(
         messages,
         tabularStore,
         review.title || "Untitled Review",
+        caseOverviewPromptSection(
+            caseContext.overview,
+            nonce,
+            caseContext.memories,
+            caseContext.omitted,
+        ),
     );
 
     res.setHeader("Content-Type", "text/event-stream");

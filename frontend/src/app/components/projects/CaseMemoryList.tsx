@@ -26,6 +26,40 @@ import {
 import type { Document } from "@/app/components/shared/types";
 
 /**
+ * What this matter wants Mike to do about remembering.
+ *
+ * Asking first is right almost always, so it is the default and comes first.
+ * The other two are there for a matter where it has become a chore, or one
+ * where the suggestions are simply noise — and each says what it costs.
+ */
+export type SuggestionMode = "ask" | "keep" | "off";
+
+const SUGGESTION_MODES: {
+    id: SuggestionMode;
+    label: string;
+    consequence: string;
+}[] = [
+    {
+        id: "ask",
+        label: "Ask me",
+        consequence:
+            "Mike offers what it finds. Nothing reaches the assistant until you keep it.",
+    },
+    {
+        id: "keep",
+        label: "Keep them",
+        consequence:
+            "Mike saves what it finds straight into the list, marked as its own. Nobody checks them before the assistant starts using them.",
+    },
+    {
+        id: "off",
+        label: "Don't suggest",
+        consequence:
+            "Mike does not look for facts. You can still write them down yourself.",
+    },
+];
+
+/**
  * The facts a matter has remembered: who the parties are, the dates that
  * matter, the position taken, what was decided, what is still open, and how
  * the firm wants things drafted.
@@ -271,11 +305,9 @@ function FactEditor({
 export function CaseMemoryList({
     projectId,
     documents,
-    canEdit,
-    autoRemember = false,
-    canChangeAutoRemember = false,
+    suggestionMode = "ask",
     onOpenDocument,
-    onAutoRememberChange,
+    onSuggestionModeChange,
     onPendingCountChange,
     /** Bumped when a chat answer finishes, so new suggestions are picked up. */
     refreshSignal = 0,
@@ -283,11 +315,14 @@ export function CaseMemoryList({
     projectId: string;
     /** The matter's files, so a fact can point at the one it came from. */
     documents: Document[];
-    canEdit: boolean;
-    autoRemember?: boolean;
-    canChangeAutoRemember?: boolean;
-    onOpenDocument?: (documentId: string, filename: string) => void;
-    onAutoRememberChange?: (autoRemember: boolean) => void;
+    /** How this matter handles what Mike finds. */
+    suggestionMode?: SuggestionMode;
+    onOpenDocument?: (
+        documentId: string,
+        filename: string,
+        page?: number | null,
+    ) => void;
+    onSuggestionModeChange?: (mode: SuggestionMode) => Promise<void> | void;
     /** So the page can mark the panel button when suggestions are waiting. */
     onPendingCountChange?: (pending: number) => void;
     refreshSignal?: number;
@@ -564,10 +599,11 @@ export function CaseMemoryList({
         }
     }
 
-    async function handleAutoRemember(next: boolean) {
+    async function handleSuggestionMode(next: SuggestionMode) {
+        if (next === suggestionMode) return;
         setSavingSwitch(true);
         try {
-            await onAutoRememberChange?.(next);
+            await onSuggestionModeChange?.(next);
         } finally {
             setSavingSwitch(false);
         }
@@ -581,7 +617,7 @@ export function CaseMemoryList({
                 <h3 className="text-xs font-medium text-gray-700">
                     Remembered facts{total > 0 ? ` (${total})` : ""}
                 </h3>
-                {canEdit && !adding && (
+                {!adding && (
                     <button
                         type="button"
                         onClick={() => setAdding(true)}
@@ -821,6 +857,7 @@ export function CaseMemoryList({
                                                             onOpenDocument?.(
                                                                 source.id,
                                                                 source.filename,
+                                                                memory.source_page,
                                                             )
                                                         }
                                                         className="min-w-0 truncate text-left text-[11px] text-blue-600 hover:underline"
@@ -847,7 +884,7 @@ export function CaseMemoryList({
                                                 )}
                                             </span>
 
-                                            {canEdit && (
+                                            {(
                                                 <div className="flex shrink-0 items-center gap-0.5 opacity-0 transition-opacity group-hover:opacity-100 focus-within:opacity-100">
                                                     <button
                                                         type="button"
@@ -946,29 +983,36 @@ export function CaseMemoryList({
                 )}
             </div>
 
-            {/* Almost everyone wants to see a suggestion before it counts, so
-                asking first is simply how this works. The alternative is here
-                for a matter where that has become a chore, kept small and out
-                of the way with its consequence written out. */}
-            {canChangeAutoRemember && (
-                <label className="flex shrink-0 cursor-pointer items-start gap-2 border-t border-gray-100 px-3 py-2 text-[11px] leading-relaxed text-gray-400 hover:text-gray-600">
-                    <input
-                        type="checkbox"
-                        checked={autoRemember}
-                        disabled={savingSwitch}
-                        onChange={(e) =>
-                            void handleAutoRemember(e.target.checked)
-                        }
-                        className="mt-0.5 h-3 w-3 shrink-0 accent-gray-600"
-                    />
-                    <span>
-                        Keep what Mike suggests without asking me. Facts are
-                        saved straight into the list, marked as Mike&apos;s own,
-                        and nobody checks them before the assistant starts using
-                        them.
-                    </span>
-                </label>
-            )}
+            {/* Kept small and out of the way: asking first is what almost
+                everyone wants, so it is simply the default. What each of the
+                others costs is spelled out rather than left to be discovered. */}
+            <div className="shrink-0 border-t border-gray-100 px-3 py-2">
+                <div className="flex flex-wrap items-center gap-1 text-[11px]">
+                    <span className="text-gray-400">Suggested facts:</span>
+                    {SUGGESTION_MODES.map((mode) => (
+                        <button
+                            key={mode.id}
+                            type="button"
+                            disabled={savingSwitch}
+                            onClick={() => void handleSuggestionMode(mode.id)}
+                            className={`rounded px-1.5 py-0.5 transition-colors disabled:opacity-50 ${
+                                suggestionMode === mode.id
+                                    ? "bg-gray-700 text-white"
+                                    : "text-gray-500 hover:bg-gray-100 hover:text-gray-800"
+                            }`}
+                        >
+                            {mode.label}
+                        </button>
+                    ))}
+                </div>
+                <p className="mt-1 text-[11px] leading-relaxed text-gray-400">
+                    {
+                        SUGGESTION_MODES.find(
+                            (mode) => mode.id === suggestionMode,
+                        )?.consequence
+                    }
+                </p>
+            </div>
         </div>
     );
 }

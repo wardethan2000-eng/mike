@@ -30,7 +30,7 @@ import {
     getChat,
     getProject,
     listProjectMemories,
-    updateProject,
+    updateCaseContext,
     uploadProjectDocument,
     createProjectFolder,
     renameProjectFolder,
@@ -59,6 +59,7 @@ import { PageHeader } from "@/app/components/shared/PageHeader";
 import { HeaderActionsMenu } from "@/app/components/shared/HeaderActionsMenu";
 import { PaneHeader } from "@/app/components/projects/PaneHeader";
 import { CaseOverviewPanel } from "@/app/components/projects/CaseOverviewPanel";
+import type { SuggestionMode } from "@/app/components/projects/CaseMemoryList";
 import {
     PANE_LABELS,
     useProjectChatLayout,
@@ -96,6 +97,8 @@ type DocTab = {
     documentId: string;
     filename: string;
     quotes?: CitationQuote[];
+    /** Open the file here when there are no quotes to find their own page. */
+    openAtPage?: number;
     versionId?: string | null;
     refetchKey?: number;
     warning?: string | null;
@@ -310,20 +313,26 @@ export default function ProjectAssistantChatPage({ params }: Props) {
         };
     }, [projectId, answersFinished]);
 
-    const handleAutoRememberChange = useCallback(
-        async (autoRemember: boolean) => {
-            setProject((prev) => (prev ? { ...prev, auto_remember: autoRemember } : prev));
+    const handleSuggestionModeChange = useCallback(
+        async (mode: SuggestionMode) => {
+            const settings = {
+                auto_remember: mode === "keep",
+                suggest_facts: mode !== "off",
+            };
+            const before = {
+                auto_remember: project?.auto_remember === true,
+                suggest_facts: project?.suggest_facts !== false,
+            };
+            setProject((prev) => (prev ? { ...prev, ...settings } : prev));
             try {
-                await updateProject(projectId, { auto_remember: autoRemember });
+                await updateCaseContext(projectId, settings);
             } catch {
-                // Put the switch back where it was rather than showing it in a
-                // state the matter is not actually in.
-                setProject((prev) =>
-                    prev ? { ...prev, auto_remember: !autoRemember } : prev,
-                );
+                // Put it back where it was rather than showing a setting the
+                // matter is not actually in.
+                setProject((prev) => (prev ? { ...prev, ...before } : prev));
             }
         },
-        [projectId],
+        [project?.auto_remember, project?.suggest_facts, projectId],
     );
 
     const {
@@ -568,23 +577,34 @@ export default function ProjectAssistantChatPage({ params }: Props) {
         filename: string,
         quotes?: CitationQuote[],
         versionId?: string | null,
+        openAtPage?: number,
     ) {
         setTabs((prev) => {
             const existing = prev.find((t) => t.documentId === docId);
             if (existing) {
-                if (
-                    versionId !== undefined &&
-                    existing.versionId !== versionId
-                ) {
+                const wantsNewVersion =
+                    versionId !== undefined && existing.versionId !== versionId;
+                // A second fact pointing at the same file, on another page:
+                // the tab is already open, so move it rather than do nothing.
+                const wantsNewPage =
+                    openAtPage !== undefined &&
+                    openAtPage !== existing.openAtPage;
+                if (wantsNewVersion || wantsNewPage) {
                     return prev.map((t) =>
-                        t.documentId === docId ? { ...t, versionId } : t,
+                        t.documentId === docId
+                            ? {
+                                  ...t,
+                                  ...(wantsNewVersion ? { versionId } : {}),
+                                  ...(wantsNewPage ? { openAtPage } : {}),
+                              }
+                            : t,
                     );
                 }
                 return prev;
             }
             return [
                 ...prev,
-                { documentId: docId, filename, quotes, versionId },
+                { documentId: docId, filename, quotes, versionId, openAtPage },
             ];
         });
         setActiveTabId(docId);
@@ -1083,19 +1103,30 @@ export default function ProjectAssistantChatPage({ params }: Props) {
                     <CaseOverviewPanel
                         projectId={projectId}
                         overview={project ? (project.overview ?? null) : undefined}
-                        canEdit={project?.is_owner !== false}
                         documents={project?.documents ?? []}
-                        autoRemember={project?.auto_remember === true}
+                        suggestionMode={
+                            project?.suggest_facts === false
+                                ? "off"
+                                : project?.auto_remember === true
+                                  ? "keep"
+                                  : "ask"
+                        }
                         refreshSignal={answersFinished}
                         onSaved={(overview) =>
                             setProject((prev) =>
                                 prev ? { ...prev, overview } : prev,
                             )
                         }
-                        onAutoRememberChange={handleAutoRememberChange}
+                        onSuggestionModeChange={handleSuggestionModeChange}
                         onPendingCountChange={setPendingSuggestions}
-                        onOpenDocument={(documentId, filename) =>
-                            openTab(documentId, filename)
+                        onOpenDocument={(documentId, filename, page) =>
+                            openTab(
+                                documentId,
+                                filename,
+                                undefined,
+                                undefined,
+                                page ?? undefined,
+                            )
                         }
                     />
                 </div>
@@ -1368,6 +1399,7 @@ export default function ProjectAssistantChatPage({ params }: Props) {
                                 key={activeTab.documentId}
                                 doc={{ document_id: activeTab.documentId }}
                                 quotes={activeQuotes ?? undefined}
+                                openAtPage={activeTab.openAtPage}
                                 rounded={false}
                             />
                         )

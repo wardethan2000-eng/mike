@@ -2,9 +2,9 @@
 
 import { useCallback, useEffect, useRef, useState } from "react";
 import { ChevronDown, ChevronRight } from "lucide-react";
-import { updateProject } from "@/app/lib/mikeApi";
+import { updateCaseContext } from "@/app/lib/mikeApi";
 import type { Document } from "@/app/components/shared/types";
-import { CaseMemoryList } from "./CaseMemoryList";
+import { CaseMemoryList, type SuggestionMode } from "./CaseMemoryList";
 
 /**
  * What the assistant is told about a matter before anyone asks it anything.
@@ -19,8 +19,10 @@ import { CaseMemoryList } from "./CaseMemoryList";
  * drafting as well as when answering, so the instructions are capped at about
  * two pages and each remembered fact at a line or two.
  *
- * Typing saves on its own a moment after you stop. Only the matter's owner can
- * change the instructions; anyone it is shared with can read them.
+ * Typing saves on its own a moment after you stop. Anyone working the matter
+ * can change any of this: it is the case's own work product, not one person's
+ * notes, and having to find the owner to correct a party's name would be worse
+ * than the risk of someone changing it.
  */
 
 /** Matches the cap the server enforces when the instructions are saved. */
@@ -42,11 +44,10 @@ type SaveState = "idle" | "saving" | "saved" | "error";
 export function CaseOverviewPanel({
     projectId,
     overview,
-    canEdit,
     documents = [],
-    autoRemember = false,
+    suggestionMode = "ask",
     onSaved,
-    onAutoRememberChange,
+    onSuggestionModeChange,
     onOpenDocument,
     onPendingCountChange,
     refreshSignal = 0,
@@ -54,15 +55,18 @@ export function CaseOverviewPanel({
     projectId: string;
     /** The saved instructions, or null. Undefined while the matter is loading. */
     overview: string | null | undefined;
-    canEdit: boolean;
     /** The matter's files, so a remembered fact can point at one. */
     documents?: Document[];
-    /** Whether Mike keeps the facts it suggests without asking first. */
-    autoRemember?: boolean;
+    /** How this matter handles what Mike finds. */
+    suggestionMode?: SuggestionMode;
     /** Keeps the rest of the page in step with what was just saved. */
     onSaved?: (overview: string | null) => void;
-    onAutoRememberChange?: (autoRemember: boolean) => Promise<void> | void;
-    onOpenDocument?: (documentId: string, filename: string) => void;
+    onSuggestionModeChange?: (mode: SuggestionMode) => Promise<void> | void;
+    onOpenDocument?: (
+        documentId: string,
+        filename: string,
+        page?: number | null,
+    ) => void;
     /** So the page can mark the panel button when suggestions are waiting. */
     onPendingCountChange?: (pending: number) => void;
     /** Bumped when a chat answer finishes, so new suggestions are picked up. */
@@ -98,7 +102,7 @@ export function CaseOverviewPanel({
             setSaveState("saving");
             setErrorMessage(null);
             try {
-                await updateProject(projectId, {
+                await updateCaseContext(projectId, {
                     overview: trimmed ? trimmed : null,
                 });
                 savedValueRef.current = trimmed;
@@ -119,7 +123,7 @@ export function CaseOverviewPanel({
     // Save a moment after the typing stops, and again on the way out so a
     // half-written line is not lost by closing the panel.
     useEffect(() => {
-        if (!editedHereRef.current || !canEdit) return;
+        if (!editedHereRef.current) return;
         if (saveTimerRef.current !== null) {
             window.clearTimeout(saveTimerRef.current);
         }
@@ -133,7 +137,7 @@ export function CaseOverviewPanel({
                 saveTimerRef.current = null;
             }
         };
-    }, [canEdit, draft, save]);
+    }, [draft, save]);
 
     const remaining = OVERVIEW_MAX_CHARS - draft.length;
     const nearLimit = remaining <= 300;
@@ -163,7 +167,6 @@ export function CaseOverviewPanel({
                         <div className="px-3">
                             <textarea
                                 value={draft}
-                                readOnly={!canEdit}
                                 maxLength={OVERVIEW_MAX_CHARS}
                                 rows={8}
                                 onChange={(e) => {
@@ -172,37 +175,33 @@ export function CaseOverviewPanel({
                                     setSaveState("idle");
                                 }}
                                 onBlur={() => {
-                                    if (!canEdit || !editedHereRef.current) return;
+                                    if (!editedHereRef.current) return;
                                     if (saveTimerRef.current !== null) {
                                         window.clearTimeout(saveTimerRef.current);
                                         saveTimerRef.current = null;
                                     }
                                     void save(draft);
                                 }}
-                                placeholder={canEdit ? PLACEHOLDER : ""}
+                                placeholder={PLACEHOLDER}
                                 spellCheck
-                                className={`w-full resize-y rounded border border-gray-200 p-3 text-sm leading-relaxed text-gray-800 outline-none placeholder:text-gray-400 focus:border-gray-400 ${
-                                    canEdit ? "bg-white" : "bg-gray-50"
-                                }`}
+                                className="w-full resize-y rounded border border-gray-200 bg-white p-3 text-sm leading-relaxed text-gray-800 outline-none placeholder:text-gray-400 focus:border-gray-400"
                             />
                         </div>
 
                         <div className="flex items-center justify-between gap-2 px-3 py-2 text-xs">
                             <span className="min-w-0 truncate text-gray-500">
-                                {!canEdit
-                                    ? "Only the matter's owner can change this."
-                                    : saveState === "saving"
-                                      ? "Saving…"
-                                      : saveState === "saved"
-                                        ? "Saved"
-                                        : saveState === "error"
-                                          ? (errorMessage ?? "Not saved")
-                                          : draft.trim()
-                                            ? "Saves as you type"
-                                            : "Nothing written yet"}
+                                {saveState === "saving"
+                                    ? "Saving…"
+                                    : saveState === "saved"
+                                      ? "Saved"
+                                      : saveState === "error"
+                                        ? (errorMessage ?? "Not saved")
+                                        : draft.trim()
+                                          ? "Saves as you type"
+                                          : "Nothing written yet"}
                             </span>
                             <div className="flex shrink-0 items-center gap-2">
-                                {saveState === "error" && canEdit && (
+                                {saveState === "error" && (
                                     <button
                                         type="button"
                                         onClick={() => void save(draft)}
@@ -211,17 +210,15 @@ export function CaseOverviewPanel({
                                         Try again
                                     </button>
                                 )}
-                                {canEdit && (
-                                    <span
-                                        className={`tabular-nums ${
-                                            nearLimit
-                                                ? "text-amber-600"
-                                                : "text-gray-400"
-                                        }`}
-                                    >
-                                        {draft.length}/{OVERVIEW_MAX_CHARS}
-                                    </span>
-                                )}
+                                <span
+                                    className={`tabular-nums ${
+                                        nearLimit
+                                            ? "text-amber-600"
+                                            : "text-gray-400"
+                                    }`}
+                                >
+                                    {draft.length}/{OVERVIEW_MAX_CHARS}
+                                </span>
                             </div>
                         </div>
                     </>
@@ -233,17 +230,12 @@ export function CaseOverviewPanel({
             </div>
 
             <div className="min-h-0 flex-1">
-                {/* Remembered facts are shared work product: anyone who can
-                    open the matter can add to them, even where only the owner
-                    may change the instructions above. */}
                 <CaseMemoryList
                     projectId={projectId}
                     documents={documents}
-                    canEdit
-                    autoRemember={autoRemember}
-                    canChangeAutoRemember={canEdit}
+                    suggestionMode={suggestionMode}
                     onOpenDocument={onOpenDocument}
-                    onAutoRememberChange={onAutoRememberChange}
+                    onSuggestionModeChange={onSuggestionModeChange}
                     onPendingCountChange={onPendingCountChange}
                     refreshSignal={refreshSignal}
                 />

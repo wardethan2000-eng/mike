@@ -20,6 +20,12 @@ interface Props {
     /** Back-compat single-quote API. Ignored if `quotes` is provided. */
     quote?: string;
     fallbackPage?: number;
+    /**
+     * Open the file at this page. For pointing at a page without having any
+     * words to mark on it — a remembered fact that names its source page, say.
+     * Ignored when there are quotes, which find their own page.
+     */
+    openAtPage?: number;
     rounded?: boolean;
 }
 
@@ -66,6 +72,7 @@ export function PdfView({
     quoteFocusKey,
     quote,
     fallbackPage,
+    openAtPage,
     rounded = true,
 }: Props) {
     const containerRef = useRef<HTMLDivElement>(null);
@@ -398,8 +405,14 @@ export function PdfView({
             lib.TextLayer.cleanup();
 
             setNumPages(doc.numPages);
-            setCurrentPage(1);
-            currentPageRef.current = 1;
+            // Where this drawing is headed, recorded before any of the work
+            // rather than after it. Opening the panel resizes it, which starts
+            // another drawing that reads this to keep the reader's place — and
+            // if it were still saying page one at that moment, the jump would
+            // be thrown away.
+            const startPage = scrollToPage && scrollToPage > 1 ? scrollToPage : 1;
+            setCurrentPage(startPage);
+            currentPageRef.current = startPage;
 
             const hasCitation = list.length > 0;
             if (hasCitation && scrollContainerRef.current) {
@@ -642,7 +655,7 @@ export function PdfView({
             }).promise;
             if (cancelled) return;
             pdfDocRef.current = pdfDoc;
-            await renderPDF(pdfDoc, list);
+            await renderPDF(pdfDoc, list, openAtPage);
         })();
         return () => {
             cancelled = true;
@@ -657,10 +670,30 @@ export function PdfView({
             // Opening the panel takes the width from nothing to its real size;
             // redrawing for that would only repeat work already in hand.
             if (Math.abs(containerWidth - renderedWidthRef.current) < 2) return;
-            renderPDF(pdfDocRef.current, quoteListRef.current);
+            // Keep the reader's place across a resize instead of sending them
+            // back to page one.
+            renderPDF(
+                pdfDocRef.current,
+                quoteListRef.current,
+                currentPageRef.current,
+            );
         }, 150);
         return () => clearTimeout(timer);
     }, [containerWidth, renderPDF]);
+
+    // Asked to go to a page while the file is already open — clicking a second
+    // remembered fact that points at the same document. The first visit is
+    // handled when the file is drawn; this catches the ones after it.
+    const didInitialRenderRef = useRef(false);
+    useEffect(() => {
+        if (!didInitialRenderRef.current) {
+            didInitialRenderRef.current = true;
+            return;
+        }
+        if (!openAtPage || quoteListRef.current.length) return;
+        if (!pdfDocRef.current) return;
+        void renderPDF(pdfDocRef.current, [], openAtPage);
+    }, [openAtPage, renderPDF]);
 
     // Re-highlight when quotes change without full re-render
     useEffect(() => {

@@ -42,6 +42,8 @@ export interface Project {
     overview?: string | null;
     /** Whether Mike saves the facts it finds without asking first. */
     auto_remember?: boolean;
+    /** Whether Mike looks for facts worth remembering at all. */
+    suggest_facts?: boolean;
     shared_with: string[];
     created_at: string;
     updated_at: string;
