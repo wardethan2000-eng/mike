@@ -245,6 +245,42 @@ documentsRouter.post("/download-zip", requireAuth, async (req, res) => {
   res.send(content);
 });
 
+// GET /single-documents/:documentId/text
+// The current version, relayed through the backend as plain text. Used for
+// editing text notes in the browser: the storage host that signed URLs point
+// at is not always reachable from a browser, so the backend fetches the bytes.
+documentsRouter.get("/:documentId/text", requireAuth, async (req, res) => {
+  const userId = res.locals.userId as string;
+  const userEmail = res.locals.userEmail as string | undefined;
+  const { documentId } = req.params;
+  const db = createServerSupabase();
+
+  const { data: doc } = await db
+    .from("documents")
+    .select("id, user_id, project_id")
+    .eq("id", documentId)
+    .single();
+  if (!doc)
+    return void res.status(404).json({ detail: "Document not found" });
+  const access = await ensureDocAccess(doc, userId, userEmail, db);
+  if (!access.ok)
+    return void res.status(404).json({ detail: "Document not found" });
+
+  const active = await loadActiveVersion(documentId, db);
+  if (!active || !active.storage_path)
+    return void res.status(404).json({ detail: "No file available" });
+  const fileType = (active.file_type ?? "").toLowerCase();
+  if (fileType !== "txt" && fileType !== "md")
+    return void res
+      .status(400)
+      .json({ detail: "Only plain-text files can be read this way." });
+
+  const raw = await downloadFile(active.storage_path);
+  if (!raw) return void res.status(404).json({ detail: "File not found" });
+  res.setHeader("Content-Type", "text/plain; charset=utf-8");
+  res.send(Buffer.from(raw));
+});
+
 // GET /single-documents/:documentId/url
 // Optional ?version_id= selects a specific tracked-changes version.
 // Otherwise falls back to documents.current_version_id, else the original upload.
@@ -1363,6 +1399,21 @@ documentsRouter.post(
         .status(500)
         .json({ detail: "Failed to update document current version." });
     }
+
+    // Matter search reads only the current version passages, so the new
+    // version must be indexed or the document silently drops out of search.
+    indexInBackground(db, {
+      version: {
+        id: versionRow.id as string,
+        document_id: documentId,
+        storage_path: key,
+        pdf_storage_path: pdfStoragePath,
+        file_type: suffix,
+      },
+      userId,
+      projectId: (doc.project_id as string | null) ?? null,
+      label: "index-version-upload",
+    });
 
     res.status(201).json(versionRow);
   },
