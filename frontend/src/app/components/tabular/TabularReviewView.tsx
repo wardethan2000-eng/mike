@@ -14,6 +14,7 @@ import {
     Upload,
     X,
     Pencil,
+    Save,
     Trash2,
     WandSparkles,
 } from "lucide-react";
@@ -26,6 +27,7 @@ import {
     getTabularReviewPeople,
     listProjects,
     regenerateTabularCell,
+    saveTabularReviewToMatter,
     streamTabularGeneration,
     updateTabularReview,
     uploadReviewDocument,
@@ -96,6 +98,11 @@ export function TRView({ reviewId, projectId }: Props) {
         "idle" | "deleting" | "deleted"
     >("idle");
     const [ownerOnlyAction, setOwnerOnlyAction] = useState<string | null>(null);
+    const [savingToMatter, setSavingToMatter] = useState(false);
+    const [saveNotice, setSaveNotice] = useState<{
+        tone: "good" | "bad";
+        text: string;
+    } | null>(null);
     const { user } = useAuth();
     const [expandedCell, setExpandedCell] = useState<TabularCell | null>(null);
     const [expandedCellCitation, setExpandedCellCitation] = useState<
@@ -571,6 +578,33 @@ export function TRView({ reviewId, projectId }: Props) {
         await clearResultsForRows([...selectedRowIds]);
     }
 
+    // A grid attached to a matter can be filed there as a spreadsheet, so the
+    // figures and the documents behind them stay with the case.
+    const matterId = review?.project_id ?? projectId ?? null;
+
+    const handleSaveToMatter = async () => {
+        if (savingToMatter) return;
+        setSavingToMatter(true);
+        setSaveNotice(null);
+        try {
+            const saved = await saveTabularReviewToMatter(reviewId);
+            setSaveNotice({
+                tone: "good",
+                text: `Saved to this matter as ${saved?.filename ?? "a spreadsheet"}.`,
+            });
+        } catch (err) {
+            setSaveNotice({
+                tone: "bad",
+                text:
+                    err instanceof Error && err.message
+                        ? err.message
+                        : "Could not save this grid to the matter.",
+            });
+        } finally {
+            setSavingToMatter(false);
+        }
+    };
+
     async function handleClearAllResults() {
         await clearResultsForRows(rows.map((row) => row.id));
     }
@@ -799,6 +833,18 @@ export function TRView({ reviewId, projectId }: Props) {
                                                     rows.length === 0,
                                             },
                                             {
+                                                label: savingToMatter
+                                                    ? "Saving…"
+                                                    : "Save to the matter",
+                                                icon: Save,
+                                                onSelect: handleSaveToMatter,
+                                                disabled:
+                                                    savingToMatter ||
+                                                    !matterId ||
+                                                    columns.length === 0 ||
+                                                    rows.length === 0,
+                                            },
+                                            {
                                                 label: "Clear results",
                                                 icon: X,
                                                 onSelect: handleClearAllResults,
@@ -882,6 +928,26 @@ export function TRView({ reviewId, projectId }: Props) {
                         },
                     ]}
                 />
+
+                {saveNotice ? (
+                    <div
+                        className={`mx-4 mt-2 flex items-start gap-2 rounded-md border px-3 py-2 text-sm ${
+                            saveNotice.tone === "good"
+                                ? "border-emerald-200 bg-emerald-50 text-emerald-900"
+                                : "border-amber-200 bg-amber-50 text-amber-900"
+                        }`}
+                    >
+                        <span className="flex-1">{saveNotice.text}</span>
+                        <button
+                            type="button"
+                            aria-label="Dismiss"
+                            className="shrink-0 opacity-60 hover:opacity-100"
+                            onClick={() => setSaveNotice(null)}
+                        >
+                            <X className="h-4 w-4" />
+                        </button>
+                    </div>
+                ) : null}
 
                 {/* Toolbar + table column, chat panel beside it */}
                 <div className="flex flex-1 overflow-hidden">

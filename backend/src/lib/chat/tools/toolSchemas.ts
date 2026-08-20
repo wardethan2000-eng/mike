@@ -164,6 +164,24 @@ export const TOOLS = [
   {
     type: "function",
     function: {
+      name: "read_tabular_review",
+      description:
+        "Read a grid (tabular review) belonging to this matter: its columns, its rows and every filled-in cell, together with the citations behind each answer. Call it with no arguments to list the grids on this matter, then again with a review_id to read one. Use this instead of re-reading every source document when the figures you need have already been pulled into a grid, and carry its citations through into your answer.",
+      parameters: {
+        type: "object",
+        properties: {
+          review_id: {
+            type: "string",
+            description:
+              "The grid to read. Omit to list the grids available on this matter.",
+          },
+        },
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
       name: "replicate_document",
       description:
         "Copy an available document, Library Template, or workflow asset without changing the source. In a project chat, copies are saved to Project Documents; otherwise they are saved to Library Files. Always use this before editing or drafting from a Library Template or workflow asset. For an ordinary document, use it when the user asks for a copy/duplicate, when they ask for a new document based on that file, and whenever you are asked to draft a new document of the same kind as one that is already available - copying and then editing the copy is the only way to keep the original document's fonts, margins, spacing and layout. A PDF source is copied as a fresh, fully editable .docx built from its text: the wording carries over, the PDF's visual layout is approximated — the result says so, and the copy should be restyled with write_document where the look matters. Returns new doc_id slugs for read_document and edit_document.",

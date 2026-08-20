@@ -2341,6 +2341,17 @@ export async function uploadReviewDocument(
     return uploaded;
 }
 
+/**
+ * Writes the grid into the matter it belongs to, as a spreadsheet filed with
+ * the rest of the case documents.
+ */
+export async function saveTabularReviewToMatter(reviewId: string) {
+    return apiRequest<{
+        filename?: string;
+        document_id?: string;
+    }>(`/tabular-review/${reviewId}/save-to-matter`, { method: "POST" });
+}
+
 export async function deleteTabularReview(reviewId: string): Promise<void> {
     await apiRequest(`/tabular-review/${reviewId}`, { method: "DELETE" });
 }

@@ -54,6 +54,11 @@ import { parsePaginationQuery } from "../lib/pagination";
 import { normalizeSearchTerm } from "../lib/search";
 import { parseTabularReviewSort } from "../lib/sort";
 import { shouldReadFromRendition } from "../lib/documentRendition";
+import {
+    loadReviewSnapshot,
+    snapshotToSheets,
+} from "../lib/tabularSnapshot";
+import { generateExcel } from "../lib/chat/tools/documentOps";
 
 function formatPromptSuffix(format?: string, tags?: string[]): string {
     switch (format) {
@@ -1032,6 +1037,68 @@ tabularRouter.post("/:reviewId/clear-cells", requireAuth, async (req, res) => {
     if (error) return void res.status(500).json({ detail: error.message });
     res.status(204).send();
 });
+
+
+// POST /tabular-review/:reviewId/save-to-matter
+// Puts the grid into the matter as a spreadsheet, so the figures and the list
+// of documents behind them live with the case file instead of in a download
+// folder. Citations do not survive into a spreadsheet, so a second sheet
+// records which documents each row was read from.
+tabularRouter.post(
+    "/:reviewId/save-to-matter",
+    requireAuth,
+    async (req, res) => {
+        const userId = res.locals.userId as string;
+        const userEmail = res.locals.userEmail as string | undefined;
+        const { reviewId } = req.params;
+        const db = createServerSupabase();
+
+        const { data: review, error: reviewError } = await db
+            .from("tabular_reviews")
+            .select("id, title, user_id, project_id, shared_with")
+            .eq("id", reviewId)
+            .single();
+        if (reviewError || !review)
+            return void res.status(404).json({ detail: "Review not found" });
+        const access = await ensureReviewAccess(review, userId, userEmail, db);
+        if (!access.ok)
+            return void res.status(404).json({ detail: "Review not found" });
+        if (!review.project_id)
+            return void res.status(400).json({
+                detail:
+                    "This grid is not attached to a matter yet. Attach it to one, then save.",
+            });
+
+        const snapshot = await loadReviewSnapshot(db, reviewId);
+        if (!snapshot)
+            return void res.status(404).json({ detail: "Review not found" });
+        if (snapshot.columns.length === 0 || snapshot.rows.length === 0)
+            return void res
+                .status(400)
+                .json({ detail: "This grid has nothing in it yet." });
+
+        const result = (await generateExcel(
+            snapshot.title,
+            snapshotToSheets(snapshot),
+            userId,
+            db,
+            { projectId: review.project_id },
+        )) as { error?: string; filename?: string; document_id?: string };
+        if (result?.error)
+            return void res.status(500).json({ detail: result.error });
+
+        void recordAudit(db, {
+            userId,
+            userEmail,
+            action: "tabular.saved_to_matter",
+            title: snapshot.title,
+            surface: "tabular",
+            projectId: review.project_id,
+            reviewId,
+        });
+        res.json(result);
+    },
+);
 
 // POST /tabular-review/:reviewId/regenerate-cell
 tabularRouter.post(

@@ -793,6 +793,32 @@ export async function buildWorkflowStore(
       }
     }
   }
+  // Anything the firm has published to everyone. The Workflows page and the
+  // assistant have to agree about what exists, so both go through the same
+  // rule in the database rather than each keeping its own list.
+  try {
+    const { data: visible } = await db.rpc("visible_workflows", {
+      p_user_id: userId,
+      p_user_email: normalizedUserEmail || null,
+      p_type: "assistant",
+    });
+    for (const wf of (visible ?? []) as {
+      id: string;
+      title: string | null;
+      prompt_md: string | null;
+    }[]) {
+      if (!wf.prompt_md || store.has(wf.id)) continue;
+      store.set(wf.id, {
+        title: wf.title ?? "Untitled workflow",
+        skill_md: wf.prompt_md,
+        listed: true,
+      });
+    }
+  } catch (err) {
+    // A chat must never fail over workflow discovery.
+    console.error("[buildWorkflowStore] firm workflows unavailable:", err);
+  }
+
   const databaseWorkflowIds = [...store.entries()]
     .filter(([, workflow]) => workflow.listed !== false)
     .map(([id]) => id);

@@ -15,6 +15,7 @@ vi.mock("@/app/lib/mikeApi", () => ({
 
 const EVENT: AuditEvent = {
   id: "event-1",
+  user_id: "user-1",
   created_at: "2026-08-10T08:30:00.000Z",
   user_display_name: "Alex Lawyer",
   user_email: "lawyer@example.com",

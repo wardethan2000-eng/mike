@@ -38,6 +38,10 @@ import {
   contentTypeForDocumentType,
   shouldConvertToPdf,
 } from "../../documentTypes";
+import {
+  loadReviewSnapshot,
+  snapshotToText,
+} from "../../tabularSnapshot";
 import { buildDownloadUrl } from "../../downloadTokens";
 import { safeErrorMessage } from "../../safeError";
 import { contentSha256, loadActiveVersion } from "../../documentVersions";
@@ -2183,6 +2187,58 @@ export async function runToolCalls(
         } catch (e) {
           fail(`replicate_document failed: ${safeErrorMessage(e)}`);
         }
+      }
+    } else if (tc.function.name === "read_tabular_review") {
+      // A grid the user has already built is the cheapest, best-cited source
+      // of figures there is. Only grids on the matter being discussed are
+      // readable, plus the caller's own; access to the matter itself was
+      // settled before this chat began.
+      const reviewId =
+        typeof args.review_id === "string" ? args.review_id.trim() : "";
+      if (!reviewId) {
+        const { data: reviews } = projectId
+          ? await db
+              .from("tabular_reviews")
+              .select("id, title, columns_config")
+              .eq("project_id", projectId)
+              .order("created_at", { ascending: false })
+          : await db
+              .from("tabular_reviews")
+              .select("id, title, columns_config")
+              .eq("user_id", userId)
+              .order("created_at", { ascending: false })
+              .limit(25);
+        toolResults.push({
+          role: "tool",
+          tool_call_id: tc.id,
+          content: JSON.stringify({
+            reviews: (reviews ?? []).map((review) => ({
+              review_id: review.id,
+              title: review.title,
+              columns: Array.isArray(review.columns_config)
+                ? (review.columns_config as { name?: unknown }[]).map((column) =>
+                    String(column?.name ?? ""),
+                  )
+                : [],
+            })),
+          }),
+        });
+      } else {
+        const snapshot = await loadReviewSnapshot(db, reviewId);
+        const readable =
+          snapshot &&
+          (snapshot.userId === userId ||
+            (!!projectId && snapshot.projectId === projectId));
+        toolResults.push({
+          role: "tool",
+          tool_call_id: tc.id,
+          content: readable
+            ? snapshotToText(snapshot)
+            : JSON.stringify({
+                error:
+                  "No grid with that id on this matter. Call read_tabular_review with no arguments to see which grids exist.",
+              }),
+        });
       }
     } else if (tc.function.name === "generate_docx") {
       const title = args.title as string;
