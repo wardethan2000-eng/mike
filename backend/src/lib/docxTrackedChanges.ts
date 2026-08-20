@@ -2089,6 +2089,22 @@ export function inlineEditRuns(line: string): EditRun[] {
     return runs;
 }
 
+/**
+ * A paragraph's text reduced to what matters for "did it change?": curly and
+ * straight quotes, dash variants and whitespace runs all compare equal. A
+ * model echoing a document back retypes its typography — ’ as ', “ as ", a
+ * tab run as spaces — and those must not read as edits to review.
+ */
+export function canonicalParagraphText(s: string): string {
+    return s
+        .replace(/[\u2018\u2019\u2032]/g, "'")
+        .replace(/[\u201C\u201D\u2033]/g, '"')
+        .replace(/[\u2013\u2014]/g, "-")
+        .replace(/[\u00A0\u200B]/g, " ")
+        .replace(/\s+/g, " ")
+        .trim();
+}
+
 /** The plain characters of a marker-carrying string, as inlineEditRuns reads it. */
 export function stripInlineMarkers(line: string): string {
     return inlineEditRuns(line)
@@ -2888,8 +2904,15 @@ export async function applyFormattedEdits(
         // through and rebuild; if the rebuild is byte-identical it's harmless.
     }
 
-    // Align current paragraphs to the edited ones.
-    const pairs = lcsPairs(current, nextText);
+    // Align current paragraphs to the edited ones. Matching is canonical —
+    // quotes, dashes and whitespace runs compare loosely — because a model
+    // echoing the document back retypes its typography, and a paragraph that
+    // differs only that way is the SAME paragraph and must keep its original
+    // bytes (curly quotes included) rather than be rebuilt.
+    const pairs = lcsPairs(
+        current.map(canonicalParagraphText),
+        nextText.map(canonicalParagraphText),
+    );
     const matchedOld = new Set(pairs.map((p) => p[0]));
     const matchedNew = new Map(pairs.map((p) => [p[1], p[0]]));
 

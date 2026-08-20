@@ -374,3 +374,33 @@ describe("docxBytesFromParagraphs", () => {
         );
     });
 });
+
+describe("typography tolerance", () => {
+    it("does not read retyped quotes or whitespace as changes", () => {
+        const baseline = [
+            "This Agreement (this “Agreement”) is by Central’s owner.",
+            "Signed:\t\t\tDate:",
+        ];
+        const next = [
+            writeBlockToParagraph(
+                'This Agreement (this "Agreement") is by Central\'s owner.',
+            ),
+            writeBlockToParagraph("Signed: Date:"),
+        ];
+        expect(redlineEditsForRewrite(baseline, next)).toEqual([]);
+    });
+
+    it("still catches a real wording change amid retyped quotes", () => {
+        const baseline = [
+            "Payment is due within thirty (30) days of the invoice “date”.",
+        ];
+        const next = [
+            writeBlockToParagraph(
+                'Payment is due within fifteen (15) days of the invoice "date".',
+            ),
+        ];
+        const edits = redlineEditsForRewrite(baseline, next);
+        expect(edits).toHaveLength(1);
+        expect(edits[0].replace).toContain("fifteen (15)");
+    });
+});

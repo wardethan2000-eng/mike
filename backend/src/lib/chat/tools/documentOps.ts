@@ -9,6 +9,7 @@ import {
   applyFormattedEdits,
   applyHeaderFooterEdits,
   applyTrackedEdits,
+  canonicalParagraphText,
   extractDocxHeadersFooters,
   extractDocxBodyParagraphs,
   extractDocxBodyText,
@@ -1991,9 +1992,14 @@ export type WriteBlock =
 
 /** Longest common run of identical paragraphs, as (old index, new index) pairs. */
 function alignParagraphs(
-  oldTexts: string[],
-  newTexts: string[],
+  oldRaw: string[],
+  newRaw: string[],
 ): [number, number][] {
+  // Canonical comparison: quote style, dash style and whitespace runs do not
+  // make two paragraphs different. A model echoing a document back retypes
+  // its typography, and that must not read as a change.
+  const oldTexts = oldRaw.map(canonicalParagraphText);
+  const newTexts = newRaw.map(canonicalParagraphText);
   const rows = oldTexts.length;
   const cols = newTexts.length;
   const table: number[][] = Array.from({ length: rows + 1 }, () =>
@@ -2076,7 +2082,11 @@ export function redlineEditsForRewrite(
       !matchedOld.has(oi) &&
       !matchedNew.has(nj)
     ) {
-      if (baseline[oi] && newTexts[nj] !== baseline[oi]) {
+      if (
+        baseline[oi] &&
+        canonicalParagraphText(newTexts[nj]) !==
+          canonicalParagraphText(baseline[oi])
+      ) {
         edits.push({
           find: baseline[oi],
           replace: newMarked[nj],
@@ -2237,7 +2247,7 @@ export async function runWriteDocument(params: {
       borders?: boolean;
       widths?: number[];
     }[] = [];
-    const baselineLines = new Set(baseline);
+    const baselineLines = new Set(baseline.map(canonicalParagraphText));
     const protectedLines = new Set<string>();
     for (const paragraph of next) {
       if (!paragraph.table) {
@@ -2246,9 +2256,11 @@ export async function runWriteDocument(params: {
       }
       const cells = paragraph.table.rows.flat().filter((cell) => cell.trim());
       const existing =
-        cells.length > 0 && cells.every((cell) => baselineLines.has(cell));
+        cells.length > 0 &&
+        cells.every((cell) => baselineLines.has(canonicalParagraphText(cell)));
       if (existing) {
-        for (const cell of cells) protectedLines.add(cell);
+        for (const cell of cells)
+          protectedLines.add(canonicalParagraphText(cell));
         continue;
       }
       newTables.push({
@@ -2261,7 +2273,11 @@ export async function runWriteDocument(params: {
       });
     }
     const edits = redlineEditsForRewrite(baseline, textNext).filter(
-      (edit) => !(edit.replace === "" && protectedLines.has(edit.find)),
+      (edit) =>
+        !(
+          edit.replace === "" &&
+          protectedLines.has(canonicalParagraphText(edit.find))
+        ),
     );
     if (edits.length === 0 && newTables.length === 0) {
       return { ok: false, error: "The document already reads that way." };
