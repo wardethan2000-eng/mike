@@ -1763,11 +1763,187 @@ export function inlineEditRuns(line: string): EditRun[] {
  * same position, so the original's fonts, margins, numbering, indentation,
  * tables and signature layout carry straight over.
  */
+export type WriteBlock =
+  | string
+  | {
+      text?: string;
+      /** 1-3 for a heading, "none" for ordinary text, absent to leave as is. */
+      style?: "heading1" | "heading2" | "heading3" | "none";
+      /** "number"/"bullet" for a list item, "none" for plain, absent to leave as is. */
+      list?: "number" | "bullet" | "none";
+      align?: "left" | "center" | "right" | "justify";
+      /** true starts this block on a fresh page. */
+      page_break?: boolean;
+      /** Rows of a table to put here instead of a paragraph. */
+      table?: { rows: string[][]; borders?: boolean; widths?: number[] };
+    };
+
+/** Longest common run of identical paragraphs, as (old index, new index) pairs. */
+function alignParagraphs(
+  oldTexts: string[],
+  newTexts: string[],
+): [number, number][] {
+  const rows = oldTexts.length;
+  const cols = newTexts.length;
+  const table: number[][] = Array.from({ length: rows + 1 }, () =>
+    new Array<number>(cols + 1).fill(0),
+  );
+  for (let i = rows - 1; i >= 0; i--) {
+    for (let j = cols - 1; j >= 0; j--) {
+      table[i][j] =
+        oldTexts[i] === newTexts[j]
+          ? table[i + 1][j + 1] + 1
+          : Math.max(table[i + 1][j], table[i][j + 1]);
+    }
+  }
+  const pairs: [number, number][] = [];
+  let i = 0;
+  let j = 0;
+  while (i < rows && j < cols) {
+    if (oldTexts[i] === newTexts[j]) {
+      pairs.push([i, j]);
+      i++;
+      j++;
+    } else if (table[i + 1][j] >= table[i][j + 1]) {
+      i++;
+    } else {
+      j++;
+    }
+  }
+  return pairs;
+}
+
+const CONTEXT_CHARS = 40;
+
+/**
+ * Turn "here is the document as it should now read" into the list of tracked
+ * changes that gets it there: a paragraph whose wording changed becomes one
+ * substitution, a paragraph that is gone becomes a deletion, a paragraph that
+ * is new becomes an insertion anchored between its neighbours.
+ */
+export function redlineEditsForRewrite(
+  baseline: string[],
+  next: EditParagraph[],
+): EditInput[] {
+  const newTexts = next.map((paragraph) => paragraph.text);
+  const pairs = alignParagraphs(baseline, newTexts);
+  const matchedOld = new Set(pairs.map(([o]) => o));
+  const matchedNew = new Map(pairs.map(([o, n]) => [n, o]));
+  const pairSet = new Set(pairs.map(([o, n]) => `${o}:${n}`));
+
+  const before = (index: number) =>
+    (baseline[index - 1] ?? "").slice(-CONTEXT_CHARS);
+  const after = (index: number) => (baseline[index] ?? "").slice(0, CONTEXT_CHARS);
+
+  const edits: EditInput[] = [];
+  let oi = 0;
+  let nj = 0;
+  while (oi < baseline.length || nj < newTexts.length) {
+    const isPair =
+      oi < baseline.length &&
+      nj < newTexts.length &&
+      matchedOld.has(oi) &&
+      matchedNew.get(nj) === oi &&
+      pairSet.has(`${oi}:${nj}`);
+    if (isPair) {
+      oi++;
+      nj++;
+      continue;
+    }
+    // Rewritten paragraph: one substitution of the whole paragraph.
+    if (
+      oi < baseline.length &&
+      nj < newTexts.length &&
+      !matchedOld.has(oi) &&
+      !matchedNew.has(nj)
+    ) {
+      if (baseline[oi] && newTexts[nj] !== baseline[oi]) {
+        edits.push({
+          find: baseline[oi],
+          replace: newTexts[nj],
+          context_before: before(oi),
+          context_after: after(oi + 1),
+        });
+      }
+      oi++;
+      nj++;
+      continue;
+    }
+    // Paragraph dropped from the document.
+    if (oi < baseline.length && !matchedOld.has(oi)) {
+      if (baseline[oi]) {
+        edits.push({
+          find: baseline[oi],
+          replace: "",
+          context_before: before(oi),
+          context_after: after(oi + 1),
+        });
+      }
+      oi++;
+      continue;
+    }
+    // Paragraph added to the document.
+    if (nj < newTexts.length && !matchedNew.has(nj)) {
+      if (newTexts[nj]) {
+        edits.push({
+          find: "",
+          replace: `\n\n${newTexts[nj]}`,
+          context_before: before(oi),
+          context_after: after(oi),
+        });
+      }
+      nj++;
+      continue;
+    }
+    if (oi < baseline.length) oi++;
+    else nj++;
+  }
+  return edits;
+}
+
+/** Turn one entry from the tool call into what the document writer wants. */
+export function writeBlockToParagraph(block: WriteBlock): EditParagraph {
+  if (typeof block === "string") {
+    const runs = inlineEditRuns(block);
+    return { text: runs.map((run) => run.text).join(""), runs };
+  }
+  const line = block.text ?? "";
+  const runs = inlineEditRuns(line);
+  const paragraph: EditParagraph = {
+    text: runs.map((run) => run.text).join(""),
+    runs,
+  };
+  if (block.style !== undefined) {
+    paragraph.heading =
+      block.style === "heading1"
+        ? 1
+        : block.style === "heading2"
+          ? 2
+          : block.style === "heading3"
+            ? 3
+            : null;
+  }
+  if (block.list !== undefined) {
+    paragraph.list = block.list === "none" ? null : block.list;
+  }
+  if (block.align !== undefined) paragraph.align = block.align;
+  if (block.page_break !== undefined) paragraph.pageBreak = block.page_break;
+  if (block.table && block.table.rows?.length) paragraph.table = block.table;
+  return paragraph;
+}
+
 export async function runWriteDocument(params: {
   documentId: string;
   userId: string;
-  paragraphs: string[];
+  paragraphs: WriteBlock[];
   db: ReturnType<typeof createServerSupabase>;
+  /**
+   * When true the rewrite arrives as tracked changes the user accepts or
+   * rejects, rather than being written straight in. That is what revising a
+   * document the user already has calls for; a fresh copy being drafted does
+   * not need it.
+   */
+  trackChanges?: boolean;
   reuseVersion?: {
     versionId: string;
     versionNumber: number;
@@ -1781,6 +1957,12 @@ export async function runWriteDocument(params: {
       storage_path: string;
       download_url: string;
       paragraph_count: number;
+      /** True when the rewrite arrived as tracked changes to review. */
+      tracked?: boolean;
+      /** How many tracked changes the rewrite produced. */
+      changes?: number;
+      /** The Accept/Reject cards, when the rewrite is tracked. */
+      annotations?: EditAnnotation[];
     }
   | { ok: false; error: string }
 > {
@@ -1805,10 +1987,41 @@ export async function runWriteDocument(params: {
   if (!current) return { ok: false, error: "Could not load document bytes." };
 
   const baseline = await extractDocxBodyParagraphs(current.bytes);
-  const next: EditParagraph[] = paragraphs.map((line) => {
-    const runs = inlineEditRuns(line);
-    return { text: runs.map((run) => run.text).join(""), runs };
-  });
+  const next: EditParagraph[] = paragraphs.map(writeBlockToParagraph);
+
+  if (params.trackChanges) {
+    if (next.some((paragraph) => paragraph.table)) {
+      return {
+        ok: false,
+        error:
+          "A table cannot be added as a tracked change. Write the document straight in, or add the table in a separate step.",
+      };
+    }
+    const edits = redlineEditsForRewrite(baseline, next);
+    if (edits.length === 0) {
+      return { ok: false, error: "The document already reads that way." };
+    }
+    const result = await runEditDocument({
+      documentId,
+      userId,
+      edits,
+      db,
+      trackChanges: true,
+      reuseVersion,
+    });
+    if (!result.ok) return result;
+    return {
+      ok: true,
+      version_id: result.version_id,
+      version_number: result.version_number,
+      storage_path: result.storage_path,
+      download_url: result.download_url,
+      paragraph_count: next.length,
+      tracked: true,
+      changes: result.applied_count,
+      annotations: result.annotations,
+    };
+  }
 
   let written: Buffer;
   try {

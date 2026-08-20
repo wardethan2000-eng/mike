@@ -48,6 +48,7 @@ import {
   findTextMatches,
   runEditDocument,
   runWriteDocument,
+  type WriteBlock,
   safeGeneratedFilename,
   type DocEditedResult,
   type TurnEditState,
@@ -1373,12 +1374,17 @@ export async function runToolCalls(
             filename: docInfo.filename,
           })}\n\n`,
         );
-        const paragraphs = paragraphsRaw.map((line) => String(line ?? ""));
+        const paragraphs = paragraphsRaw.map((block) =>
+          block && typeof block === "object"
+            ? (block as WriteBlock)
+            : String(block ?? ""),
+        );
         const result = await runWriteDocument({
           documentId: indexed.document_id,
           userId,
           paragraphs,
           db,
+          trackChanges: args.track_changes === true,
           reuseVersion: turnEditState?.get(indexed.document_id),
         });
 
@@ -1409,7 +1415,7 @@ export async function runToolCalls(
             version_id: result.version_id,
             version_number: result.version_number,
             download_url: result.download_url,
-            annotations: [],
+            annotations: result.annotations ?? [],
           };
           docsEdited.push(payload);
           write(
@@ -1425,8 +1431,12 @@ export async function runToolCalls(
               version_id: result.version_id,
               version_number: result.version_number,
               paragraphs_written: result.paragraph_count,
+              tracked_changes: !!result.tracked,
+              ...(result.tracked ? { changes: result.changes } : {}),
               next_required_action: [
-                `The document now says what you just wrote; it is finished, not a set of suggestions.`,
+                result.tracked
+                  ? `The rewrite is waiting as tracked changes for the user to accept or reject.`
+                  : `The document now says what you just wrote; it is finished, not a set of suggestions.`,
                 `It remains available as doc_id "${docId}".`,
                 `Do not include download links or URLs in your prose response; the document card is shown automatically by the UI.`,
               ].join(" "),

@@ -549,7 +549,7 @@ export const TOOLS = [
     function: {
       name: "write_document",
       description:
-        "Write a .docx document's whole body in one call, keeping the file's own look. This is how you fill in a copy made with replicate_document: send the finished document as a list of paragraphs and it replaces what is there, so a contract adapted for a new client takes ONE call instead of dozens of find-and-replace edits that stop matching as soon as the wording changes. Each paragraph is matched against the paragraph in the same position, so fonts, margins, line spacing, numbering, indentation, tables and the signature layout carry over from the document being copied. Read the source document first and send back every paragraph the new document needs, in order, with the old party names, dates and trade-specific wording replaced. Paragraphs you send unchanged stay byte-identical. Use edit_document instead for a small correction to a document that is otherwise already right.",
+        "Write a .docx document's whole body in one call, keeping the file's own look. This is how you fill in a copy made with replicate_document, and how you make sweeping changes to a document that already exists (set track_changes for that): send the finished document as a list of paragraphs and it replaces what is there, so a contract adapted for a new client takes ONE call instead of dozens of find-and-replace edits that stop matching as soon as the wording changes. You may add provisions the original did not have and drop ones it does not need — a paragraph you add between numbered clauses is numbered with them. Each paragraph is matched against the paragraph in the same position, so fonts, margins, line spacing, numbering, indentation, tables and the signature layout carry over from the document being copied. Read the source document first and send back every paragraph the new document needs, in order, with the old party names, dates and trade-specific wording replaced. Paragraphs you send unchanged stay byte-identical. Use edit_document instead for a small correction to a document that is otherwise already right.",
       parameters: {
         type: "object",
         properties: {
@@ -560,8 +560,77 @@ export const TOOLS = [
           paragraphs: {
             type: "array",
             description:
-              "The complete new document, one entry per paragraph, in order — including headings, clause text, exhibit text and signature lines. Anything left out is deleted from the document. Inside a line, write **text** for bold, _text_ for underline and *text* for italic, and a tab character to move to the next tab stop.",
-            items: { type: "string" },
+              "The complete new document, one entry per paragraph, in order — including headings, clause text, exhibit text and signature lines. Anything left out is deleted from the document. A plain string is a paragraph that keeps the look of the one it replaces, which is what you want for a rewritten clause. Use the object form only where that is not right: for a paragraph you are ADDING whose neighbours look different, or to add a table. Inside a line, write **text** for bold, _text_ for underline and *text* for italic, and a tab character to move to the next tab stop.",
+            items: {
+              anyOf: [
+                { type: "string" },
+                {
+                  type: "object",
+                  properties: {
+                    text: {
+                      type: "string",
+                      description: "The paragraph's words.",
+                    },
+                    style: {
+                      type: "string",
+                      enum: ["heading1", "heading2", "heading3", "none"],
+                      description:
+                        "Make this a heading, or 'none' for ordinary text. Leave it out to keep the style of the paragraph being replaced.",
+                    },
+                    list: {
+                      type: "string",
+                      enum: ["number", "bullet", "none"],
+                      description:
+                        "Make this a numbered clause or a bullet, or 'none' for an ordinary paragraph — use 'none' for something like a signature line that must not pick up clause numbering. Leave it out to keep what the paragraph being replaced had.",
+                    },
+                    align: {
+                      type: "string",
+                      enum: ["left", "center", "right", "justify"],
+                      description:
+                        "Leave it out to keep the alignment of the paragraph being replaced.",
+                    },
+                    page_break: {
+                      type: "boolean",
+                      description:
+                        "true starts this paragraph on a fresh page — for a new exhibit or a signature page.",
+                    },
+                    table: {
+                      type: "object",
+                      description:
+                        "Put a table here instead of a paragraph. Use this to add a table the original document did not have, such as a new exhibit's price grid. Tables already in the document are kept automatically; write their cell text as ordinary paragraphs in the order it appears.",
+                      properties: {
+                        rows: {
+                          type: "array",
+                          description:
+                            "Rows of cell text, first row first. Every row should have the same number of cells.",
+                          items: {
+                            type: "array",
+                            items: { type: "string" },
+                          },
+                        },
+                        borders: {
+                          type: "boolean",
+                          description:
+                            "false for a borderless table (a caption block or a signature grid). Defaults to true.",
+                        },
+                        widths: {
+                          type: "array",
+                          description:
+                            "Relative column widths, one per column. Defaults to equal columns.",
+                          items: { type: "number" },
+                        },
+                      },
+                      required: ["rows"],
+                    },
+                  },
+                },
+              ],
+            },
+          },
+          track_changes: {
+            type: "boolean",
+            description:
+              "true rewrites the document as tracked changes for the user to accept or reject one by one — use it when they asked you to revise a document they already have and want to see what changed. Leave it out when filling in a fresh copy: a new document has nothing to review.",
           },
         },
         required: ["doc_id", "paragraphs"],

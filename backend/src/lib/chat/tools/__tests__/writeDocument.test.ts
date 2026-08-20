@@ -16,7 +16,12 @@ vi.mock("../../../downloadTokens", () => ({
     buildDownloadUrl: (path: string) => `/download/${path}`,
 }));
 
-import { runWriteDocument, inlineEditRuns } from "../documentOps";
+import {
+    runWriteDocument,
+    inlineEditRuns,
+    redlineEditsForRewrite,
+    writeBlockToParagraph,
+} from "../documentOps";
 import { extractDocxBodyParagraphs } from "../../../docxTrackedChanges";
 
 const W_NS =
@@ -233,5 +238,86 @@ describe("runWriteDocument", () => {
             db,
         });
         expect(result.ok).toBe(false);
+    });
+});
+
+describe("writeBlockToParagraph", () => {
+    it("keeps a plain line's look by saying nothing about it", () => {
+        const p = writeBlockToParagraph("Scope of Work.");
+        expect(p.heading).toBeUndefined();
+        expect(p.list).toBeUndefined();
+        expect(p.align).toBeUndefined();
+    });
+
+    it("carries the structure asked for", () => {
+        const p = writeBlockToParagraph({
+            text: "Signed: ______",
+            list: "none",
+            style: "none",
+            align: "right",
+            page_break: true,
+        });
+        expect(p).toMatchObject({
+            list: null,
+            heading: null,
+            align: "right",
+            pageBreak: true,
+        });
+    });
+
+    it("passes a table through", () => {
+        const p = writeBlockToParagraph({
+            table: { rows: [["Item", "Price"], ["Foam", "$1"]] },
+        });
+        expect(p.table?.rows).toHaveLength(2);
+    });
+});
+
+describe("redlineEditsForRewrite", () => {
+    const baseline = ["Scope of Work.", "Payment.", "Warranty."];
+
+    it("turns a reworded paragraph into one substitution", () => {
+        const edits = redlineEditsForRewrite(baseline, [
+            { text: "Scope of Work.", runs: [] },
+            { text: "Payment is due in 15 days.", runs: [] },
+            { text: "Warranty.", runs: [] },
+        ]);
+        expect(edits).toHaveLength(1);
+        expect(edits[0]).toMatchObject({
+            find: "Payment.",
+            replace: "Payment is due in 15 days.",
+        });
+        expect(edits[0].context_before).toContain("Scope of Work.");
+    });
+
+    it("turns a dropped paragraph into a deletion", () => {
+        const edits = redlineEditsForRewrite(baseline, [
+            { text: "Scope of Work.", runs: [] },
+            { text: "Warranty.", runs: [] },
+        ]);
+        expect(edits).toEqual([
+            expect.objectContaining({ find: "Payment.", replace: "" }),
+        ]);
+    });
+
+    it("turns an added provision into an insertion", () => {
+        const edits = redlineEditsForRewrite(baseline, [
+            { text: "Scope of Work.", runs: [] },
+            { text: "Payment.", runs: [] },
+            { text: "Insurance.", runs: [] },
+            { text: "Warranty.", runs: [] },
+        ]);
+        expect(edits).toHaveLength(1);
+        expect(edits[0].find).toBe("");
+        expect(edits[0].replace).toContain("Insurance.");
+    });
+
+    it("says nothing when the document already reads that way", () => {
+        expect(
+            redlineEditsForRewrite(
+                baseline,
+                baseline.map((text) => ({ text, runs: [] })),
+            ),
+        ).toEqual([]);
     });
 });

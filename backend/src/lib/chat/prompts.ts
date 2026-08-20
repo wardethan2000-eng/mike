@@ -15,6 +15,13 @@ WORKFLOWS:
 - When read_workflow exposes reference files and the workflow refers to them, open the relevant files with read_document before continuing and use their contents when following the workflow.
 - Workflow reference files used as templates are immutable. Never edit the original workflow asset. Before editing or filling one in, always call replicate_document with a descriptive new_filename. If the copy is a .docx, call edit_document on the returned copy rather than generating a replacement. For non-.docx copies (such as pdf or xlsx), keep the replica for provenance and produce the filled-in result as a new generated document based on the copy's content. Reference files that are only read for information need no copy.
 
+WHICH DRAFTING TOOL:
+- Small change to a document the user has ("fix the notice period", "add a sentence about deposits"): edit_document. The changes arrive as tracked changes to accept or reject.
+- Sweeping change to a document the user has ("rewrite this for a subcontractor", "tighten the whole warranty section"): write_document with track_changes true. Send the document as it should now read; the user still sees every change and can accept or reject it.
+- A new document based on one that exists (a precedent, an earlier matter's contract, a template): replicate_document, then write_document with no track_changes. The copy is a new document, so it is simply written.
+- A new document with nothing to work from: generate_docx.
+- Writing the whole document is not limited to swapping names. Add provisions the new document needs, drop ones it does not, reorder, and change how long a clause is — send what the finished document should say, all of it. A paragraph you add between numbered clauses is numbered with them; where an added paragraph should NOT look like its neighbours (a signature line among numbered clauses, a heading, a page break before a new exhibit, a table the original did not have), send that entry in the object form and say so.
+
 DRAFTING INTO A .DOCX:
 - edit_document is not limited to swapping words. In the replace text, a blank line starts a new paragraph, so a single edit can expand a placeholder into as many paragraphs as the document needs, and an edit with an empty find string inserts new paragraphs at the anchor. Setting find to a paragraph's full text with an empty replace removes that paragraph outright.
 - Prefer this over generating a replacement file whenever the source is a .docx, so the original letterhead, styles, numbering and signature blocks are kept exactly as they are. Write the number of paragraphs the document actually needs rather than padding text to fit the placeholders that are there.

@@ -1681,7 +1681,16 @@ export interface EditRun {
 
 export interface EditParagraph {
     text: string;
+    /**
+     * Leave the field out to keep the paragraph's own alignment; null or
+     * "left" returns it to the margin.
+     */
     align?: "left" | "center" | "right" | "justify" | null;
+    /**
+     * true starts this paragraph on a fresh page, false takes an existing
+     * page break off it. Leave it out to keep whatever the paragraph has.
+     */
+    pageBreak?: boolean | null;
     /**
      * 1-3 to make this paragraph a Word heading, 0 or null for body text.
      * Leave the field out entirely to keep whatever style the paragraph
@@ -1691,6 +1700,11 @@ export interface EditParagraph {
      * them up.
      */
     heading?: number | null;
+    /**
+     * Rows of a table to place here instead of a paragraph. Used when a
+     * rewrite adds a table the original document did not have.
+     */
+    table?: { rows: string[][]; borders?: boolean; widths?: number[] } | null;
     /**
      * "bullet" or "number" to make this paragraph a list item, null for an
      * ordinary paragraph. Leave the field out entirely to keep whatever
@@ -1766,6 +1780,7 @@ function applyParagraphProps(
     align: EditParagraph["align"],
     heading: number | null | undefined,
     list?: { numId: number } | null,
+    pageBreak?: boolean | null,
 ): XNode | null {
     // `undefined` means "leave this as the paragraph already has it" — what a
     // whole-document rewrite wants, since it only supplies words and the
@@ -1774,13 +1789,16 @@ function applyParagraphProps(
     // turns a heading or a list item back into ordinary text.
     const keepStyle = heading === undefined;
     const keepList = list === undefined;
+    const keepAlign = align === undefined;
+    const keepPageBreak = pageBreak === undefined;
     const wantHeading =
         typeof heading === "number" && heading >= 1 && heading <= 3
             ? heading
             : null;
     const base = basePPr ? cloneNode(basePPr) : null;
     const noAlign = !align || align === "left";
-    if (noAlign && !wantHeading && !list && !base) return null;
+    if (noAlign && keepAlign && !wantHeading && !list && !pageBreak && !base)
+        return null;
 
     const pPr = base ?? makeEl("w:pPr", []);
     let kids = elChildren(pPr);
@@ -1810,9 +1828,15 @@ function applyParagraphProps(
         kids = [...kids.slice(0, at), numPr, ...kids.slice(at)];
     }
 
+    // Start this paragraph on a fresh page.
+    if (!keepPageBreak) {
+        kids = kids.filter((c) => elName(c) !== "w:pageBreakBefore");
+        if (pageBreak) kids = [makeEl("w:pageBreakBefore", []), ...kids];
+    }
+
     // Alignment.
-    kids = kids.filter((c) => elName(c) !== "w:jc");
-    if (!noAlign) {
+    if (!keepAlign) kids = kids.filter((c) => elName(c) !== "w:jc");
+    if (!keepAlign && !noAlign) {
         // Schema order inside w:pPr: pStyle, numPr, ... , jc.
         const numIdx = kids.findIndex((c) => elName(c) === "w:numPr");
         const styleIdx = kids.findIndex((c) => elName(c) === "w:pStyle");
@@ -2084,10 +2108,19 @@ function buildFormattedParagraph(
     basePPr: XNode | null,
     listNumId?: number | null,
 ): XNode {
+    if (para.table && para.table.rows.length > 0) {
+        return buildSimpleTable(para.table.rows, {
+            baseRPr,
+            borders: para.table.borders,
+            widths: para.table.widths,
+        });
+    }
     const children: XNode[] = [];
     const pPr = applyParagraphProps(
         basePPr,
-        para.align ?? null,
+        // Absent means "keep the paragraph's own alignment"; see
+        // applyParagraphProps.
+        para.align,
         // Absent means "keep what this paragraph already had"; see
         // applyParagraphProps.
         para.heading,
@@ -2096,6 +2129,7 @@ function buildFormattedParagraph(
             : para.list === undefined
               ? undefined
               : null,
+        para.pageBreak,
     );
     if (pPr) children.push(pPr);
     const runs = para.runs && para.runs.length ? para.runs : [{ text: para.text }];
@@ -2106,6 +2140,71 @@ function buildFormattedParagraph(
     }
     // A paragraph with no runs still needs to exist (empty line).
     return makeEl("w:p", children);
+}
+
+/**
+ * Build a simple bordered table: one row per entry, one cell per string. Used
+ * when a rewrite adds a table the document being copied did not have — a new
+ * exhibit grid, a price schedule. Cells inherit the run formatting passed in,
+ * so the table reads in the document's own font.
+ */
+export function buildSimpleTable(
+    rows: string[][],
+    opts?: { baseRPr?: XNode | null; borders?: boolean; widths?: number[] },
+): XNode {
+    const columns = Math.max(1, ...rows.map((row) => row.length));
+    // Word measures table widths in fiftieths of a percent; spread the columns
+    // evenly unless told otherwise.
+    const widths =
+        opts?.widths && opts.widths.length === columns
+            ? opts.widths
+            : Array.from({ length: columns }, () => 1 / columns);
+    const total = widths.reduce((sum, w) => sum + w, 0) || 1;
+    const pctOf = (w: number) => String(Math.round((w / total) * 5000));
+
+    const borderSides = ["top", "left", "bottom", "right", "insideH", "insideV"];
+    const borderEls = borderSides.map((side) =>
+        makeEl(`w:${side}`, [], {
+            "w:val": opts?.borders === false ? "none" : "single",
+            "w:sz": "4",
+            "w:space": "0",
+            "w:color": "auto",
+        }),
+    );
+
+    const tblPr = makeEl("w:tblPr", [
+        makeEl("w:tblW", [], { "w:w": "5000", "w:type": "pct" }),
+        makeEl("w:tblBorders", borderEls),
+    ]);
+    const tblGrid = makeEl(
+        "w:tblGrid",
+        widths.map((w) => makeEl("w:gridCol", [], { "w:w": pctOf(w) })),
+    );
+
+    const trs = rows.map((row) =>
+        makeEl(
+            "w:tr",
+            Array.from({ length: columns }, (_, i) => {
+                const text = row[i] ?? "";
+                const tcPr = makeEl("w:tcPr", [
+                    makeEl("w:tcW", [], {
+                        "w:w": pctOf(widths[i]),
+                        "w:type": "pct",
+                    }),
+                ]);
+                const paragraph = makeEl("w:p", [
+                    buildRun(
+                        opts?.baseRPr ? cloneNode(opts.baseRPr) : null,
+                        text,
+                        "w:t",
+                    ),
+                ]);
+                return makeEl("w:tc", [tcPr, paragraph]);
+            }),
+        ),
+    );
+
+    return makeEl("w:tbl", [tblPr, tblGrid, ...trs]);
 }
 
 /** The first run's rPr in a paragraph, if any (used as the formatting base). */
@@ -2275,6 +2374,8 @@ export async function applyFormattedEdits(
     const nearestBasePPr = (): XNode | null => {
         for (let k = oi - 1; k >= 0; k--)
             if (paras[k].basePPr && !paras[k].hasSectPr) return paras[k].basePPr;
+        for (let k = oi; k < paras.length; k++)
+            if (paras[k].basePPr && !paras[k].hasSectPr) return paras[k].basePPr;
         return null;
     };
 
@@ -2305,7 +2406,8 @@ export async function applyFormattedEdits(
             const listChanged =
                 ep.list !== undefined && wantList !== paras[oi].isListItem;
             const hasFormatting =
-                (ep.align && ep.align !== "left") ||
+                (ep.align !== undefined && ep.align !== "left") ||
+                ep.pageBreak !== undefined ||
                 headingChanged ||
                 listChanged ||
                 (ep.runs || []).some(
@@ -2323,6 +2425,29 @@ export async function applyFormattedEdits(
             } else {
                 newBodyParas.push(paras[oi].node);
             }
+            oi++;
+            nj++;
+            continue;
+        }
+        // An unmatched original sitting opposite an unmatched replacement is a
+        // paragraph that was rewritten. Its look comes from the paragraph it
+        // replaces — the same clause number, indent, alignment and font — which
+        // is what adapting a precedent needs.
+        if (
+            oi < paras.length &&
+            nj < next.length &&
+            !matchedOld.has(oi) &&
+            !matchedNew.has(nj) &&
+            !paras[oi].hasSectPr
+        ) {
+            newBodyParas.push(
+                buildFormattedParagraph(
+                    next[nj],
+                    paras[oi].baseRPr,
+                    paras[oi].basePPr,
+                    listNumIdFor(next[nj]),
+                ),
+            );
             oi++;
             nj++;
             continue;
