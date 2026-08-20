@@ -560,7 +560,7 @@ export const TOOLS = [
           paragraphs: {
             type: "array",
             description:
-              "The complete new document, one entry per paragraph, in order — including headings, clause text, exhibit text and signature lines. Anything left out is deleted from the document. A plain string is a paragraph that keeps the look of the one it replaces, which is what you want for a rewritten clause. Use the object form only where that is not right: for a paragraph you are ADDING whose neighbours look different, or to add a table. Inside a line, write **text** for bold, _text_ for underline and *text* for italic, and a tab character to move to the next tab stop. A line may also OPEN with [page break], [heading 1-3], [centered], or [right] — the same layout tokens the document text you read shows — and [fn N] anywhere in a line keeps that footnote's reference mark at that spot. Keep the markers and tokens at the corresponding places when you rewrite a paragraph, or its emphasis, layout and footnotes are lost; do not add ones the source does not have unless you mean to change the look.",
+              "The complete new document, one entry per paragraph, in order — including headings, clause text, exhibit text and signature lines. Anything left out is deleted from the document. A plain string is a paragraph that keeps the look of the one it replaces, which is what you want for a rewritten clause. Use the object form only where that is not right: for a paragraph you are ADDING whose neighbours look different, or to add a table. Inside a line, write **text** for bold, _text_ for underline and *text* for italic, and a tab character to move to the next tab stop. A line may also OPEN with [page break], [heading 1-3], [centered], or [right] — the same layout tokens the document text you read shows — and [fn N] anywhere in a line keeps that footnote's reference mark at that spot, while [fn new: note text] creates a brand-new numbered footnote there. Keep the markers and tokens at the corresponding places when you rewrite a paragraph, or its emphasis, layout and footnotes are lost; do not add ones the source does not have unless you mean to change the look.",
             items: {
               anyOf: [
                 { type: "string" },
@@ -669,7 +669,7 @@ export const TOOLS = [
                 replace: {
                   type: "string",
                   description:
-                    "Replacement text. Empty string = pure deletion. A blank line (\\n\\n) starts a new paragraph; a single newline is a line break within the same paragraph.",
+                    "Replacement text. Empty string = pure deletion. A blank line (\\n\\n) starts a new paragraph; a single newline is a line break within the same paragraph. **bold**/_underline_/*italic* become formatting, [fn N] keeps an existing footnote's mark, and [fn new: note text] creates a brand-new numbered footnote at that spot.",
                 },
                 context_before: {
                   type: "string",

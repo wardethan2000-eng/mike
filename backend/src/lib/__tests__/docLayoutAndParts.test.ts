@@ -370,3 +370,101 @@ describe("footnotes", () => {
         expect(notes[0].text).toBe("See Kan. Stat. Ann. 60-206(a).");
     });
 });
+
+describe("creating new footnotes", () => {
+    it("parses and round-trips the [fn new:] token", async () => {
+        const { inlineEditRuns, runsToMarkedText } = await import(
+            "../docxTrackedChanges"
+        );
+        const runs = inlineEditRuns(
+            "The deadline extended.[fn new: Fed. R. Civ. P. 6(a)(1)(C).] It was timely.",
+        );
+        expect(runs).toEqual([
+            { text: "The deadline extended." },
+            { text: "", footnoteNew: "Fed. R. Civ. P. 6(a)(1)(C)." },
+            { text: " It was timely." },
+        ]);
+        expect(runsToMarkedText(runs)).toBe(
+            "The deadline extended.[fn new: Fed. R. Civ. P. 6(a)(1)(C).] It was timely.",
+        );
+    });
+
+    it("creates a numbered footnote through a tracked edit", async () => {
+        const bytes = await makeFootnotedDocx();
+        const applied = await applyTrackedEdits(bytes, [
+            {
+                find: "Nothing else here.",
+                replace:
+                    "Nothing else here, except as noted.[fn new: See the docketing order of July 1, 2026.]",
+                context_before: "",
+                context_after: "",
+            },
+        ]);
+        expect(applied.errors).toEqual([]);
+        const { extractDocxFootnotes } = await import("../docxTrackedChanges");
+        const notes = await extractDocxFootnotes(applied.bytes);
+        // Two existing notes plus the new one, with a fresh id.
+        expect(notes).toHaveLength(3);
+        expect(notes[2].text).toBe("See the docketing order of July 1, 2026.");
+        expect(notes[2].id).toBe("3");
+        const xml = await (await JSZip.loadAsync(applied.bytes))
+            .file("word/document.xml")!
+            .async("string");
+        expect(xml).toContain('w:footnoteReference w:id="3"');
+        expect(xml).not.toContain("[fn new:");
+        // The new mark is part of the tracked insertion.
+        expect(xml).toMatch(
+            /<w:ins [^>]*>(?:(?!<\/w:ins>).)*w:id="3"(?:(?!<\/w:ins>).)*<\/w:ins>/s,
+        );
+    });
+
+    it("creates the footnotes part when the document has none", async () => {
+        const zip = new JSZip();
+        zip.file(
+            "[Content_Types].xml",
+            `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/></Types>`,
+        );
+        zip.file(
+            "word/_rels/document.xml.rels",
+            `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/styles" Target="styles.xml"/></Relationships>`,
+        );
+        zip.file(
+            "word/document.xml",
+            `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>` +
+                `<w:document ${W_NS}><w:body>${para(run("A plain memo sentence."))}</w:body></w:document>`,
+        );
+        const bytes = Buffer.from(
+            await zip.generateAsync({ type: "nodebuffer" }),
+        );
+
+        const {
+            applyFormattedEdits,
+            extractDocxBodyParagraphs,
+            extractDocxFootnotes,
+            inlineEditRuns: parse,
+        } = await import("../docxTrackedChanges");
+        const baseline = await extractDocxBodyParagraphs(bytes);
+        const line =
+            "A plain memo sentence.[fn new: Authority for the plain sentence.]";
+        const out = await applyFormattedEdits(bytes, baseline, [
+            { text: "A plain memo sentence.", runs: parse(line) },
+        ]);
+        const notes = await extractDocxFootnotes(out.bytes);
+        expect(notes).toEqual([
+            { id: "1", text: "Authority for the plain sentence." },
+        ]);
+        const outZip = await JSZip.loadAsync(out.bytes);
+        const ct = await outZip.file("[Content_Types].xml")!.async("string");
+        expect(ct).toContain("/word/footnotes.xml");
+        const rels = await outZip
+            .file("word/_rels/document.xml.rels")!
+            .async("string");
+        expect(rels).toContain("relationships/footnotes");
+        const doc = await outZip.file("word/document.xml")!.async("string");
+        expect(doc).toContain('w:footnoteReference w:id="1"');
+        // The sentence itself is unchanged.
+        await expect(extractDocxBodyText(out.bytes)).resolves.toBe(
+            "A plain memo sentence.",
+        );
+    });
+});

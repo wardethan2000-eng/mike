@@ -1323,6 +1323,138 @@ export async function extractDocxHeadersFooters(bytes: Buffer): Promise<{
     return { headers, footers };
 }
 
+const FOOTNOTES_CONTENT_TYPE =
+    "application/vnd.openxmlformats-officedocument.wordprocessingml.footnotes+xml";
+const FOOTNOTES_REL_TYPE =
+    "http://schemas.openxmlformats.org/officeDocument/2006/relationships/footnotes";
+
+/**
+ * Record brand-new footnotes in word/footnotes.xml and return their ids, in
+ * order. When the document has no footnotes part at all, it is created and
+ * wired up: the part itself (with Word's separator plumbing), its content
+ * type, and the relationship from document.xml.
+ */
+export async function addFootnotesToZip(
+    zip: JSZip,
+    texts: string[],
+): Promise<string[]> {
+    if (texts.length === 0) return [];
+    const parser = createParser();
+    const builder = createBuilder();
+    const xmlHeader = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>\n`;
+
+    // Load or create the footnotes part.
+    const existing = getZipEntry(zip, "word/footnotes.xml");
+    let tree: XNode[];
+    if (existing) {
+        tree = parser.parse(await existing.async("string")) as XNode[];
+    } else {
+        const skeleton =
+            `<w:footnotes xmlns:w="${W_NS_ATTRS["xmlns:w"]}">` +
+            `<w:footnote w:type="separator" w:id="-1"><w:p><w:pPr><w:spacing w:after="0" w:line="240" w:lineRule="auto"/></w:pPr><w:r><w:separator/></w:r></w:p></w:footnote>` +
+            `<w:footnote w:type="continuationSeparator" w:id="0"><w:p><w:pPr><w:spacing w:after="0" w:line="240" w:lineRule="auto"/></w:pPr><w:r><w:continuationSeparator/></w:r></w:p></w:footnote>` +
+            `</w:footnotes>`;
+        tree = parser.parse(skeleton) as XNode[];
+
+        // Content type for the new part.
+        const ctFile = getZipEntry(zip, "[Content_Types].xml");
+        if (ctFile) {
+            const ctRaw = await ctFile.async("string");
+            if (!ctRaw.includes("/word/footnotes.xml")) {
+                zip.file(
+                    "[Content_Types].xml",
+                    ctRaw.replace(
+                        "</Types>",
+                        `<Override PartName="/word/footnotes.xml" ContentType="${FOOTNOTES_CONTENT_TYPE}"/></Types>`,
+                    ),
+                );
+            }
+        }
+
+        // Relationship from document.xml to the new part.
+        const relPath = "word/_rels/document.xml.rels";
+        const relFile = getZipEntry(zip, relPath);
+        if (relFile) {
+            const relRaw = await relFile.async("string");
+            if (!relRaw.includes(FOOTNOTES_REL_TYPE)) {
+                const usedIds = [...relRaw.matchAll(/Id="rId(\d+)"/g)].map(
+                    (m) => Number(m[1]),
+                );
+                const nextRel = (usedIds.length ? Math.max(...usedIds) : 0) + 1;
+                zip.file(
+                    relPath,
+                    relRaw.replace(
+                        "</Relationships>",
+                        `<Relationship Id="rId${nextRel}" Type="${FOOTNOTES_REL_TYPE}" Target="footnotes.xml"/></Relationships>`,
+                    ),
+                );
+            }
+        } else {
+            zip.file(
+                relPath,
+                xmlHeader +
+                    `<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">` +
+                    `<Relationship Id="rId9001" Type="${FOOTNOTES_REL_TYPE}" Target="footnotes.xml"/></Relationships>`,
+            );
+        }
+    }
+
+    // Find the footnotes root and the highest id in use.
+    let root: XNode | null = null;
+    const findRoot = (nodes: XNode[]) => {
+        for (const n of nodes) {
+            if (elName(n) === "w:footnotes") {
+                root = n;
+                return;
+            }
+            findRoot(elChildren(n));
+        }
+    };
+    findRoot(tree);
+    if (!root) throw new Error("w:footnotes root missing from footnotes.xml");
+    let maxId = 0;
+    for (const child of elChildren(root)) {
+        if (elName(child) !== "w:footnote") continue;
+        const id = parseInt(String(elAttrs(child)["@_w:id"] ?? ""), 10);
+        if (Number.isFinite(id) && id > maxId) maxId = id;
+    }
+
+    // Append one entry per note, in Word's usual shape: the automatic number
+    // mark, a space, then the note's text.
+    const ids: string[] = [];
+    const rootChildren = elChildren(root as XNode);
+    for (const text of texts) {
+        const id = String(++maxId);
+        ids.push(id);
+        rootChildren.push(
+            makeEl(
+                "w:footnote",
+                [
+                    makeEl("w:p", [
+                        makeEl("w:pPr", [
+                            makeEl("w:pStyle", [], { "w:val": "FootnoteText" }),
+                        ]),
+                        makeEl("w:r", [
+                            makeEl("w:rPr", [
+                                makeEl("w:rStyle", [], {
+                                    "w:val": "FootnoteReference",
+                                }),
+                            ]),
+                            makeEl("w:footnoteRef", []),
+                        ]),
+                        buildRun(null, ` ${text}`, "w:t"),
+                    ]),
+                ],
+                { "w:id": id },
+            ),
+        );
+    }
+    setChildren(root as XNode, rootChildren);
+
+    zip.file("word/footnotes.xml", xmlHeader + (builder.build(tree) as string));
+    return ids;
+}
+
 /** Overwrite a w:t's text, preserving its element identity and attributes. */
 function setWtText(wtEl: XNode, text: string): void {
     setChildren(wtEl, [makeText(text)]);
@@ -1699,6 +1831,35 @@ export async function applyTrackedEdits(
             contextAfter: plan.contextAfter,
             reason: plan.reason,
         });
+    }
+
+    // Materialize brand-new footnotes named in the surviving plans: allocate
+    // ids, record the notes in word/footnotes.xml, and rewrite the inserted
+    // text to plain [fn id] references before emission. Doing this after
+    // planning means an edit whose anchor failed never leaves an orphaned
+    // note behind.
+    {
+        const NEW_FN_RE = /\[fn new:([^\]]+)\]/g;
+        const carriers: PlannedChange[] = [];
+        const noteTexts: string[] = [];
+        for (const list of plansPerParagraph.values()) {
+            for (const pc of list) {
+                const found = [...pc.insertedText.matchAll(NEW_FN_RE)];
+                if (found.length === 0) continue;
+                carriers.push(pc);
+                noteTexts.push(...found.map((m) => m[1].trim()));
+            }
+        }
+        if (noteTexts.length > 0) {
+            const ids = await addFootnotesToZip(zip, noteTexts);
+            let k = 0;
+            for (const pc of carriers) {
+                pc.insertedText = pc.insertedText.replace(
+                    NEW_FN_RE,
+                    () => `[fn ${ids[k++]}]`,
+                );
+            }
+        }
     }
 
     // Apply plans per paragraph. A plan can turn one paragraph into several
@@ -2157,6 +2318,13 @@ export interface EditRun {
      * characters of its own; N is the footnote's id in word/footnotes.xml.
      */
     footnoteRef?: string;
+    /**
+     * A brand-new footnote, written in text as `[fn new: note text]`. The
+     * applier allocates a real id, records the note in word/footnotes.xml
+     * (creating the part if the document has none) and turns this into a
+     * reference mark at this spot.
+     */
+    footnoteNew?: string;
 }
 
 export interface EditParagraph {
@@ -2207,7 +2375,8 @@ export interface FormattedEditResult {
  */
 export function inlineEditRuns(line: string): EditRun[] {
     const runs: EditRun[] = [];
-    const pattern = /(\*\*[^*]+\*\*|_[^_\n]+_|\*[^*\n]+\*|\[fn \d+\])/g;
+    const pattern =
+        /(\*\*[^*]+\*\*|_[^_\n]+_|\*[^*\n]+\*|\[fn \d+\]|\[fn new:[^\]]+\])/g;
     const push = (text: string, marks: Partial<EditRun>) => {
         if (!text) return;
         runs.push({ text, ...marks });
@@ -2218,6 +2387,8 @@ export function inlineEditRuns(line: string): EditRun[] {
         push(line.slice(last, at), {});
         const token = match[0];
         if (token.startsWith("**")) push(token.slice(2, -2), { bold: true });
+        else if (token.startsWith("[fn new:"))
+            runs.push({ text: "", footnoteNew: token.slice(8, -1).trim() });
         else if (token.startsWith("[fn "))
             runs.push({ text: "", footnoteRef: token.slice(4, -1) });
         else if (token.startsWith("_"))
@@ -2261,6 +2432,7 @@ export function stripInlineMarkers(line: string): string {
 export function runsToMarkedText(runs: EditRun[]): string {
     return runs
         .map((run) => {
+            if (run.footnoteNew) return `[fn new: ${run.footnoteNew}]`;
             if (run.footnoteRef) return `[fn ${run.footnoteRef}]`;
             const marker = run.bold ? "**" : run.underline ? "_" : run.italic ? "*" : "";
             return marker ? wrapMarked(run.text, marker) : run.text;
@@ -2973,6 +3145,8 @@ export async function applyFormattedEdits(
          * body and the table keeps its old wording.
          */
         container: XNode[];
+        /** Ids of the footnotes this paragraph references, in order. */
+        footnoteIds: string[];
     }
     const paras: Para[] = [];
     const collect = (nodes: XNode[]) => {
@@ -2989,9 +3163,13 @@ export async function applyFormattedEdits(
                     ? String(elAttrs(pStyle)["@_w:val"] ?? "")
                     : "";
                 const hm = /^Heading([1-9])$/.exec(styleVal);
+                const flat = flattenParagraph(kids);
                 paras.push({
                     node: n,
-                    text: flattenParagraph(kids).paraText,
+                    text: flat.paraText,
+                    footnoteIds: flat.runs
+                        .filter((slot) => slot.footnoteId)
+                        .map((slot) => slot.footnoteId!),
                     baseRPr: firstRunRPr(kids),
                     basePPr: pPr,
                     hasSectPr: !!(pPr && findChildByName(elChildren(pPr), "w:sectPr")),
@@ -3022,6 +3200,25 @@ export async function applyFormattedEdits(
         throw new StaleDocumentError(
             "The document changed since editing began. Reopen it and try again.",
         );
+    }
+
+    // Brand-new footnotes named in the rewrite: allocate ids and record the
+    // notes now, so the walk below emits real reference marks.
+    {
+        const noteTexts: string[] = [];
+        for (const paragraph of next)
+            for (const run of paragraph.runs ?? [])
+                if (run.footnoteNew) noteTexts.push(run.footnoteNew);
+        if (noteTexts.length > 0) {
+            const ids = await addFootnotesToZip(zip, noteTexts);
+            let k = 0;
+            for (const paragraph of next)
+                for (const run of paragraph.runs ?? [])
+                    if (run.footnoteNew) {
+                        run.footnoteRef = ids[k++];
+                        delete run.footnoteNew;
+                    }
+        }
     }
 
     // Prepare list numbering before rebuilding paragraphs, so each list
@@ -3149,8 +3346,19 @@ export async function applyFormattedEdits(
             const splitByFootnotes = (ep.runs || []).some(
                 (r) => r.footnoteRef,
             );
+            // When the model names footnotes explicitly, honour a changed
+            // set — that is how a new footnote lands on an otherwise
+            // unchanged sentence. Without tokens, the original (and its
+            // references) is kept as-is.
+            const refsChanged =
+                splitByFootnotes &&
+                (ep.runs || [])
+                    .filter((r) => r.footnoteRef)
+                    .map((r) => r.footnoteRef)
+                    .join(",") !== paras[oi].footnoteIds.join(",");
             if (
                 hasFormatting ||
+                refsChanged ||
                 (!splitByFootnotes && ep.runs && ep.runs.length > 1)
             ) {
                 newBodyParas.push(
