@@ -88,14 +88,21 @@ function activeSectionFromSegments(
 ): ProjectWorkspaceSection {
     if (segments[0] === "assistant") return "assistant";
     if (segments[0] === "tabular-reviews") return "reviews";
-    return "documents";
+    // A folder is still the file list, one level in.
+    if (segments[0] === "documents" || segments[0] === "folders")
+        return "documents";
+    return "overview";
 }
 
 function shouldShowWorkspaceShell(segments: string[]) {
     if (segments.length === 0) return true;
     if (segments.length === 2 && segments[0] === "folders") return true;
     if (segments.length !== 1) return false;
-    return segments[0] === "assistant" || segments[0] === "tabular-reviews";
+    return (
+        segments[0] === "documents" ||
+        segments[0] === "assistant" ||
+        segments[0] === "tabular-reviews"
+    );
 }
 
 export function ProjectWorkspaceProvider({
@@ -110,7 +117,7 @@ export function ProjectWorkspaceProvider({
     const [projectLoading, setProjectLoading] = useState(true);
     const [searchBySection, setSearchBySection] = useState<
         Record<ProjectWorkspaceSection, string>
-    >({ documents: "", assistant: "", reviews: "" });
+    >({ overview: "", documents: "", assistant: "", reviews: "" });
     const [projectChats, setProjectChats] = useState<Chat[] | null>(null);
     const [projectChatsLoading, setProjectChatsLoading] = useState(false);
     const [peopleModalOpen, setPeopleModalOpen] = useState(false);
@@ -536,6 +543,7 @@ export function ProjectSectionToolbar({
     return (
         <TableToolbar
             items={[
+                { id: "overview", label: "Overview" },
                 { id: "documents", label: "Documents" },
                 { id: "assistant", label: "Chats" },
                 { id: "reviews", label: "Tabular Reviews" },
@@ -543,11 +551,13 @@ export function ProjectSectionToolbar({
             active={activeSection}
             onChange={(next) => {
                 const href =
-                    next === "documents"
+                    next === "overview"
                         ? `/projects/${projectId}`
-                        : next === "assistant"
-                          ? `/projects/${projectId}/assistant`
-                          : `/projects/${projectId}/tabular-reviews`;
+                        : next === "documents"
+                          ? `/projects/${projectId}/documents`
+                          : next === "assistant"
+                            ? `/projects/${projectId}/assistant`
+                            : `/projects/${projectId}/tabular-reviews`;
                 router.push(href);
             }}
             actions={actions}

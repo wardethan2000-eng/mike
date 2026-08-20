@@ -41,41 +41,28 @@ For example:
 
 type SaveState = "idle" | "saving" | "saved" | "error";
 
-export function CaseOverviewPanel({
+/**
+ * The standing instructions on their own — the box, and the saving of it.
+ *
+ * Kept apart from the panel below so the matter's front page and the panel
+ * beside a chat are the same editor rather than two that drift apart.
+ */
+export function CaseInstructionsEditor({
     projectId,
     overview,
-    documents = [],
-    suggestionMode = "ask",
+    rows = 8,
     onSaved,
-    onSuggestionModeChange,
-    onOpenDocument,
-    onPendingCountChange,
-    refreshSignal = 0,
 }: {
     projectId: string;
     /** The saved instructions, or null. Undefined while the matter is loading. */
     overview: string | null | undefined;
-    /** The matter's files, so a remembered fact can point at one. */
-    documents?: Document[];
-    /** How this matter handles what Mike finds. */
-    suggestionMode?: SuggestionMode;
+    rows?: number;
     /** Keeps the rest of the page in step with what was just saved. */
     onSaved?: (overview: string | null) => void;
-    onSuggestionModeChange?: (mode: SuggestionMode) => Promise<void> | void;
-    onOpenDocument?: (
-        documentId: string,
-        filename: string,
-        page?: number | null,
-    ) => void;
-    /** So the page can mark the panel button when suggestions are waiting. */
-    onPendingCountChange?: (pending: number) => void;
-    /** Bumped when a chat answer finishes, so new suggestions are picked up. */
-    refreshSignal?: number;
 }) {
     const [draft, setDraft] = useState("");
     const [saveState, setSaveState] = useState<SaveState>("idle");
     const [errorMessage, setErrorMessage] = useState<string | null>(null);
-    const [instructionsOpen, setInstructionsOpen] = useState(true);
 
     /** True once this person has typed, so a slow load can't wipe their work. */
     const editedHereRef = useRef(false);
@@ -143,6 +130,98 @@ export function CaseOverviewPanel({
     const nearLimit = remaining <= 300;
 
     return (
+        <>
+            <textarea
+                value={draft}
+                maxLength={OVERVIEW_MAX_CHARS}
+                rows={rows}
+                onChange={(e) => {
+                    editedHereRef.current = true;
+                    setDraft(e.target.value);
+                    setSaveState("idle");
+                }}
+                onBlur={() => {
+                    if (!editedHereRef.current) return;
+                    if (saveTimerRef.current !== null) {
+                        window.clearTimeout(saveTimerRef.current);
+                        saveTimerRef.current = null;
+                    }
+                    void save(draft);
+                }}
+                placeholder={PLACEHOLDER}
+                spellCheck
+                className="w-full resize-y rounded border border-gray-200 bg-white p-3 text-sm leading-relaxed text-gray-800 outline-none placeholder:text-gray-400 focus:border-gray-400"
+            />
+
+            <div className="flex items-center justify-between gap-2 py-2 text-xs">
+                <span className="min-w-0 truncate text-gray-500">
+                    {saveState === "saving"
+                        ? "Saving\u2026"
+                        : saveState === "saved"
+                          ? "Saved"
+                          : saveState === "error"
+                            ? (errorMessage ?? "Not saved")
+                            : draft.trim()
+                              ? "Saves as you type"
+                              : "Nothing written yet"}
+                </span>
+                <div className="flex shrink-0 items-center gap-2">
+                    {saveState === "error" && (
+                        <button
+                            type="button"
+                            onClick={() => void save(draft)}
+                            className="underline underline-offset-2 text-red-600"
+                        >
+                            Try again
+                        </button>
+                    )}
+                    <span
+                        className={`tabular-nums ${
+                            nearLimit ? "text-amber-600" : "text-gray-400"
+                        }`}
+                    >
+                        {draft.length}/{OVERVIEW_MAX_CHARS}
+                    </span>
+                </div>
+            </div>
+        </>
+    );
+}
+
+export function CaseOverviewPanel({
+    projectId,
+    overview,
+    documents = [],
+    suggestionMode = "ask",
+    onSaved,
+    onSuggestionModeChange,
+    onOpenDocument,
+    onPendingCountChange,
+    refreshSignal = 0,
+}: {
+    projectId: string;
+    /** The saved instructions, or null. Undefined while the matter is loading. */
+    overview: string | null | undefined;
+    /** The matter's files, so a remembered fact can point at one. */
+    documents?: Document[];
+    /** How this matter handles what Mike finds. */
+    suggestionMode?: SuggestionMode;
+    /** Keeps the rest of the page in step with what was just saved. */
+    onSaved?: (overview: string | null) => void;
+    onSuggestionModeChange?: (mode: SuggestionMode) => Promise<void> | void;
+    onOpenDocument?: (
+        documentId: string,
+        filename: string,
+        page?: number | null,
+    ) => void;
+    /** So the page can mark the panel button when suggestions are waiting. */
+    onPendingCountChange?: (pending: number) => void;
+    /** Bumped when a chat answer finishes, so new suggestions are picked up. */
+    refreshSignal?: number;
+}) {
+    const [instructionsOpen, setInstructionsOpen] = useState(true);
+
+    return (
         <div className="flex h-full min-h-0 flex-col divide-y divide-gray-100">
             <div className="flex shrink-0 flex-col">
                 <button
@@ -165,66 +244,16 @@ export function CaseOverviewPanel({
                             used when drafting.
                         </p>
                         <div className="px-3">
-                            <textarea
-                                value={draft}
-                                maxLength={OVERVIEW_MAX_CHARS}
-                                rows={8}
-                                onChange={(e) => {
-                                    editedHereRef.current = true;
-                                    setDraft(e.target.value);
-                                    setSaveState("idle");
-                                }}
-                                onBlur={() => {
-                                    if (!editedHereRef.current) return;
-                                    if (saveTimerRef.current !== null) {
-                                        window.clearTimeout(saveTimerRef.current);
-                                        saveTimerRef.current = null;
-                                    }
-                                    void save(draft);
-                                }}
-                                placeholder={PLACEHOLDER}
-                                spellCheck
-                                className="w-full resize-y rounded border border-gray-200 bg-white p-3 text-sm leading-relaxed text-gray-800 outline-none placeholder:text-gray-400 focus:border-gray-400"
+                            <CaseInstructionsEditor
+                                projectId={projectId}
+                                overview={overview}
+                                onSaved={onSaved}
                             />
-                        </div>
-
-                        <div className="flex items-center justify-between gap-2 px-3 py-2 text-xs">
-                            <span className="min-w-0 truncate text-gray-500">
-                                {saveState === "saving"
-                                    ? "Saving…"
-                                    : saveState === "saved"
-                                      ? "Saved"
-                                      : saveState === "error"
-                                        ? (errorMessage ?? "Not saved")
-                                        : draft.trim()
-                                          ? "Saves as you type"
-                                          : "Nothing written yet"}
-                            </span>
-                            <div className="flex shrink-0 items-center gap-2">
-                                {saveState === "error" && (
-                                    <button
-                                        type="button"
-                                        onClick={() => void save(draft)}
-                                        className="underline underline-offset-2 text-red-600"
-                                    >
-                                        Try again
-                                    </button>
-                                )}
-                                <span
-                                    className={`tabular-nums ${
-                                        nearLimit
-                                            ? "text-amber-600"
-                                            : "text-gray-400"
-                                    }`}
-                                >
-                                    {draft.length}/{OVERVIEW_MAX_CHARS}
-                                </span>
-                            </div>
                         </div>
                     </>
                 ) : (
                     <p className="truncate px-3 pb-2 text-xs text-gray-400">
-                        {draft.trim() || "Nothing written yet"}
+                        {overview?.trim() || "Nothing written yet"}
                     </p>
                 )}
             </div>

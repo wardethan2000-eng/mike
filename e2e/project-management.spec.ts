@@ -100,6 +100,17 @@ async function gotoProjectRow(
  * getProject() once on mount. Wait until `anchor` — a control that only renders
  * once the project has loaded — becomes visible.
  */
+/**
+ * A matter opens on its overview now; its files live on a tab of their own.
+ * Anything that works with documents starts by going there.
+ */
+async function gotoDocumentsTab(page: import("@playwright/test").Page) {
+    const projectId = page.url().match(/\/projects\/([0-9a-f-]{36})/)?.[1];
+    expect(projectId, "expected to be on a /projects/<id> page").toBeTruthy();
+    await page.goto(`/projects/${projectId}/documents`);
+    await expect(page).toHaveURL(/\/documents$/, { timeout: 10_000 });
+}
+
 async function waitForProjectLoaded(
     page: import("@playwright/test").Page,
     anchor: import("@playwright/test").Locator,
@@ -202,10 +213,11 @@ test("create a folder inside a project", async ({ page }) => {
     await createProject(page, projectName);
 
     /*
-     * After createProject we are on the new project page (Documents tab). The
-     * documents toolbar (which hosts the folder-create button) only appears
-     * once the project has loaded.
+     * After createProject we are on the matter's overview; the folder-create
+     * button lives on the Documents tab, and only appears once the project
+     * has loaded.
      */
+    await gotoDocumentsTab(page);
     /* The olp UI renamed the documents-toolbar folder-create button from
        "Add Subfolder" to "Folder" (a TabPillButton wired to the root
        createFolderAction — ProjectDocumentsView). Clicking it still renders the
@@ -253,7 +265,7 @@ test("file upload type validation — .txt file is rejected", async ({ page }) =
     await createProject(page, projectName);
 
     /*
-     * After createProject we are on the project's Documents tab.
+     * After createProject we are on the matter's overview.
      * The "Add Documents" button opens AddDocumentsModal which has a
      * hidden file input with accept=".pdf,.docx,.doc".
      *
@@ -267,8 +279,9 @@ test("file upload type validation — .txt file is rejected", async ({ page }) =
      *       endpoint directly with the browser session's bearer token.
      */
 
-    /* Open the Add Documents modal. The "Add Documents" button only renders
-       once ProjectPage has loaded the project. */
+    /* Open the Add Documents modal, on the Documents tab. The "Add Documents"
+       button only renders once the project has loaded. */
+    await gotoDocumentsTab(page);
     const addDocsBtn = page.getByRole("button", { name: "Add Documents" });
     await waitForProjectLoaded(page, addDocsBtn);
 

@@ -63,6 +63,23 @@ describe("parseQuery", () => {
         }
     });
 
+    it("narrows to one matter when asked for", () => {
+        const result = parseQuery(
+            { project: "3f2504e0-4f89-11d3-9a0c-0305e82c3301" },
+            50,
+        );
+        expect(result.ok && result.query.projectId).toBe(
+            "3f2504e0-4f89-11d3-9a0c-0305e82c3301",
+        );
+    });
+
+    it("refuses a matter id that is not one", () => {
+        // Passed straight through, Postgres would answer a malformed id with a
+        // 500 rather than an honest "bad request".
+        const result = parseQuery({ project: "not-a-matter" }, 50);
+        expect(result.ok).toBe(false);
+    });
+
     it("takes a precise instant as well as a bare day", () => {
         // The list has to be able to mean "up to the end of today where the
         // reader is sitting", which is not the end of the day in UTC.

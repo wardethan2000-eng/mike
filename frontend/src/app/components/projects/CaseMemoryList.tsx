@@ -309,6 +309,7 @@ export function CaseMemoryList({
     onOpenDocument,
     onSuggestionModeChange,
     onPendingCountChange,
+    onMemoriesChange,
     /** Bumped when a chat answer finishes, so new suggestions are picked up. */
     refreshSignal = 0,
 }: {
@@ -325,6 +326,12 @@ export function CaseMemoryList({
     onSuggestionModeChange?: (mode: SuggestionMode) => Promise<void> | void;
     /** So the page can mark the panel button when suggestions are waiting. */
     onPendingCountChange?: (pending: number) => void;
+    /**
+     * The facts in force, whenever they change. The matter's front page reads
+     * the dates out of them, and this saves it asking the server for the same
+     * list a second time — and keeps it right the moment one is edited.
+     */
+    onMemoriesChange?: (memories: ProjectMemory[]) => void;
     refreshSignal?: number;
 }) {
     const [memories, setMemories] = useState<ProjectMemory[] | null>(null);
@@ -400,6 +407,10 @@ export function CaseMemoryList({
             for (const timer of timers) window.clearTimeout(timer);
         };
     }, [projectId, refreshSignal]);
+
+    useEffect(() => {
+        if (memories) onMemoriesChange?.(memories);
+    }, [memories, onMemoriesChange]);
 
     /**
      * For each fact in force, the wordings behind it, newest first. A fact that

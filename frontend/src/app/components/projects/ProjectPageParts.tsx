@@ -21,7 +21,11 @@ import { RowActions } from "@/app/components/shared/RowActions";
 import { HeaderActionsMenu } from "@/app/components/shared/HeaderActionsMenu";
 import { TABLE_PRIMARY_CELL_WIDTH_CLASS } from "@/app/components/shared/TablePrimitive";
 
-export type ProjectWorkspaceSection = "documents" | "assistant" | "reviews";
+export type ProjectWorkspaceSection =
+    | "overview"
+    | "documents"
+    | "assistant"
+    | "reviews";
 
 export type ProjectContextMenu = {
     x: number;
@@ -394,7 +398,19 @@ export function ProjectPageHeader({
     }>;
 }) {
     const sectionAction: PageHeaderAction =
-        activeSection === "documents"
+        activeSection === "overview"
+            ? {
+                  onClick: onNewChat,
+                  disabled: creatingChat,
+                  icon: creatingChat ? (
+                      <Loader2 className="h-4 w-4 animate-spin" />
+                  ) : (
+                      <Plus className="h-4 w-4" />
+                  ),
+                  label: <span className="hidden sm:inline">Chat</span>,
+                  title: "Create chat",
+              }
+            : activeSection === "documents"
             ? {
                   onClick: onAddDocuments ?? undefined,
                   disabled: !onAddDocuments,
@@ -439,7 +455,7 @@ export function ProjectPageHeader({
                         ? {
                               label: project.name,
                               onClick: onProjectRoot,
-                              title: "Back to project documents",
+                              title: "Back to the matter's overview",
                           }
                         : {
                               loading: true,
@@ -454,12 +470,18 @@ export function ProjectPageHeader({
             ]}
             actionGroups={[
                 [
-                    {
-                        type: "search",
-                        value: search,
-                        onChange: onSearchChange,
-                        placeholder: "Search…",
-                    },
+                    // The overview has nothing to search through — its cards
+                    // are shortcuts into the lists that do.
+                    ...(activeSection === "overview"
+                        ? []
+                        : [
+                              {
+                                  type: "search" as const,
+                                  value: search,
+                                  onChange: onSearchChange,
+                                  placeholder: "Search…",
+                              },
+                          ]),
                     {
                         onClick: onOpenPeople,
                         iconOnly: true,

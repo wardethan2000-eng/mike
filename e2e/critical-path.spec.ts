@@ -110,7 +110,7 @@ test("create project, upload PDF, ask a question and receive a response", async 
     await page.waitForURL(/\/projects\/[^/]+$/, { timeout: 30_000 });
 
     /* ── Step 6: open the project assistant ───────────────────────────────── */
-    /* We're already on /projects/[id] (Documents tab by default). The project
+    /* We're already on /projects/[id] (the matter's overview). The project
        assistant is now a nested route, /projects/[id]/assistant. Navigate there
        directly rather than clicking through the tab bar to avoid ambiguity with
        the "Assistant" item in the sidebar nav. (The olp UI replaced the old

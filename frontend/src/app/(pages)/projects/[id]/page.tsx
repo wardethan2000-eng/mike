@@ -1,7 +1,7 @@
 "use client";
 
 import { use } from "react";
-import { ProjectDocumentsView } from "@/app/components/projects/ProjectDocumentsView";
+import { ProjectOverviewView } from "@/app/components/projects/ProjectOverviewView";
 
 interface Props {
     params: Promise<{ id: string }>;
@@ -9,5 +9,5 @@ interface Props {
 
 export default function ProjectDetailPage({ params }: Props) {
     const { id } = use(params);
-    return <ProjectDocumentsView projectId={id} />;
+    return <ProjectOverviewView projectId={id} />;
 }

@@ -501,6 +501,8 @@ export interface AuditEvent {
 export async function getAuditHistory(
     params: {
         q?: string;
+        /** Only what happened in this matter. */
+        project?: string;
         action?: string;
         status?: string;
         surface?: string;
@@ -519,6 +521,7 @@ export async function getAuditHistory(
 }> {
     const qs = new URLSearchParams();
     if (params.q) qs.set("q", params.q);
+    if (params.project) qs.set("project", params.project);
     if (params.action) qs.set("action", params.action);
     if (params.status) qs.set("status", params.status);
     if (params.surface) qs.set("surface", params.surface);

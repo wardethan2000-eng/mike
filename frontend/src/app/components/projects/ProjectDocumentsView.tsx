@@ -9,7 +9,7 @@ import {
     useRef,
     useState,
 } from "react";
-import { useRouter } from "next/navigation";
+import { useRouter, useSearchParams } from "next/navigation";
 import { ChevronDown, ChevronLeft, FileText, Plus } from "lucide-react";
 import {
     createProjectFolder,
@@ -50,6 +50,7 @@ const PROJECT_DIRECTORY_PAGE_SIZE = 40;
 
 export function ProjectDocumentsView({ projectId, folderId = null }: Props) {
     const router = useRouter();
+    const searchParams = useSearchParams();
     const workspace = useProjectWorkspace();
     const {
         project,
@@ -90,6 +91,36 @@ export function ProjectDocumentsView({ projectId, folderId = null }: Props) {
     useEffect(() => {
         if (!projectLoading) prefetchProjectSections();
     }, [projectLoading, prefetchProjectSections]);
+
+    /**
+     * A document someone asked for from somewhere else — the matter's front
+     * page, say — arrives as ?open=<id>, and opens beside the list. Only once
+     * per request: the file list refreshes while the document is open, and a
+     * reader who closed it should not have it reopened underneath them.
+     *
+     * A document that is not among the matter's files does nothing, which is
+     * what should happen if the link is stale or points at another matter.
+     */
+    const requestedDocumentId = searchParams.get("open");
+    const requestedPage = Number.parseInt(searchParams.get("page") ?? "", 10);
+    const openedDocumentIdRef = useRef<string | null>(null);
+    useEffect(() => {
+        if (!requestedDocumentId || projectLoading) return;
+        if (openedDocumentIdRef.current === requestedDocumentId) return;
+        const match = (project?.documents ?? []).find(
+            (document) => document.id === requestedDocumentId,
+        );
+        if (!match) return;
+        openedDocumentIdRef.current = requestedDocumentId;
+        openSourceCount.current += 1;
+        setOpenSource({
+            documentId: match.id,
+            filename: match.filename,
+            page: Number.isNaN(requestedPage) ? null : requestedPage,
+            quote: "",
+            key: openSourceCount.current,
+        });
+    }, [requestedDocumentId, requestedPage, projectLoading, project?.documents]);
 
     useEffect(() => {
         function handleClick(event: MouseEvent) {
@@ -240,7 +271,7 @@ export function ProjectDocumentsView({ projectId, folderId = null }: Props) {
         (nextFolderId: string | null) => {
             const nextPath = nextFolderId
                 ? `/projects/${encodeURIComponent(projectId)}/folders/${encodeURIComponent(nextFolderId)}`
-                : `/projects/${encodeURIComponent(projectId)}`;
+                : `/projects/${encodeURIComponent(projectId)}/documents`;
             router.push(nextPath, {
                 scroll: false,
             });

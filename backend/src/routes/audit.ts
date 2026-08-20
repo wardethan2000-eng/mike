@@ -18,6 +18,10 @@ const EXPORT_LIMIT = 2000;
 // page keeps the offset well inside Postgres' integer range.
 const MAX_PAGE = 100_000;
 const DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
+/** A matter id, checked before it reaches the database: a malformed one would
+ * come back as a 500 from Postgres rather than an honest "bad request". */
+const UUID_RE =
+  /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 /** A full ISO instant, as the browser's toISOString() produces. */
 const INSTANT_RE = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d{1,3})?Z$/;
 
@@ -31,6 +35,9 @@ export async function accessibleProjectIds(
 
 type AuditQuery = {
   q?: string;
+  /** Narrow to one matter. Access is unchanged: the caller still only ever
+   * sees their own events plus those in matters they can open. */
+  projectId?: string;
   action?: string;
   status?: string;
   surface?: string;
@@ -72,6 +79,9 @@ export function parseQuery(
   const page = Math.min(Math.max(parsedPage, 1), MAX_PAGE);
   const from = str(raw.from);
   const to = str(raw.to);
+  const projectId = str(raw.project);
+  if (projectId && !UUID_RE.test(projectId))
+    return { ok: false, error: "Invalid 'project' id" };
   const requestedSortBy = str(raw.sort_by);
   const requestedSortDirection = str(raw.sort_dir);
   // A date filter is either a bare calendar day (YYYY-MM-DD), read as a UTC
@@ -102,6 +112,7 @@ export function parseQuery(
     ok: true,
     query: {
       q: str(raw.q)?.slice(0, 200),
+      projectId,
       action: str(raw.action)?.slice(0, 60),
       status: str(raw.status)?.slice(0, 20),
       surface: str(raw.surface)?.slice(0, 30),
@@ -133,6 +144,7 @@ export async function queryEvents(
   query = projectIds.length
     ? query.or(`user_id.eq.${userId},project_id.in.(${projectIds.join(",")})`)
     : query.eq("user_id", userId);
+  if (q.projectId) query = query.eq("project_id", q.projectId);
   if (q.action) query = query.eq("action", q.action);
   if (q.status) query = query.eq("status", q.status);
   if (q.surface) query = query.eq("surface", q.surface);
