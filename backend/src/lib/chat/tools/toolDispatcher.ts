@@ -47,6 +47,7 @@ import {
   findInDocumentContent,
   findTextMatches,
   runEditDocument,
+  runWriteDocument,
   safeGeneratedFilename,
   type DocEditedResult,
   type TurnEditState,
@@ -1301,6 +1302,154 @@ export async function runToolCalls(
                 : "CourtListener citation lookup failed.",
           }),
         });
+      }
+    } else if (tc.function.name === "write_document" && docIndex) {
+      const rawDocId = args.doc_id as string;
+      const paragraphsRaw = args.paragraphs as unknown[] | undefined;
+      const docId = resolveDocLabel(rawDocId, docStore, docIndex) ?? rawDocId;
+      const docInfo = docStore.get(docId);
+      const indexed = docIndex?.[docId];
+
+      const failWrite = (
+        filename: string,
+        documentId: string,
+        error: string,
+      ) => {
+        write(
+          `data: ${JSON.stringify({ type: "doc_edited_start", filename })}\n\n`,
+        );
+        write(
+          `data: ${JSON.stringify({
+            type: "doc_edited",
+            filename,
+            document_id: documentId,
+            version_id: "",
+            download_url: "",
+            annotations: [],
+            error,
+          })}\n\n`,
+        );
+        toolResults.push({
+          role: "tool",
+          tool_call_id: tc.id,
+          content: JSON.stringify({ error }),
+        });
+      };
+
+      if (
+        docInfo?.source_kind === "library_template" ||
+        docInfo?.source_kind === "workflow_asset"
+      ) {
+        failWrite(
+          docInfo.filename,
+          indexed?.document_id ?? "",
+          "Templates and workflow assets cannot be written over. Call replicate_document with a new_filename, then write the returned copy.",
+        );
+      } else if (!docInfo || !indexed) {
+        failWrite(
+          docId,
+          indexed?.document_id ?? "",
+          `Document '${docId}' not found in this chat's attachments.`,
+        );
+      } else if (docInfo.file_type !== "docx") {
+        failWrite(
+          docInfo.filename,
+          indexed.document_id,
+          "write_document only supports .docx files.",
+        );
+      } else if (
+        !Array.isArray(paragraphsRaw) ||
+        paragraphsRaw.length === 0
+      ) {
+        failWrite(
+          docInfo.filename,
+          indexed.document_id,
+          "paragraphs is required and must not be empty.",
+        );
+      } else {
+        write(
+          `data: ${JSON.stringify({
+            type: "doc_edited_start",
+            filename: docInfo.filename,
+          })}\n\n`,
+        );
+        const paragraphs = paragraphsRaw.map((line) => String(line ?? ""));
+        const result = await runWriteDocument({
+          documentId: indexed.document_id,
+          userId,
+          paragraphs,
+          db,
+          reuseVersion: turnEditState?.get(indexed.document_id),
+        });
+
+        if (result.ok) {
+          turnEditState?.set(indexed.document_id, {
+            versionId: result.version_id,
+            versionNumber: result.version_number,
+            storagePath: result.storage_path,
+          });
+          clearTurnReadsForDocument(turnReadState, indexed.document_id);
+          if (docIndex[docId]) {
+            docIndex[docId] = {
+              ...docIndex[docId],
+              version_id: result.version_id,
+              version_number: result.version_number,
+            };
+          }
+          const currentDocStore = docStore.get(docId);
+          if (currentDocStore) {
+            docStore.set(docId, {
+              ...currentDocStore,
+              storage_path: result.storage_path,
+            });
+          }
+          const payload: DocEditedResult = {
+            filename: docInfo.filename,
+            document_id: indexed.document_id,
+            version_id: result.version_id,
+            version_number: result.version_number,
+            download_url: result.download_url,
+            annotations: [],
+          };
+          docsEdited.push(payload);
+          write(
+            `data: ${JSON.stringify({ type: "doc_edited", ...payload })}\n\n`,
+          );
+          toolResults.push({
+            role: "tool",
+            tool_call_id: tc.id,
+            content: JSON.stringify({
+              ok: true,
+              doc_id: docId,
+              document_id: indexed.document_id,
+              version_id: result.version_id,
+              version_number: result.version_number,
+              paragraphs_written: result.paragraph_count,
+              next_required_action: [
+                `The document now says what you just wrote; it is finished, not a set of suggestions.`,
+                `It remains available as doc_id "${docId}".`,
+                `Do not include download links or URLs in your prose response; the document card is shown automatically by the UI.`,
+              ].join(" "),
+            }),
+          });
+        } else {
+          write(
+            `data: ${JSON.stringify({
+              type: "doc_edited",
+              filename: docInfo.filename,
+              document_id: indexed.document_id,
+              version_id: "",
+              download_url: "",
+              annotations: [],
+              error: result.error,
+            })}\n\n`,
+          );
+          toolResults.push({
+            role: "tool",
+            tool_call_id: tc.id,
+            content: JSON.stringify({ error: result.error }),
+          });
+        }
       }
     } else if (tc.function.name === "edit_document" && docIndex) {
       const rawDocId = args.doc_id as string;

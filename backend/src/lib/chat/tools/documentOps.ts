@@ -6,10 +6,15 @@ import {
 import { convertedPdfKey, docxToPdf } from "../../convert";
 import { createServerSupabase } from "../../supabase";
 import {
+  applyFormattedEdits,
   applyTrackedEdits,
+  extractDocxBodyParagraphs,
   extractDocxBodyText,
   resolveTrackedChange,
+  StaleDocumentError,
   type EditInput,
+  type EditParagraph,
+  type EditRun,
 } from "../../docxTrackedChanges";
 import { buildDownloadUrl } from "../../downloadTokens";
 import {
@@ -35,6 +40,7 @@ import {
   shouldReadFromRendition,
 } from "../../documentRendition";
 import { OCR_TEXT_NOTE } from "../../ocr";
+import { safeErrorMessage } from "../../safeError";
 import { extractPresentationText } from "../../officeText";
 import { spreadsheetToLLMText } from "../../spreadsheet";
 
@@ -1356,6 +1362,132 @@ export async function loadCurrentVersionBytes(
 }
 
 /**
+ * Write edited .docx bytes back as a document version, and return where they
+ * landed. Shared by the two ways a document gets rewritten: editing passages
+ * and writing the whole thing.
+ */
+async function saveEditedDocxVersion(params: {
+  documentId: string;
+  userId: string;
+  bytes: Buffer;
+  db: ReturnType<typeof createServerSupabase>;
+  reuseVersion?: {
+    versionId: string;
+    versionNumber: number;
+    storagePath: string;
+  };
+  /** Filename to fall back to when no prior version names the document. */
+  fallbackFilename: string;
+}): Promise<{
+  versionRowId: string;
+  newPath: string;
+  nextVersionNumber: number;
+  versionFilename: string;
+} | null> {
+  const { documentId, userId, bytes, db, reuseVersion } = params;
+  let versionFilename = params.fallbackFilename;
+  const ab = bytes.buffer.slice(
+    bytes.byteOffset,
+    bytes.byteOffset + bytes.byteLength,
+  ) as ArrayBuffer;
+
+  let versionRowId: string;
+  let newPath: string;
+  let nextVersionNumber: number;
+
+    if (reuseVersion) {
+      // Overwrite the existing turn version's file in place. The version
+      // row, version_number, and current_version_id all already point here.
+      newPath = reuseVersion.storagePath;
+      versionRowId = reuseVersion.versionId;
+      nextVersionNumber = reuseVersion.versionNumber;
+
+      // Clear the hash before the bytes change; the update below sets it again.
+      // Storage and Postgres cannot be written atomically, so a failure between
+      // the two leaves the version unhashed and therefore unverifiable, rather
+      // than hashed against content it no longer holds.
+      await db
+        .from("document_versions")
+        .update({ content_sha256: null })
+        .eq("id", versionRowId);
+
+      await uploadFile(
+        newPath,
+        ab,
+        "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+      );
+      await db
+        .from("document_versions")
+        .update({
+          file_type: "docx",
+          size_bytes: bytes.byteLength,
+          page_count: null,
+          content_sha256: contentSha256(bytes),
+        })
+        .eq("id", versionRowId);
+    } else {
+      const versionId = crypto.randomUUID().replace(/-/g, "");
+      newPath = `documents/${userId}/${documentId}/edits/${versionId}.docx`;
+      await uploadFile(
+        newPath,
+        ab,
+        "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+      );
+
+      // Per-document sequential number for the new assistant_edit
+      // version. The counter spans upload + user_upload + assistant_edit
+      // so the original upload is V1 and the first assistant edit is V2.
+      const { data: maxRow } = await db
+        .from("document_versions")
+        .select("version_number")
+        .eq("document_id", documentId)
+        .in("source", ["upload", "user_upload", "assistant_edit"])
+        .order("version_number", { ascending: false, nullsFirst: false })
+        .limit(1)
+        .maybeSingle();
+      nextVersionNumber = ((maxRow?.version_number as number | null) ?? 1) + 1;
+
+      // Inherit the filename from the most recent prior version so
+      // user-applied renames carry forward through further edits. Malformed
+      // legacy rows without a filename get a neutral placeholder, not the
+      // parent document filename. We intentionally do NOT append "[Edited Vn]"
+      // — the version number is surfaced separately as a tag in the UI.
+      const { data: prevRow } = await db
+        .from("document_versions")
+        .select("filename, created_at")
+        .eq("document_id", documentId)
+        .order("created_at", { ascending: false })
+        .limit(1)
+        .maybeSingle();
+      const inheritedFilename =
+        (prevRow?.filename as string | null)?.trim() || "Untitled document";
+      versionFilename = inheritedFilename;
+
+      const { data: versionRow, error: verErr } = await db
+        .from("document_versions")
+        .insert({
+          document_id: documentId,
+          storage_path: newPath,
+          source: "assistant_edit",
+          version_number: nextVersionNumber,
+          filename: inheritedFilename,
+          file_type: "docx",
+          size_bytes: bytes.byteLength,
+          page_count: null,
+          content_sha256: contentSha256(bytes),
+        })
+        .select("id")
+        .single();
+      if (verErr || !versionRow) {
+        return null;
+      }
+      versionRowId = versionRow.id as string;
+    }
+
+  return { versionRowId, newPath, nextVersionNumber, versionFilename };
+}
+
+/**
  * Ensure the document has a document_versions row for the current upload.
  * Called before writing the first 'assistant_edit' row so the history is
  * complete. Idempotent.
@@ -1472,103 +1604,19 @@ export async function runEditDocument(params: {
     };
   }
 
-  const ab = editedBytes.buffer.slice(
-    editedBytes.byteOffset,
-    editedBytes.byteOffset + editedBytes.byteLength,
-  ) as ArrayBuffer;
-
-  let versionRowId: string;
-  let newPath: string;
-  let nextVersionNumber: number;
-
-  if (reuseVersion) {
-    // Overwrite the existing turn version's file in place. The version
-    // row, version_number, and current_version_id all already point here.
-    newPath = reuseVersion.storagePath;
-    versionRowId = reuseVersion.versionId;
-    nextVersionNumber = reuseVersion.versionNumber;
-
-    // Clear the hash before the bytes change; the update below sets it again.
-    // Storage and Postgres cannot be written atomically, so a failure between
-    // the two leaves the version unhashed and therefore unverifiable, rather
-    // than hashed against content it no longer holds.
-    await db
-      .from("document_versions")
-      .update({ content_sha256: null })
-      .eq("id", versionRowId);
-
-    await uploadFile(
-      newPath,
-      ab,
-      "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-    );
-    await db
-      .from("document_versions")
-      .update({
-        file_type: "docx",
-        size_bytes: editedBytes.byteLength,
-        page_count: null,
-        content_sha256: contentSha256(editedBytes),
-      })
-      .eq("id", versionRowId);
-  } else {
-    const versionId = crypto.randomUUID().replace(/-/g, "");
-    newPath = `documents/${userId}/${documentId}/edits/${versionId}.docx`;
-    await uploadFile(
-      newPath,
-      ab,
-      "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-    );
-
-    // Per-document sequential number for the new assistant_edit
-    // version. The counter spans upload + user_upload + assistant_edit
-    // so the original upload is V1 and the first assistant edit is V2.
-    const { data: maxRow } = await db
-      .from("document_versions")
-      .select("version_number")
-      .eq("document_id", documentId)
-      .in("source", ["upload", "user_upload", "assistant_edit"])
-      .order("version_number", { ascending: false, nullsFirst: false })
-      .limit(1)
-      .maybeSingle();
-    nextVersionNumber = ((maxRow?.version_number as number | null) ?? 1) + 1;
-
-    // Inherit the filename from the most recent prior version so
-    // user-applied renames carry forward through further edits. Malformed
-    // legacy rows without a filename get a neutral placeholder, not the
-    // parent document filename. We intentionally do NOT append "[Edited Vn]"
-    // — the version number is surfaced separately as a tag in the UI.
-    const { data: prevRow } = await db
-      .from("document_versions")
-      .select("filename, created_at")
-      .eq("document_id", documentId)
-      .order("created_at", { ascending: false })
-      .limit(1)
-      .maybeSingle();
-    const inheritedFilename =
-      (prevRow?.filename as string | null)?.trim() || "Untitled document";
-    versionFilename = inheritedFilename;
-
-    const { data: versionRow, error: verErr } = await db
-      .from("document_versions")
-      .insert({
-        document_id: documentId,
-        storage_path: newPath,
-        source: "assistant_edit",
-        version_number: nextVersionNumber,
-        filename: inheritedFilename,
-        file_type: "docx",
-        size_bytes: editedBytes.byteLength,
-        page_count: null,
-        content_sha256: contentSha256(editedBytes),
-      })
-      .select("id")
-      .single();
-    if (verErr || !versionRow) {
-      return { ok: false, error: "Failed to record document version." };
-    }
-    versionRowId = versionRow.id as string;
+  const saved = await saveEditedDocxVersion({
+    documentId,
+    userId,
+    bytes: editedBytes,
+    db,
+    reuseVersion,
+    fallbackFilename: versionFilename,
+  });
+  if (!saved) {
+    return { ok: false, error: "Failed to record document version." };
   }
+  const { versionRowId, newPath, nextVersionNumber } = saved;
+  versionFilename = saved.versionFilename;
 
   // Written-in edits have nothing to review, so no per-change rows and no
   // Accept/Reject cards: the document card is the whole result.
@@ -1671,6 +1719,141 @@ export async function runEditDocument(params: {
     applied_count: annotations.length,
     tracked: true,
     errors,
+  };
+}
+
+// ---------------------------------------------------------------------------
+// Writing a whole document
+// ---------------------------------------------------------------------------
+
+/**
+ * Split a line into runs on the inline markers the assistant already uses when
+ * generating a document: **bold**, _underline_, *italic*.
+ */
+export function inlineEditRuns(line: string): EditRun[] {
+  const runs: EditRun[] = [];
+  const pattern = /(\*\*[^*]+\*\*|_[^_\n]+_|\*[^*\n]+\*)/g;
+  const push = (text: string, marks: Partial<EditRun>) => {
+    if (!text) return;
+    runs.push({ text, ...marks });
+  };
+  let last = 0;
+  for (const match of line.matchAll(pattern)) {
+    const at = match.index ?? 0;
+    push(line.slice(last, at), {});
+    const token = match[0];
+    if (token.startsWith("**")) push(token.slice(2, -2), { bold: true });
+    else if (token.startsWith("_")) push(token.slice(1, -1), { underline: true });
+    else push(token.slice(1, -1), { italic: true });
+    last = at + token.length;
+  }
+  push(line.slice(last), {});
+  if (runs.length === 0) runs.push({ text: "" });
+  return runs;
+}
+
+/**
+ * Write a document's whole body in one go, keeping the file's own look.
+ *
+ * Adapting a precedent means rewriting nearly every paragraph, which is a poor
+ * fit for find-and-replace: once a clause has been reworded the anchors for
+ * the next edit no longer match, and a long contract turns into dozens of
+ * fragile round trips. Here the assistant supplies the finished document as a
+ * list of paragraphs instead. Each one is matched against the paragraph in the
+ * same position, so the original's fonts, margins, numbering, indentation,
+ * tables and signature layout carry straight over.
+ */
+export async function runWriteDocument(params: {
+  documentId: string;
+  userId: string;
+  paragraphs: string[];
+  db: ReturnType<typeof createServerSupabase>;
+  reuseVersion?: {
+    versionId: string;
+    versionNumber: number;
+    storagePath: string;
+  };
+}): Promise<
+  | {
+      ok: true;
+      version_id: string;
+      version_number: number;
+      storage_path: string;
+      download_url: string;
+      paragraph_count: number;
+    }
+  | { ok: false; error: string }
+> {
+  const { documentId, userId, paragraphs, db, reuseVersion } = params;
+
+  if (paragraphs.length === 0) {
+    return { ok: false, error: "paragraphs is required and must not be empty." };
+  }
+
+  const { data: doc } = await db
+    .from("documents")
+    .select("id")
+    .eq("id", documentId)
+    .single();
+  if (!doc) return { ok: false, error: "Document not found." };
+
+  const activeVersion = await loadActiveVersion(documentId, db);
+  const fallbackFilename =
+    activeVersion?.filename?.trim() || "Untitled document";
+
+  const current = await loadCurrentVersionBytes(documentId, db);
+  if (!current) return { ok: false, error: "Could not load document bytes." };
+
+  const baseline = await extractDocxBodyParagraphs(current.bytes);
+  const next: EditParagraph[] = paragraphs.map((line) => {
+    const runs = inlineEditRuns(line);
+    return { text: runs.map((run) => run.text).join(""), runs };
+  });
+
+  let written: Buffer;
+  try {
+    const result = await applyFormattedEdits(current.bytes, baseline, next);
+    written = result.bytes;
+  } catch (err) {
+    if (err instanceof StaleDocumentError) {
+      return {
+        ok: false,
+        error:
+          "The document changed while this was being written. Read it again and rewrite it from what it says now.",
+      };
+    }
+    return {
+      ok: false,
+      error: `Could not write the document: ${safeErrorMessage(err)}`,
+    };
+  }
+
+  const saved = await saveEditedDocxVersion({
+    documentId,
+    userId,
+    bytes: written,
+    db,
+    reuseVersion,
+    fallbackFilename,
+  });
+  if (!saved) {
+    return { ok: false, error: "Failed to record document version." };
+  }
+
+  await db
+    .from("documents")
+    .update({ current_version_id: saved.versionRowId })
+    .eq("id", documentId);
+
+  const resolvedFilename =
+    saved.versionFilename.trim() || "Untitled document.docx";
+  return {
+    ok: true,
+    version_id: saved.versionRowId,
+    version_number: saved.nextVersionNumber,
+    storage_path: saved.newPath,
+    download_url: buildDownloadUrl(saved.newPath, resolvedFilename),
+    paragraph_count: next.length,
   };
 }
 

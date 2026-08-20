@@ -547,6 +547,30 @@ export const TOOLS = [
   {
     type: "function",
     function: {
+      name: "write_document",
+      description:
+        "Write a .docx document's whole body in one call, keeping the file's own look. This is how you fill in a copy made with replicate_document: send the finished document as a list of paragraphs and it replaces what is there, so a contract adapted for a new client takes ONE call instead of dozens of find-and-replace edits that stop matching as soon as the wording changes. Each paragraph is matched against the paragraph in the same position, so fonts, margins, line spacing, numbering, indentation, tables and the signature layout carry over from the document being copied. Read the source document first and send back every paragraph the new document needs, in order, with the old party names, dates and trade-specific wording replaced. Paragraphs you send unchanged stay byte-identical. Use edit_document instead for a small correction to a document that is otherwise already right.",
+      parameters: {
+        type: "object",
+        properties: {
+          doc_id: {
+            type: "string",
+            description: "Document slug (e.g. 'doc-0').",
+          },
+          paragraphs: {
+            type: "array",
+            description:
+              "The complete new document, one entry per paragraph, in order — including headings, clause text, exhibit text and signature lines. Anything left out is deleted from the document. Inside a line, write **text** for bold, _text_ for underline and *text* for italic, and a tab character to move to the next tab stop.",
+            items: { type: "string" },
+          },
+        },
+        required: ["doc_id", "paragraphs"],
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
       name: "edit_document",
       description:
         "Write edits into a .docx. On a document the user already has, the edits land as tracked changes for them to accept or reject; on a fresh copy made with replicate_document they are written straight in, because a copy being filled in is a new document rather than a marked-up old one (see track_changes). Use read_document first unless this same document/version has already been read in the current response. Anchor each edit with short before/after context so it can be located unambiguously. When revising a document the user already has, keep each edit a precise, minimal substitution of specific words/characters rather than a whole-line rewrite. When filling in a fresh copy, work the other way: replace a whole clause or paragraph in one edit, so a rewrite takes a handful of edits rather than dozens. You can also write new body text: a blank line in `replace` starts a new paragraph, so one edit can turn a placeholder into several paragraphs, and an edit with an empty `find` inserts new paragraphs at the anchor. To remove a paragraph completely, set `find` to its full text and `replace` to an empty string — the blank line goes too. New paragraphs inherit the formatting of the paragraph they grow out of. Returns a download link to the edited document, plus per-edit annotations the UI renders as Accept/Reject cards when the edits are tracked.",

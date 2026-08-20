@@ -39,10 +39,15 @@ function envInt(name: string, fallback: number): number {
 
 export function defaultRunBudgetLimits(): RunBudgetLimits {
     return {
-        maxIterations: envInt("CHAT_MAX_TOOL_ROUNDS", 30),
-        maxDurationMs: envInt("CHAT_MAX_TOOL_SECONDS", 420) * 1000,
+        // Drafting is not research: writing two contracts means reading both
+        // models, copying them, writing each one out and checking the result,
+        // and a local model takes minutes per step. The old ceilings (30
+        // rounds, 7 minutes) stopped that work halfway through, so they are
+        // set high enough that only genuinely stuck work trips them.
+        maxIterations: envInt("CHAT_MAX_TOOL_ROUNDS", 120),
+        maxDurationMs: envInt("CHAT_MAX_TOOL_SECONDS", 2_400) * 1000,
         maxContextChars: envInt("CHAT_MAX_CONTEXT_CHARS", 700_000),
-        maxRepeats: envInt("CHAT_MAX_TOOL_REPEATS", 3),
+        maxRepeats: envInt("CHAT_MAX_TOOL_REPEATS", 4),
     };
 }
 

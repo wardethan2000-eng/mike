@@ -1683,15 +1683,18 @@ export interface EditParagraph {
     text: string;
     align?: "left" | "center" | "right" | "justify" | null;
     /**
-     * 1-3 to make this paragraph a Word heading, 0/undefined for body text.
+     * 1-3 to make this paragraph a Word heading, 0 or null for body text.
+     * Leave the field out entirely to keep whatever style the paragraph
+     * already carries.
      * Applied as a w:pStyle referencing Word's built-in Heading styles, so the
      * document's own heading look is used and Word's navigation pane picks
      * them up.
      */
     heading?: number | null;
     /**
-     * "bullet" or "number" to make this paragraph a list item, null/undefined
-     * for an ordinary paragraph. Consecutive paragraphs of the same kind form
+     * "bullet" or "number" to make this paragraph a list item, null for an
+     * ordinary paragraph. Leave the field out entirely to keep whatever
+     * numbering the paragraph already carries. Consecutive paragraphs of the same kind form
      * one list, so a numbered run counts 1, 2, 3.
      */
     list?: "bullet" | "number" | null;
@@ -1764,6 +1767,13 @@ function applyParagraphProps(
     heading: number | null | undefined,
     list?: { numId: number } | null,
 ): XNode | null {
+    // `undefined` means "leave this as the paragraph already has it" — what a
+    // whole-document rewrite wants, since it only supplies words and the
+    // document's own headings and clause numbering should survive. `null`
+    // means "remove it", which is what the in-app editor sends when someone
+    // turns a heading or a list item back into ordinary text.
+    const keepStyle = heading === undefined;
+    const keepList = list === undefined;
     const wantHeading =
         typeof heading === "number" && heading >= 1 && heading <= 3
             ? heading
@@ -1777,17 +1787,19 @@ function applyParagraphProps(
 
     // Heading: replace any existing paragraph style. Removing it returns the
     // paragraph to the document's default (body) style.
-    kids = kids.filter((c) => elName(c) !== "w:pStyle");
-    if (wantHeading) {
-        // w:pStyle must be the first child of w:pPr.
-        kids = [
-            makeEl("w:pStyle", [], { "w:val": `Heading${wantHeading}` }),
-            ...kids,
-        ];
+    if (!keepStyle) {
+        kids = kids.filter((c) => elName(c) !== "w:pStyle");
+        if (wantHeading) {
+            // w:pStyle must be the first child of w:pPr.
+            kids = [
+                makeEl("w:pStyle", [], { "w:val": `Heading${wantHeading}` }),
+                ...kids,
+            ];
+        }
     }
 
     // List membership. w:numPr lives inside w:pPr, after w:pStyle.
-    kids = kids.filter((c) => elName(c) !== "w:numPr");
+    if (!keepList) kids = kids.filter((c) => elName(c) !== "w:numPr");
     if (list) {
         const numPr = makeEl("w:numPr", [
             makeEl("w:ilvl", [], { "w:val": "0" }),
@@ -2076,8 +2088,14 @@ function buildFormattedParagraph(
     const pPr = applyParagraphProps(
         basePPr,
         para.align ?? null,
-        para.heading ?? null,
-        listNumId ? { numId: listNumId } : null,
+        // Absent means "keep what this paragraph already had"; see
+        // applyParagraphProps.
+        para.heading,
+        listNumId
+            ? { numId: listNumId }
+            : para.list === undefined
+              ? undefined
+              : null,
     );
     if (pPr) children.push(pPr);
     const runs = para.runs && para.runs.length ? para.runs : [{ text: para.text }];
@@ -2128,6 +2146,13 @@ export async function applyFormattedEdits(
         hasSectPr: boolean;
         headingLevel: number; // 0 = body text
         isListItem: boolean;
+        /**
+         * The children array this paragraph actually sits in. A paragraph
+         * inside a table cell belongs to that cell, not to the body, and has
+         * to be rebuilt where it lives or its text is duplicated into the
+         * body and the table keeps its old wording.
+         */
+        container: XNode[];
     }
     const paras: Para[] = [];
     const collect = (nodes: XNode[]) => {
@@ -2154,6 +2179,7 @@ export async function applyFormattedEdits(
                     isListItem: !!(
                         pPr && findChildByName(elChildren(pPr), "w:numPr")
                     ),
+                    container: nodes,
                 });
             } else if (
                 name === "w:tbl" ||
@@ -2222,9 +2248,24 @@ export async function applyFormattedEdits(
     // Build the replacement node for each ORIGINAL paragraph position, plus any
     // brand-new paragraphs inserted before it.
     // Walk both sequences together.
-    const newBodyParas: XNode[] = [];
+    // Replacements are bucketed against the original paragraph they belong
+    // with, so each one can be rebuilt inside the container it actually lives
+    // in — the body, a table cell, a content control.
+    const emitted = new Map<number, XNode[]>();
+    const trailing: XNode[] = [];
     let oi = 0;
     let nj = 0;
+    const newBodyParas = {
+        push(node: XNode) {
+            if (oi >= paras.length) {
+                trailing.push(node);
+                return;
+            }
+            const bucket = emitted.get(oi);
+            if (bucket) bucket.push(node);
+            else emitted.set(oi, [node]);
+        },
+    };
     const nearestBaseRPr = (): XNode | null => {
         // Prefer the previous emitted original paragraph's base, else the next.
         for (let k = oi - 1; k >= 0; k--) if (paras[k].baseRPr) return paras[k].baseRPr;
@@ -2258,9 +2299,11 @@ export async function applyFormattedEdits(
                 typeof ep.heading === "number" && ep.heading >= 1 && ep.heading <= 3
                     ? ep.heading
                     : 0;
-            const headingChanged = wantHeading !== currentHeading;
+            const headingChanged =
+                ep.heading !== undefined && wantHeading !== currentHeading;
             const wantList = ep.list === "bullet" || ep.list === "number";
-            const listChanged = wantList !== paras[oi].isListItem;
+            const listChanged =
+                ep.list !== undefined && wantList !== paras[oi].isListItem;
             const hasFormatting =
                 (ep.align && ep.align !== "left") ||
                 headingChanged ||
@@ -2318,24 +2361,41 @@ export async function applyFormattedEdits(
         }
     }
 
-    // Rebuild the body: replace the run of top-level w:p nodes with the new
-    // list, preserving any non-paragraph body children (tables, sdt, the final
-    // sectPr element that sits directly under body) in place.
-    const paraNodeSet = new Set(paras.map((p) => p.node));
-    const newBody: XNode[] = [];
-    let injected = false;
-    for (const n of bodyChildren) {
-        if (elName(n) === "w:p" && paraNodeSet.has(n)) {
-            if (!injected) {
-                for (const p of newBodyParas) newBody.push(p);
-                injected = true;
-            }
-            continue; // drop original paragraph (already re-emitted)
-        }
-        newBody.push(n);
+    // Put every paragraph back where it came from. Tables, content controls,
+    // and the section properties that close the body are left untouched.
+    const paraIndexByNode = new Map<XNode, number>();
+    paras.forEach((para, index) => paraIndexByNode.set(para.node, index));
+
+    // Paragraphs added past the end of the document belong in the body, after
+    // its last paragraph — never inside whatever table happened to come last.
+    let trailingAnchor = -1;
+    for (const [index, para] of paras.entries()) {
+        if (para.container === bodyChildren) trailingAnchor = index;
     }
-    if (!injected) for (const p of newBodyParas) newBody.push(p);
-    replaceBody(tree, newBody);
+
+    const containers = new Set(paras.map((para) => para.container));
+    for (const container of containers) {
+        const rebuilt: XNode[] = [];
+        for (const n of container) {
+            const index =
+                elName(n) === "w:p" ? paraIndexByNode.get(n) : undefined;
+            if (index === undefined) {
+                rebuilt.push(n);
+                continue;
+            }
+            for (const node of emitted.get(index) ?? []) rebuilt.push(node);
+            if (index === trailingAnchor) {
+                for (const node of trailing) rebuilt.push(node);
+            }
+        }
+        // The container array is the one held in the tree, so writing to it
+        // updates the document itself.
+        container.length = 0;
+        container.push(...rebuilt);
+    }
+    if (trailingAnchor === -1 && trailing.length > 0) {
+        bodyChildren.push(...trailing);
+    }
 
     const builder = createBuilder();
     setZipEntry(
