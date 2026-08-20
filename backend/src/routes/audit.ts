@@ -1,10 +1,11 @@
 // Audit history — GET /audit (JSON, paginated) + GET /audit/export (CSV).
-// Visibility: the caller's own events, plus events in projects they own or
-// that are shared with their email.
+// Visibility: the caller's own events, plus events in any matter they can
+// open — one they own, one naming them, or one the firm shares with them.
 
 import { Router } from "express";
 import { requireAuth, requireMfaIfEnrolled } from "../middleware/auth";
 import { createServerSupabase } from "../lib/supabase";
+import { listAccessibleProjectIds } from "../lib/access";
 import { normalizeDisplayName } from "../lib/userLookup";
 
 export const auditRouter = Router();
@@ -25,17 +26,7 @@ export async function accessibleProjectIds(
   userId: string,
   email: string | undefined,
 ): Promise<string[]> {
-  const ids = new Set<string>();
-  const own = await db.from("projects").select("id").eq("user_id", userId);
-  for (const row of (own.data ?? []) as { id: string }[]) ids.add(row.id);
-  if (email) {
-    const shared = await db
-      .from("projects")
-      .select("id")
-      .contains("shared_with", [email.trim().toLowerCase()]);
-    for (const row of (shared.data ?? []) as { id: string }[]) ids.add(row.id);
-  }
-  return [...ids];
+  return listAccessibleProjectIds(userId, email, db);
 }
 
 type AuditQuery = {

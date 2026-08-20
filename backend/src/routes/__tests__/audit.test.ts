@@ -141,8 +141,14 @@ describe("parseQuery", () => {
 
 /**
  * Chainable Supabase mock. `projects` select responses are keyed by whether the
- * query used .eq (owned) or .contains (shared). The audit_events builder
- * records the .or / .eq filter it was given so tests can assert scoping.
+ * query filtered on the owner (owned) or on who is named on the matter
+ * (shared). The audit_events builder records the .or / .eq filter it was given
+ * so tests can assert scoping.
+ *
+ * Anything else — including the firm-membership lookup — falls through to the
+ * audit builder, which cannot answer a single-row read, so these tests stand
+ * for someone who belongs to no firm. Firm-wide visibility is covered in
+ * lib/__tests__/firmAccess.test.ts.
  */
 function makeDb(
     owned: string[],
@@ -166,8 +172,15 @@ function makeDb(
                 mode = "owned";
                 return b;
             },
+            neq: () => b,
             contains: () => {
                 mode = "shared";
+                return b;
+            },
+            // How the shared-matter lookup is written today: a containment
+            // filter on the list of people named on the matter.
+            filter: (_column: string, operator: string) => {
+                if (operator === "cs") mode = "shared";
                 return b;
             },
             then: (resolve: (v: { data: { id: string }[] }) => unknown) =>
@@ -225,10 +238,23 @@ function makeDb(
         return b;
     }
 
+    // Nobody here belongs to a firm, so the only matters in play are one's own
+    // and those one is named on. Firm-wide visibility has its own tests in
+    // lib/__tests__/firmAccess.test.ts.
+    function firmMembersBuilder() {
+        const b: any = {
+            select: () => b,
+            eq: () => b,
+            maybeSingle: async () => ({ data: null, error: null }),
+        };
+        return b;
+    }
+
     const db = {
         from(table: string) {
             if (table === "projects") return projectsBuilder();
             if (table === "user_profiles") return profilesBuilder();
+            if (table === "firm_members") return firmMembersBuilder();
             return auditBuilder();
         },
     };

@@ -498,6 +498,26 @@ export function ProjectWorkspaceProvider({
                                       );
                                   }
                         }
+                        visibility={project.visibility ?? "private"}
+                        onVisibilityChange={
+                            project.is_owner === false
+                                ? undefined
+                                : async (next) => {
+                                      const updated = await updateProject(
+                                          projectId,
+                                          { visibility: next },
+                                      );
+                                      setProject((prev) =>
+                                          prev
+                                              ? {
+                                                    ...prev,
+                                                    visibility:
+                                                        updated.visibility,
+                                                }
+                                              : prev,
+                                      );
+                                  }
+                        }
                     />
                 )}
             </div>

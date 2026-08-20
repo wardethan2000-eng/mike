@@ -18,6 +18,7 @@ import type {
     OpenSourceWorkflowContributorMode,
     OpenSourceWorkflowResponse,
     Project,
+    ProjectVisibility,
     QuickAction,
     Workflow,
     WorkflowAddon,
@@ -383,11 +384,18 @@ export async function createProject(
     cm_number?: string,
     practice?: string,
     shared_with?: string[],
+    visibility?: ProjectVisibility,
 ): Promise<Project> {
     return apiRequest<Project>("/projects", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ name, cm_number, practice, shared_with }),
+        body: JSON.stringify({
+            name,
+            cm_number,
+            practice,
+            shared_with,
+            visibility,
+        }),
     });
 }
 
@@ -441,6 +449,11 @@ export interface UserProfile {
     legalResearchUs: boolean;
     quickActionsVisible: boolean;
     apiKeyStatus: ApiKeyStatus;
+    /** The firm this person belongs to, and what they may do in it. */
+    firm: { id: string; name: string } | null;
+    firm_role: "admin" | "attorney" | "paralegal" | null;
+    firm_status: "active" | "deactivated" | null;
+    can_edit_firm_library: boolean;
 }
 
 export interface UserLookupResult {
@@ -526,6 +539,172 @@ export async function exportAuditHistory(params: {
 
 export async function getUserProfile(): Promise<UserProfile> {
     return apiRequest<UserProfile>("/user/profile");
+}
+
+// ---------------------------------------------------------------------------
+// The firm
+// ---------------------------------------------------------------------------
+
+export type FirmRole = "admin" | "attorney" | "paralegal";
+export type FirmMemberStatus = "active" | "deactivated";
+
+export interface Firm {
+    id: string;
+    name: string;
+    address_lines: string[] | null;
+    phone: string | null;
+    website: string | null;
+    default_jurisdiction: string | null;
+    citation_style: string | null;
+}
+
+export interface FirmMember {
+    user_id: string;
+    email: string | null;
+    display_name: string | null;
+    role: FirmRole;
+    status: FirmMemberStatus;
+    can_edit_firm_library: boolean;
+    /** How many matters this person is responsible for. */
+    matter_count: number;
+    joined_at: string;
+    is_you: boolean;
+}
+
+export interface FirmInvite {
+    id: string;
+    email: string;
+    role: FirmRole;
+    token: string;
+    /** The link to pass on. Mike does not send the invitation itself. */
+    link: string;
+    expires_at: string;
+    accepted_at: string | null;
+    created_at: string;
+}
+
+export interface FirmMatterSummary {
+    id: string;
+    name: string;
+    cm_number: string | null;
+    user_id: string;
+    visibility: ProjectVisibility;
+    updated_at: string;
+}
+
+export async function getFirm(): Promise<Firm> {
+    return apiRequest<Firm>("/admin/firm");
+}
+
+export async function updateFirm(updates: {
+    name?: string;
+    address_lines?: string[];
+    phone?: string | null;
+    website?: string | null;
+    default_jurisdiction?: string | null;
+    citation_style?: string | null;
+}): Promise<Firm> {
+    return apiRequest<Firm>("/admin/firm", {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(updates),
+    });
+}
+
+export async function getFirmMembers(): Promise<FirmMember[]> {
+    return apiRequest<FirmMember[]>("/admin/members");
+}
+
+export async function updateFirmMember(
+    userId: string,
+    updates: {
+        role?: FirmRole;
+        status?: FirmMemberStatus;
+        can_edit_firm_library?: boolean;
+    },
+): Promise<{ ok: boolean }> {
+    return apiRequest(`/admin/members/${userId}`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(updates),
+    });
+}
+
+export async function getFirmInvites(): Promise<FirmInvite[]> {
+    return apiRequest<FirmInvite[]>("/admin/invites");
+}
+
+export async function createFirmInvite(
+    email: string,
+    role: FirmRole,
+): Promise<FirmInvite> {
+    return apiRequest<FirmInvite>("/admin/invites", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ email, role }),
+    });
+}
+
+export async function cancelFirmInvite(id: string): Promise<void> {
+    await apiRequest(`/admin/invites/${id}`, { method: "DELETE" });
+}
+
+export async function getFirmMatters(
+    ownerUserId?: string,
+): Promise<FirmMatterSummary[]> {
+    const qs = ownerUserId
+        ? `?owner_user_id=${encodeURIComponent(ownerUserId)}`
+        : "";
+    return apiRequest<FirmMatterSummary[]>(`/admin/projects${qs}`);
+}
+
+export async function reassignFirmMatter(
+    projectId: string,
+    newOwnerUserId: string,
+): Promise<{ ok: boolean }> {
+    return apiRequest(`/admin/projects/${projectId}/owner`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ user_id: newOwnerUserId }),
+    });
+}
+
+// --- Joining the firm. These two answer before anyone is signed in. ---
+
+export interface InviteDetails {
+    email: string;
+    role: FirmRole;
+    firm_name: string | null;
+}
+
+export async function lookUpInvite(token: string): Promise<InviteDetails> {
+    const response = await fetch(
+        `${API_BASE}/auth/invite/${encodeURIComponent(token)}`,
+        { cache: "no-store", headers: { Accept: "application/json" } },
+    );
+    if (!response.ok) throw await toApiError(response, "/auth/invite");
+    return (await response.json()) as InviteDetails;
+}
+
+export async function acceptInvite(input: {
+    token: string;
+    password: string;
+    displayName?: string;
+}): Promise<{ ok: boolean; email: string }> {
+    const response = await fetch(`${API_BASE}/auth/invite/accept`, {
+        method: "POST",
+        headers: {
+            Accept: "application/json",
+            "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+            token: input.token,
+            password: input.password,
+            display_name: input.displayName,
+        }),
+    });
+    if (!response.ok) throw await toApiError(response, "/auth/invite/accept");
+    return (await response.json()) as { ok: boolean; email: string };
 }
 
 /**
@@ -759,6 +938,8 @@ export async function updateProject(
         auto_remember?: boolean;
         /** Whether Mike looks for facts worth remembering at all. */
         suggest_facts?: boolean;
+        /** Whether the whole firm can open this matter, or only its own people. */
+        visibility?: ProjectVisibility;
         shared_with?: string[];
     },
 ): Promise<Project> {

@@ -19,6 +19,8 @@ import { modelsRouter } from "./routes/models";
 import { downloadsRouter } from "./routes/downloads";
 import { sourceDocumentsRouter } from "./routes/sourceDocuments";
 import { auditRouter } from "./routes/audit";
+import { adminRouter } from "./routes/admin";
+import { firmInvitesRouter } from "./routes/firmInvites";
 import { manifestPublicKey } from "./lib/manifestSigning";
 import { safeErrorLog } from "./lib/safeError";
 
@@ -93,6 +95,15 @@ const dataDeleteLimiter = makeLimiter({
   windowMs: hours(envInt("RATE_LIMIT_DATA_DELETE_WINDOW_HOURS", 1)),
   max: envInt("RATE_LIMIT_DATA_DELETE_MAX", 20),
   message: "Too many data deletion requests. Please try again later.",
+});
+
+// Joining the firm answers before anyone is signed in, so it is held to a
+// tighter limit than the rest: enough for a colleague mistyping a password,
+// not enough to work through invitation tokens by guesswork.
+const inviteLimiter = makeLimiter({
+  windowMs: hours(envInt("RATE_LIMIT_INVITE_WINDOW_HOURS", 1)),
+  max: envInt("RATE_LIMIT_INVITE_MAX", 20),
+  message: "Too many attempts. Please try again later.",
 });
 
 app.disable("x-powered-by");
@@ -204,6 +215,8 @@ app.use("/users", userRouter);
 app.use("/download", downloadsRouter);
 app.use("/documents", sourceDocumentsRouter);
 app.use("/audit", auditRouter);
+app.use("/admin", adminRouter);
+app.use("/auth", inviteLimiter, firmInvitesRouter);
 
 app.get("/health", (_req, res) => res.json({ ok: true }));
 

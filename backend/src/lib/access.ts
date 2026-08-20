@@ -1,17 +1,24 @@
 /**
  * Project / document access helpers.
  *
- * Sharing makes the previous "scope by user_id" pattern incorrect — a doc
- * can belong to user A's project that A has shared with B's email, and B
- * must still be able to read/edit it. These helpers centralize the
- * "owner OR shared project member" check so every route uses the same
- * logic instead of re-implementing the join.
+ * A matter can be opened by three sorts of person: the attorney responsible
+ * for it, anyone named on it by email, and — when the matter is the firm's
+ * rather than private — anyone still working at the firm. These helpers hold
+ * that rule once so every route asks the same question instead of
+ * re-implementing the join.
  *
- * Returned `isOwner` lets callers gate operations that should stay
- * owner-only (delete, rename, member management).
+ * The same rule is written once more in SQL, as `public.can_access_project`,
+ * for the list queries that run entirely in the database. Change one, change
+ * the other.
+ *
+ * Returned `isOwner` lets callers gate operations that should stay with the
+ * responsible attorney (delete, rename, changing who can see it). Firm
+ * administrators are allowed past those gates separately, by asking
+ * `isFirmAdmin`.
  */
 
 import type { createServerSupabase } from "./supabase";
+import { getActiveFirmId } from "./firm";
 
 type Db = ReturnType<typeof createServerSupabase>;
 
@@ -23,9 +30,19 @@ export type ProjectAccess =
               id: string;
               user_id: string;
               shared_with: string[] | null;
+              visibility?: string | null;
+              firm_id?: string | null;
           };
       }
     | { ok: false };
+
+/** Does this matter's own record put it in reach of everyone at the firm? */
+export function isFirmVisible(project: {
+    visibility?: string | null;
+    firm_id?: string | null;
+}): boolean {
+    return project.visibility === "firm" && !!project.firm_id;
+}
 
 export async function checkProjectAccess(
     projectId: string,
@@ -35,7 +52,7 @@ export async function checkProjectAccess(
 ): Promise<ProjectAccess> {
     const { data: project } = await db
         .from("projects")
-        .select("id, user_id, shared_with")
+        .select("id, user_id, shared_with, visibility, firm_id")
         .eq("id", projectId)
         .single();
     if (!project) return { ok: false };
@@ -43,6 +60,8 @@ export async function checkProjectAccess(
         id: string;
         user_id: string;
         shared_with: string[] | null;
+        visibility: string | null;
+        firm_id: string | null;
     };
     if (proj.user_id === userId) {
         return { ok: true, isOwner: true, project: proj };
@@ -54,6 +73,12 @@ export async function checkProjectAccess(
         sharedWith.some((e) => (e ?? "").toLowerCase() === email)
     ) {
         return { ok: true, isOwner: false, project: proj };
+    }
+    if (isFirmVisible(proj)) {
+        const firmId = await getActiveFirmId(db, userId);
+        if (firmId && firmId === proj.firm_id) {
+            return { ok: true, isOwner: false, project: proj };
+        }
     }
     return { ok: false };
 }
@@ -162,9 +187,9 @@ export async function filterAccessibleDocumentIds(
 }
 
 /**
- * Returns the set of project IDs the user can access — own projects plus
- * any project where their email is in `shared_with`. Used to scope chat
- * lists and similar collection queries.
+ * Returns the set of project IDs the user can access — their own matters,
+ * any matter naming their email, and every matter the firm shares with them.
+ * Used to scope chat lists and similar collection queries.
  */
 export async function listAccessibleProjectIds(
     userId: string,
@@ -172,22 +197,33 @@ export async function listAccessibleProjectIds(
     db: Db,
 ): Promise<string[]> {
     const normalizedEmail = userEmail?.trim().toLowerCase() ?? "";
-    const [{ data: own }, { data: shared }] = await Promise.all([
-        db.from("projects").select("id").eq("user_id", userId),
-        normalizedEmail
-            ? db
-                  .from("projects")
-                  .select("id")
-                  .filter(
-                      "shared_with",
-                      "cs",
-                      JSON.stringify([normalizedEmail]),
-                  )
-                  .neq("user_id", userId)
-            : Promise.resolve({ data: [] as { id: string }[] }),
-    ]);
+    const firmId = await getActiveFirmId(db, userId);
+    const [{ data: own }, { data: shared }, { data: firmWide }] =
+        await Promise.all([
+            db.from("projects").select("id").eq("user_id", userId),
+            normalizedEmail
+                ? db
+                      .from("projects")
+                      .select("id")
+                      .filter(
+                          "shared_with",
+                          "cs",
+                          JSON.stringify([normalizedEmail]),
+                      )
+                      .neq("user_id", userId)
+                : Promise.resolve({ data: [] as { id: string }[] }),
+            firmId
+                ? db
+                      .from("projects")
+                      .select("id")
+                      .eq("firm_id", firmId)
+                      .eq("visibility", "firm")
+                      .neq("user_id", userId)
+                : Promise.resolve({ data: [] as { id: string }[] }),
+        ]);
     const ids = new Set<string>();
     for (const p of (own ?? []) as { id: string }[]) ids.add(p.id);
     for (const p of (shared ?? []) as { id: string }[]) ids.add(p.id);
+    for (const p of (firmWide ?? []) as { id: string }[]) ids.add(p.id);
     return [...ids];
 }

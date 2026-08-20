@@ -4,6 +4,7 @@ import { requireAuth, requireMfaIfEnrolled } from "../middleware/auth";
 import { createServerSupabase } from "../lib/supabase";
 import { recordAudit } from "../lib/audit";
 import { getUiPreferences, saveUiPreferences } from "../lib/uiPreferences";
+import { getFirm, getMembership } from "../lib/firm";
 import {
     DEFAULT_TABULAR_MODEL,
     DEFAULT_TITLE_MODEL,
@@ -534,7 +535,22 @@ async function loadProfile(
         row = resetData as UserProfileRow;
     }
 
-    return { data: serializeProfile(row, options.apiKeyStatus), error: null };
+    // Where this person sits in the firm rides along with their profile: the
+    // app uses it to decide whether to offer the firm's administration screens
+    // at all. It is not what enforces them — /admin does that itself.
+    const membership = await getMembership(db, userId);
+    const firm = membership ? await getFirm(db) : null;
+
+    return {
+        data: {
+            ...serializeProfile(row, options.apiKeyStatus),
+            firm: firm ? { id: firm.id, name: firm.name } : null,
+            firm_role: membership?.role ?? null,
+            firm_status: membership?.status ?? null,
+            can_edit_firm_library: membership?.canEditFirmLibrary ?? false,
+        },
+        error: null,
+    };
 }
 
 // POST /user/profile

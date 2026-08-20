@@ -1,6 +1,7 @@
 import { Request, Response, NextFunction } from "express";
 import { createServerSupabase } from "../lib/supabase";
 import { syncProfileEmail } from "../lib/userLookup";
+import { getMembership } from "../lib/firm";
 
 const isDev = process.env.NODE_ENV !== "production";
 const devLog = (...args: Parameters<typeof console.log>) => {
@@ -132,6 +133,20 @@ export async function requireAuth(
       error: syncError.message,
     });
   }
+  // Somebody who has left the firm keeps neither their sign-in nor their
+  // access. The account is barred at the sign-in provider when they are
+  // deactivated, which stops them at the line above; this is the second lock,
+  // for the case where a session was already open.
+  const membership = await getMembership(admin, data.user.id);
+  if (membership && membership.status === "deactivated") {
+    res.status(403).json({
+      code: "account_deactivated",
+      detail: "This account has been deactivated.",
+    });
+    return;
+  }
+  res.locals.membership = membership;
+
   if (!(await enforceLoginMfaIfEnabled(req, res, admin, token))) {
     return;
   }

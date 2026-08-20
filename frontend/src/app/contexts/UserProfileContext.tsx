@@ -33,6 +33,10 @@ interface UserProfile {
     legalResearchUs: boolean;
     quickActionsVisible: boolean;
     apiKeys: ApiKeyState;
+    /** The firm this person belongs to, and what they may do in it. */
+    firm: { id: string; name: string } | null;
+    firmRole: "admin" | "attorney" | "paralegal" | null;
+    canEditFirmLibrary: boolean;
 }
 
 interface UserProfileContextType {
@@ -89,10 +93,17 @@ function toProfile(data: ApiUserProfile): UserProfile {
         };
     }
 
+    const { firm, firm_role, can_edit_firm_library, firm_status, ...rest } =
+        profile;
+    void firm_status;
+
     return {
-        ...profile,
+        ...rest,
         mfaOnLogin: profile.mfaOnLogin === true,
         apiKeys,
+        firm: firm ?? null,
+        firmRole: firm_role ?? null,
+        canEditFirmLibrary: can_edit_firm_library === true,
     };
 }
 
@@ -125,6 +136,9 @@ export function UserProfileProvider({ children }: { children: ReactNode }) {
                 legalResearchUs: true,
                 quickActionsVisible: true,
                 apiKeys: emptyApiKeys(),
+                firm: null,
+                firmRole: null,
+                canEditFirmLibrary: false,
             });
         } finally {
             setLoading(false);

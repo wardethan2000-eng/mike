@@ -193,16 +193,102 @@ alter table public.user_mcp_tool_audit_logs enable row level security;
 -- Projects and documents
 -- ---------------------------------------------------------------------------
 
+-- ---------------------------------------------------------------------------
+-- The firm
+-- ---------------------------------------------------------------------------
+-- One row. Mike began as single-user accounts, where everything was "mine" and
+-- sharing meant naming one colleague's email on one matter. A law firm needs
+-- the opposite default: people belong to the firm, and most work is the firm's.
+--
+-- Everything below keys off firm_id even though there is only ever one row, so
+-- that a second firm would be a data question rather than a rewrite.
+
+create table if not exists public.firms (
+  id uuid primary key default gen_random_uuid(),
+  name text not null,
+  address_lines text[] not null default '{}',
+  phone text,
+  website text,
+  -- Where the firm practises, and how it likes citations written. Sent as
+  -- context with the firm's questions.
+  default_jurisdiction text,
+  citation_style text,
+  -- A short note that rides along with every chat in the firm.
+  standing_instructions text,
+  -- Fonts and spacing used when a document is generated from scratch.
+  drafting_defaults jsonb,
+  -- Which models the firm allows. Null means every model the server offers.
+  allowed_models jsonb,
+  created_at timestamptz not null default now(),
+  updated_at timestamptz not null default now()
+);
+
+-- Who belongs to the firm, and what they may do.
+--
+-- `admin` runs the firm's settings and people; `attorney` and `paralegal` are
+-- the same in code today and differ in what they are given (a paralegal has no
+-- bar number to sign with). Deactivation, not deletion, is how someone leaves:
+-- their matters stay with the firm and get handed to a colleague.
+create table if not exists public.firm_members (
+  id uuid primary key default gen_random_uuid(),
+  firm_id uuid not null references public.firms(id) on delete cascade,
+  user_id uuid not null unique references auth.users(id) on delete cascade,
+  role text not null default 'attorney'
+    check (role in ('admin', 'attorney', 'paralegal')),
+  status text not null default 'active'
+    check (status in ('active', 'deactivated')),
+  -- Whether this person may change the firm's shared templates and forms.
+  can_edit_firm_library boolean not null default false,
+  created_at timestamptz not null default now(),
+  updated_at timestamptz not null default now()
+);
+
+create index if not exists firm_members_firm_idx
+  on public.firm_members(firm_id);
+
+create index if not exists firm_members_firm_role_idx
+  on public.firm_members(firm_id, role, status);
+
+-- Joining is by invitation only. Mail here is a local catcher rather than a
+-- real mail server, so an invitation is a link the admin passes on themselves;
+-- the token is what makes it usable exactly once, by one address.
+create table if not exists public.firm_invites (
+  id uuid primary key default gen_random_uuid(),
+  firm_id uuid not null references public.firms(id) on delete cascade,
+  email text not null,
+  role text not null default 'attorney'
+    check (role in ('admin', 'attorney', 'paralegal')),
+  token uuid not null unique default gen_random_uuid(),
+  created_by uuid not null references auth.users(id) on delete cascade,
+  expires_at timestamptz not null default (now() + interval '14 days'),
+  accepted_at timestamptz,
+  accepted_user_id uuid references auth.users(id) on delete set null,
+  created_at timestamptz not null default now()
+);
+
+create index if not exists firm_invites_email_idx
+  on public.firm_invites(lower(email));
+
+create index if not exists firm_invites_firm_idx
+  on public.firm_invites(firm_id, created_at desc);
+
 create table if not exists public.projects (
   id uuid primary key default gen_random_uuid(),
-  user_id uuid not null references auth.users(id) on delete cascade,
+  -- The responsible attorney. Deliberately `restrict`: a matter belongs to the
+  -- firm, so deleting an account must not quietly take its matters with it.
+  -- Whoever leaves has their matters handed over first.
+  user_id uuid not null references auth.users(id) on delete restrict,
+  firm_id uuid references public.firms(id) on delete set null,
   name text not null,
   cm_number text,
   practice text,
   -- Standing instructions for the matter, written by the lawyer and sent
   -- with every question asked inside it.
   overview text,
-  visibility text not null default 'private',
+  -- 'private' — only the owner and anyone named in shared_with.
+  -- 'firm'    — every active member of firm_id, plus anyone named.
+  visibility text not null default 'private'
+    check (visibility in ('private', 'firm')),
   shared_with jsonb not null default '[]'::jsonb,
   created_at timestamptz not null default now(),
   updated_at timestamptz not null default now()
@@ -216,6 +302,61 @@ create index if not exists projects_updated_at_idx
 
 create index if not exists projects_shared_with_idx
   on public.projects using gin (shared_with);
+
+create index if not exists projects_firm_visibility_idx
+  on public.projects(firm_id, visibility);
+
+-- ---------------------------------------------------------------------------
+-- Who can open a matter
+-- ---------------------------------------------------------------------------
+-- The rule lived in seven copies across the queries below, with a comment
+-- asking whoever changed one to remember the other six. Firm visibility made
+-- that a bad bet, so the rule is written once here and called from each.
+--
+-- Both helpers are single-statement SQL functions, which Postgres inlines into
+-- the calling query, so this reads as a helper without costing a call per row.
+
+create or replace function public.active_member_firm_id(p_user_id text)
+returns uuid
+language sql
+stable
+as $$
+  select fm.firm_id
+  from public.firm_members fm
+  where fm.user_id::text = p_user_id
+    and fm.status = 'active'
+  limit 1;
+$$;
+
+create or replace function public.can_access_project(
+  p_owner_id uuid,
+  p_shared_with jsonb,
+  p_visibility text,
+  p_project_firm_id uuid,
+  p_user_id text,
+  p_user_email text
+)
+returns boolean
+language sql
+stable
+as $$
+  select
+    -- The responsible attorney.
+    p_owner_id::text = p_user_id
+    -- Someone named on the matter by email.
+    or (
+      coalesce(p_user_email, '') <> ''
+      and p_owner_id::text <> p_user_id
+      and p_shared_with @> jsonb_build_array(p_user_email)
+    )
+    -- Anyone still working at the firm, when the matter is the firm's.
+    or (
+      coalesce(p_visibility, 'private') = 'firm'
+      and p_project_firm_id is not null
+      and p_owner_id::text <> p_user_id
+      and p_project_firm_id = public.active_member_firm_id(p_user_id)
+    );
+$$;
 
 create table if not exists public.project_subfolders (
   id uuid primary key default gen_random_uuid(),
@@ -919,6 +1060,7 @@ returns table (
   cm_number text,
   practice text,
   shared_with jsonb,
+  visibility text,
   created_at timestamptz,
   updated_at timestamptz,
   is_owner boolean,
@@ -934,11 +1076,8 @@ as $$
   with visible_projects as (
     select p.*
     from public.projects p
-    where p.user_id::text = p_user_id
-       or (
-        coalesce(p_user_email, '') <> ''
-        and p.user_id::text <> p_user_id
-        and p.shared_with @> jsonb_build_array(p_user_email)
+    where public.can_access_project(
+        p.user_id, p.shared_with, p.visibility, p.firm_id, p_user_id, p_user_email
       )
   ),
   document_counts as (
@@ -966,6 +1105,7 @@ as $$
     vp.cm_number,
     vp.practice,
     vp.shared_with,
+    coalesce(vp.visibility, 'private') as visibility,
     vp.created_at,
     vp.updated_at,
     vp.user_id::text = p_user_id as is_owner,
@@ -1065,11 +1205,8 @@ as $$
   with accessible_projects as (
     select p.id
     from public.projects p
-    where p.user_id::text = p_user_id
-       or (
-        coalesce(p_user_email, '') <> ''
-        and p.user_id::text <> p_user_id
-        and p.shared_with @> jsonb_build_array(p_user_email)
+    where public.can_access_project(
+        p.user_id, p.shared_with, p.visibility, p.firm_id, p_user_id, p_user_email
       )
   ),
   visible_reviews as (
@@ -1257,11 +1394,8 @@ as $$
   with accessible_projects as (
     select p.id
     from public.projects p
-    where p.user_id::text = p_user_id
-       or (
-        coalesce(p_user_email, '') <> ''
-        and p.user_id::text <> p_user_id
-        and p.shared_with @> jsonb_build_array(p_user_email)
+    where public.can_access_project(
+        p.user_id, p.shared_with, p.visibility, p.firm_id, p_user_id, p_user_email
       )
   )
   select tr.id, tr.user_id::text as user_id
@@ -1511,12 +1645,9 @@ as $$
   with visible_projects as (
     select p.user_id, nullif(trim(p.practice), '') as practice
     from public.projects p
-    where p.user_id::text = p_user_id
-       or (
-         coalesce(p_user_email, '') <> ''
-         and p.user_id::text <> p_user_id
-         and p.shared_with @> jsonb_build_array(p_user_email)
-       )
+    where public.can_access_project(
+        p.user_id, p.shared_with, p.visibility, p.firm_id, p_user_id, p_user_email
+      )
   ),
   distinct_owners as (
     select distinct vp.user_id
@@ -1665,6 +1796,7 @@ returns table (
   cm_number text,
   practice text,
   shared_with jsonb,
+  visibility text,
   created_at timestamptz,
   updated_at timestamptz,
   is_owner boolean,
@@ -1680,13 +1812,8 @@ as $$
   with visible_projects as (
     select p.*
     from public.projects p
-    where (
-        p.user_id::text = p_user_id
-        or (
-          coalesce(p_user_email, '') <> ''
-          and p.user_id::text <> p_user_id
-          and p.shared_with @> jsonb_build_array(p_user_email)
-        )
+    where public.can_access_project(
+        p.user_id, p.shared_with, p.visibility, p.firm_id, p_user_id, p_user_email
       )
       and (
         coalesce(p_scope, 'all') = 'all'
@@ -1734,6 +1861,7 @@ as $$
     vp.cm_number,
     vp.practice,
     vp.shared_with,
+    coalesce(vp.visibility, 'private') as visibility,
     vp.created_at,
     vp.updated_at,
     vp.user_id::text = p_user_id as is_owner,
@@ -1773,11 +1901,10 @@ as $$
 $$;
 
 -- Lightweight companion for bulk "select all matching" actions — id + owning
--- user only, no count joins. Duplicates visible_projects' predicate rather
--- than delegating to get_projects_overview (same rationale as
--- get_tabular_review_ids_overview: the count CTEs there would be pure waste
--- for a caller that only wants ids). Keep this predicate in sync by hand if
--- visible_projects above ever changes.
+-- user only, no count joins. Runs its own query rather than delegating to
+-- get_projects_overview (same rationale as get_tabular_review_ids_overview:
+-- the count CTEs there would be pure waste for a caller that only wants ids).
+-- Both share who-can-open-it through public.can_access_project.
 --
 -- Paginated (not "return everything") because PostgREST enforces its own
 -- row cap on every RPC response and truncates silently rather than erroring;
@@ -1801,13 +1928,8 @@ stable
 as $$
   select p.id, p.user_id::text as user_id
   from public.projects p
-  where (
-      p.user_id::text = p_user_id
-      or (
-        coalesce(p_user_email, '') <> ''
-        and p.user_id::text <> p_user_id
-        and p.shared_with @> jsonb_build_array(p_user_email)
-      )
+  where public.can_access_project(
+      p.user_id, p.shared_with, p.visibility, p.firm_id, p_user_id, p_user_email
     )
     and (
       coalesce(p_scope, 'all') = 'all'
@@ -2057,12 +2179,9 @@ as $$
     p.updated_at,
     p.user_id::text = p_user_id as is_owner
   from public.projects p
-  where p.user_id::text = p_user_id
-     or (
-       coalesce(p_user_email, '') <> ''
-       and p.user_id::text <> p_user_id
-       and p.shared_with @> jsonb_build_array(p_user_email)
-     )
+  where public.can_access_project(
+      p.user_id, p.shared_with, p.visibility, p.firm_id, p_user_id, p_user_email
+    )
   order by p.updated_at desc, p.created_at desc, p.id asc
   limit greatest(coalesce(p_limit, 11), 1)
   offset greatest(coalesce(p_offset, 0), 0);
@@ -2145,8 +2264,14 @@ create table if not exists public.audit_events (
 create index if not exists audit_events_user_created on public.audit_events (user_id, created_at desc);
 create index if not exists audit_events_project_created on public.audit_events (project_id, created_at desc);
 alter table public.audit_events enable row level security;
+alter table public.firms enable row level security;
+alter table public.firm_members enable row level security;
+alter table public.firm_invites enable row level security;
 
 revoke all on public.user_profiles from anon, authenticated;
+revoke all on public.firms from anon, authenticated;
+revoke all on public.firm_members from anon, authenticated;
+revoke all on public.firm_invites from anon, authenticated;
 revoke all on public.projects from anon, authenticated;
 revoke all on public.project_subfolders from anon, authenticated;
 revoke all on public.library_folders from anon, authenticated;

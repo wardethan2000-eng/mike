@@ -8,7 +8,13 @@ import {
     useRef,
     type UIEvent,
 } from "react";
-import { PanelLeft, ChevronsUpDown, ChevronDown, Loader2 } from "lucide-react";
+import {
+    PanelLeft,
+    ChevronsUpDown,
+    ChevronDown,
+    Loader2,
+    Building2,
+} from "lucide-react";
 import { useAuth } from "@/app/contexts/AuthContext";
 import { useUserProfile } from "@/app/contexts/UserProfileContext";
 import { useChatHistoryContext } from "@/app/contexts/ChatHistoryContext";
@@ -624,6 +630,23 @@ export function AppSidebar({ isOpen, onToggle }: AppSidebarProps) {
                                         <SettingsSkeuoIcon className="h-4 w-4" />
                                         Settings
                                     </button>
+                                    {profile?.firmRole === "admin" && (
+                                        <button
+                                            onClick={() => {
+                                                router.push("/admin");
+                                                setIsDropdownOpen(false);
+                                            }}
+                                            className={cn(
+                                                "w-full px-4 py-2 text-left text-sm text-gray-700 flex items-center gap-2 rounded-md",
+                                                APP_SURFACE_HOVER_CLASS,
+                                                pathname.startsWith("/admin") &&
+                                                    APP_SURFACE_ACTIVE_CLASS,
+                                            )}
+                                        >
+                                            <Building2 className="h-4 w-4" />
+                                            Administration
+                                        </button>
+                                    )}
                                     <button
                                         onClick={() => {
                                             setIsDropdownOpen(false);

@@ -29,6 +29,8 @@ export interface LibraryFolder {
     updated_at: string;
 }
 
+export type ProjectVisibility = "private" | "firm";
+
 export interface Project {
     id: string;
     user_id: string;
@@ -44,6 +46,13 @@ export interface Project {
     auto_remember?: boolean;
     /** Whether Mike looks for facts worth remembering at all. */
     suggest_facts?: boolean;
+    /**
+     * Who the matter is open to: "firm" means everyone still working at the
+     * firm, "private" means only the responsible attorney and anyone named
+     * below. Naming people works either way.
+     */
+    visibility?: ProjectVisibility;
+    firm_id?: string | null;
     shared_with: string[];
     created_at: string;
     updated_at: string;

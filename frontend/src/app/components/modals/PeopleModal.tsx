@@ -3,6 +3,7 @@
 import { useEffect, useMemo, useState } from "react";
 import { User, Loader2 } from "lucide-react";
 import type { ProjectPeople } from "@/app/lib/mikeApi";
+import type { ProjectVisibility } from "@/app/components/shared/types";
 import { AddUserInput } from "../shared/AddUserInput";
 import { Modal } from "./Modal";
 
@@ -37,6 +38,16 @@ interface Props {
      * sync its local state on success. Throw to surface an error inline.
      */
     onSharedWithChange?: (sharedWith: string[]) => Promise<void> | void;
+    /**
+     * Whether the whole firm can open this matter. Left out for things that
+     * do not belong to a firm, such as a tabular review, and the choice is
+     * then not offered at all.
+     */
+    visibility?: ProjectVisibility;
+    /** Persist a change of visibility. Throw to surface an error inline. */
+    onVisibilityChange?: (
+        visibility: ProjectVisibility,
+    ) => Promise<void> | void;
 }
 
 type RosterRow = {
@@ -58,8 +69,12 @@ export function PeopleModal({
     currentUserEmail,
     breadcrumb,
     onSharedWithChange,
+    visibility,
+    onVisibilityChange,
 }: Props) {
     const [busy, setBusy] = useState<"add" | "remove" | null>(null);
+    const [visibilityBusy, setVisibilityBusy] = useState(false);
+    const [visibilityError, setVisibilityError] = useState<string | null>(null);
     const [removingEmail, setRemovingEmail] = useState<string | null>(null);
     const [memberMenuEmail, setMemberMenuEmail] = useState<string | null>(null);
     const [error, setError] = useState<string | null>(null);
@@ -246,9 +261,95 @@ export function PeopleModal({
         }
     }
 
+    async function handleVisibility(next: ProjectVisibility) {
+        if (!onVisibilityChange || next === visibility || visibilityBusy) return;
+        setVisibilityBusy(true);
+        setVisibilityError(null);
+        try {
+            await onVisibilityChange(next);
+        } catch (err) {
+            setVisibilityError(
+                err instanceof Error
+                    ? err.message
+                    : "Couldn't change who can see this. Try again.",
+            );
+        } finally {
+            setVisibilityBusy(false);
+        }
+    }
+
     return (
         <Modal open={open} onClose={onClose} breadcrumbs={breadcrumb}>
             <div className="flex min-h-0 flex-1 flex-col gap-5 pb-5">
+                {/* Who the matter is open to, before the list of named people:
+                    the firm-wide choice is the one that decides most of it. */}
+                {visibility && (
+                    <section className="space-y-2">
+                        <h3 className="text-xs font-medium text-gray-500">
+                            Who can see this matter
+                        </h3>
+                        <div className="inline-flex rounded-lg bg-gray-100 p-1">
+                            {(
+                                [
+                                    {
+                                        value: "firm" as const,
+                                        label: "Everyone at the firm",
+                                    },
+                                    {
+                                        value: "private" as const,
+                                        label: "Only people I add",
+                                    },
+                                ]
+                            ).map((option) => {
+                                const active = visibility === option.value;
+                                return (
+                                    <button
+                                        key={option.value}
+                                        type="button"
+                                        aria-pressed={active}
+                                        disabled={
+                                            !onVisibilityChange || visibilityBusy
+                                        }
+                                        onClick={() =>
+                                            void handleVisibility(option.value)
+                                        }
+                                        className={
+                                            active
+                                                ? "rounded-md bg-white px-3 py-1.5 text-sm font-medium text-gray-900 shadow-sm"
+                                                : "rounded-md px-3 py-1.5 text-sm text-gray-600 transition-colors hover:text-gray-900 disabled:hover:text-gray-600"
+                                        }
+                                    >
+                                        {option.label}
+                                    </button>
+                                );
+                            })}
+                            {visibilityBusy && (
+                                <Loader2 className="ml-2 h-4 w-4 shrink-0 animate-spin self-center text-gray-400" />
+                            )}
+                        </div>
+                        <p className="text-xs text-gray-500">
+                            {visibility === "firm"
+                                ? "Anyone working at the firm can open this matter."
+                                : "Only you and the people listed below can open this matter."}
+                            {!onVisibilityChange &&
+                                " Only the attorney responsible for it can change this."}
+                        </p>
+                        {visibilityError && (
+                            <div className="flex items-start justify-between gap-3 rounded bg-red-50 px-3 py-2 text-xs text-red-600">
+                                <span>{visibilityError}</span>
+                                <button
+                                    type="button"
+                                    onClick={() => setVisibilityError(null)}
+                                    aria-label="Dismiss"
+                                    className="shrink-0 text-red-400 hover:text-red-600"
+                                >
+                                    ×
+                                </button>
+                            </div>
+                        )}
+                    </section>
+                )}
+
                 {/* Add-member row */}
                 {onSharedWithChange && (
                     <section className="space-y-2">

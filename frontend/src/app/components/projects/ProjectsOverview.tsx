@@ -653,6 +653,14 @@ export function ProjectsOverview() {
                                     <span className="min-w-0 flex-1 truncate text-xs text-gray-800">
                                         {project.name}
                                     </span>
+                                    {project.visibility === "firm" && (
+                                        <span
+                                            title="Everyone at the firm can open this matter"
+                                            className="ml-2 shrink-0 rounded-full bg-gray-100 px-1.5 py-0.5 text-[10px] font-medium text-gray-500"
+                                        >
+                                            Firm
+                                        </span>
+                                    )}
                                 </TablePrimaryCell>
 
                                 <TableCell className="ml-auto w-32">

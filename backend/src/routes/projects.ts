@@ -25,7 +25,12 @@ import {
   readInBackground,
 } from "../lib/documentRendition";
 import { indexInBackground } from "../lib/passageIndex";
-import { checkProjectAccess } from "../lib/access";
+import { checkProjectAccess, isFirmVisible } from "../lib/access";
+import {
+  getActiveFirmId,
+  getMembership,
+  isFirmAdmin,
+} from "../lib/firm";
 import {
   saveLegalSourceToProject,
   type SaveLegalSourceInput,
@@ -67,6 +72,19 @@ function normalizeOptionalString(value: unknown) {
  * it has to stay short enough to be affordable. Roughly two pages of text.
  */
 export const PROJECT_OVERVIEW_MAX_CHARS = 4000;
+
+/** Who a matter is open to: only the people named on it, or the whole firm. */
+export const PROJECT_VISIBILITIES = ["private", "firm"] as const;
+export type ProjectVisibility = (typeof PROJECT_VISIBILITIES)[number];
+
+export function isProjectVisibility(
+  value: unknown,
+): value is ProjectVisibility {
+  return (
+    typeof value === "string" &&
+    (PROJECT_VISIBILITIES as readonly string[]).includes(value)
+  );
+}
 
 function normalizeOverview(value: unknown) {
   if (typeof value !== "string") return null;
@@ -387,15 +405,22 @@ projectsRouter.get("/", requireAuth, async (req, res) => {
 projectsRouter.post("/", requireAuth, async (req, res) => {
   const userId = res.locals.userId as string;
   const userEmail = res.locals.userEmail as string | undefined;
-  const { name, cm_number, practice, overview, shared_with } = req.body as {
-    name: string;
-    cm_number?: string;
-    practice?: string;
-    overview?: string;
-    shared_with?: string[];
-  };
+  const { name, cm_number, practice, overview, shared_with, visibility } =
+    req.body as {
+      name: string;
+      cm_number?: string;
+      practice?: string;
+      overview?: string;
+      shared_with?: string[];
+      visibility?: string;
+    };
   if (!name?.trim())
     return void res.status(400).json({ detail: "name is required" });
+  if (visibility !== undefined && !isProjectVisibility(visibility)) {
+    return void res
+      .status(400)
+      .json({ detail: "visibility must be 'private' or 'firm'." });
+  }
   const normalizedUserEmail = userEmail?.trim().toLowerCase();
   const cleanedSharedWith: string[] = [];
   const seenSharedEmails = new Set<string>();
@@ -422,14 +447,27 @@ projectsRouter.post("/", requireAuth, async (req, res) => {
     });
   }
 
+  // A matter belongs to the firm unless someone says otherwise: that is how a
+  // firm works, and a private matter is the exception worth choosing. Somebody
+  // who is not a member of the firm has nowhere to share it, so theirs stays
+  // private.
+  const firmId = await getActiveFirmId(db, userId);
+  const resolvedVisibility = !firmId
+    ? "private"
+    : isProjectVisibility(visibility)
+      ? visibility
+      : "firm";
+
   const { data, error } = await db
     .from("projects")
     .insert({
       user_id: userId,
+      firm_id: firmId,
       name: name.trim(),
       cm_number: normalizeOptionalString(cm_number),
       practice: normalizeOptionalString(practice),
       overview: normalizeOverview(overview),
+      visibility: resolvedVisibility,
       shared_with: cleanedSharedWith,
     })
     .select("*")
@@ -461,6 +499,16 @@ async function handleProjectDirectorySearch(req: Request, res: Response) {
         .from("projects")
         .select("*")
         .contains("shared_with", [normalizedUserEmail]),
+    );
+  }
+  const searchFirmId = await getActiveFirmId(db, userId);
+  if (searchFirmId) {
+    projectQueries.push(
+      db
+        .from("projects")
+        .select("*")
+        .eq("firm_id", searchFirmId)
+        .eq("visibility", "firm"),
     );
   }
   const projectResults = await Promise.all(projectQueries);
@@ -704,21 +752,13 @@ projectsRouter.get("/:projectId/people", requireAuth, async (req, res) => {
   const { projectId } = req.params;
   const db = createServerSupabase();
 
-  const { data: project } = await db
-    .from("projects")
-    .select("id, user_id, shared_with")
-    .eq("id", projectId)
-    .single();
-  if (!project)
+  const access = await checkProjectAccess(projectId, userId, userEmail, db);
+  if (!access.ok)
     return void res.status(404).json({ detail: "Project not found" });
-
-  const isOwner = project.user_id === userId;
+  const project = access.project;
   const sharedWith = (
     Array.isArray(project.shared_with) ? (project.shared_with as string[]) : []
   ).map((e) => e.toLowerCase());
-  const isShared = !!userEmail && sharedWith.includes(userEmail.toLowerCase());
-  if (!isOwner && !isShared)
-    return void res.status(404).json({ detail: "Project not found" });
 
   // Use the mirrored profile email so sharing checks do not scan auth.users.
   const { userByEmail, userById } = await loadProfileUsersByEmail(db);
@@ -799,6 +839,14 @@ projectsRouter.patch("/:projectId", requireAuth, async (req, res) => {
   if ("suggest_facts" in req.body) {
     updates.suggest_facts = req.body.suggest_facts === true;
   }
+  if ("visibility" in req.body) {
+    if (!isProjectVisibility(req.body.visibility)) {
+      return void res
+        .status(400)
+        .json({ detail: "visibility must be 'private' or 'firm'." });
+    }
+    updates.visibility = req.body.visibility;
+  }
   if (Array.isArray(req.body.shared_with)) {
     // Normalise: lowercase + dedupe + drop empties.
     const normalizedUserEmail = userEmail?.trim().toLowerCase();
@@ -832,11 +880,40 @@ projectsRouter.patch("/:projectId", requireAuth, async (req, res) => {
     }
   }
 
+  // Changing a matter's details belongs to the attorney responsible for it. A
+  // firm administrator can step in on the firm's own matters — covering
+  // somebody who has left — but a private matter stays between the people on
+  // it, whatever anyone's job title is. Handing a departed colleague's matters
+  // to someone else is a separate, recorded action under /admin.
+  const access = await checkProjectAccess(projectId, userId, userEmail, db);
+  if (!access.ok)
+    return void res.status(404).json({ detail: "Project not found" });
+  const mayEdit =
+    access.isOwner ||
+    (isFirmVisible(access.project) &&
+      isFirmAdmin(await getMembership(db, userId)));
+  if (!mayEdit) {
+    return void res.status(403).json({
+      detail: "Only the attorney responsible for this matter can change it.",
+    });
+  }
+  if (updates.visibility === "firm") {
+    // A matter started before its attorney joined the firm has no firm on it
+    // yet. Attach it now, otherwise "the whole firm" would quietly mean
+    // nobody.
+    const ownerFirmId = await getActiveFirmId(db, access.project.user_id);
+    if (!ownerFirmId) {
+      return void res.status(400).json({
+        detail: "This matter cannot be shared with the firm.",
+      });
+    }
+    if (!access.project.firm_id) updates.firm_id = ownerFirmId;
+  }
+
   const { data, error } = await db
     .from("projects")
     .update({ ...updates, updated_at: new Date().toISOString() })
     .eq("id", projectId)
-    .eq("user_id", userId)
     .select("*")
     .single();
   if (error || !data)
@@ -867,10 +944,29 @@ projectsRouter.patch("/:projectId", requireAuth, async (req, res) => {
 // DELETE /projects/:projectId
 projectsRouter.delete("/:projectId", requireAuth, async (req, res) => {
   const userId = res.locals.userId as string;
+  const userEmail = res.locals.userEmail as string | undefined;
   const { projectId } = req.params;
   const db = createServerSupabase();
+  // Same rule as editing: the responsible attorney, or an administrator on one
+  // of the firm's own matters.
+  const access = await checkProjectAccess(projectId, userId, userEmail, db);
+  if (!access.ok)
+    return void res.status(404).json({ detail: "Project not found" });
+  const mayDelete =
+    access.isOwner ||
+    (isFirmVisible(access.project) &&
+      isFirmAdmin(await getMembership(db, userId)));
+  if (!mayDelete) {
+    return void res.status(403).json({
+      detail: "Only the attorney responsible for this matter can delete it.",
+    });
+  }
   try {
-    const deletedCount = await deleteUserProjects(db, userId, [projectId]);
+    const deletedCount = await deleteUserProjects(
+      db,
+      access.project.user_id,
+      [projectId],
+    );
     if (deletedCount === 0)
       return void res.status(404).json({ detail: "Project not found" });
     res.status(204).send();
