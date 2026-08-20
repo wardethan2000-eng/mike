@@ -20,6 +20,7 @@ import { FileTypeIcon } from "@/app/components/shared/FileTypeIcon";
 import { PdfView } from "@/app/components/shared/views/PdfView";
 import { DocxView } from "@/app/components/shared/views/DocxView";
 import { SpreadsheetView } from "@/app/components/shared/views/SpreadsheetView";
+import { RichDocxEditor } from "@/app/components/assistant/RichDocxEditor";
 import { PillButton } from "@/app/components/ui/pill-button";
 import { WarningPopup } from "@/app/components/popups/WarningPopup";
 import type { Document } from "@/app/components/shared/types";
@@ -99,6 +100,7 @@ export function DocumentSidePanel({
     onClose,
     onLoadVersions,
     onSelectVersion,
+    onDownloadDocument,
     onDownloadVersion,
     onRenameVersion,
     onDeleteVersion,
@@ -293,6 +295,18 @@ export function DocumentSidePanel({
         isDocxFilename(selectedFilename) ||
         selectedFileTypeKey === "docx" ||
         selectedFileTypeKey === "doc";
+    // Editing writes a new version of the document, so it only makes sense on
+    // the version that is current. An older one, and a passage arrived at from
+    // a citation or a search result, both stay as they are to look at.
+    const viewingCurrentVersion =
+        selectedVersionId != null && currentVersionId != null
+            ? selectedVersionId === currentVersionId
+            : selectedVersionId == null || currentVersionId == null;
+    // A highlight carrying no quote is not really a highlight — opening a file
+    // from the matter's front page sends an empty one — so test the quote, the
+    // same way highlightQuotes just below does.
+    const canEditDocx =
+        selectedIsDocx && viewingCurrentVersion && !highlight?.quote.trim();
     const selectedSizeBytes =
         selectedVersion?.size_bytes === undefined
             ? doc.size_bytes
@@ -545,6 +559,29 @@ export function DocumentSidePanel({
                     </div>
                 </div>
                 <div className="flex shrink-0 items-center gap-1.5">
+                    <button
+                        type="button"
+                        onClick={() => {
+                            if (
+                                selectedVersionId &&
+                                selectedVersionId !== currentVersionId
+                            ) {
+                                void onDownloadVersion(
+                                    doc.id,
+                                    selectedVersionId,
+                                    selectedFilename,
+                                );
+                                return;
+                            }
+                            void onDownloadDocument(doc.id);
+                        }}
+                        className="flex h-7 shrink-0 items-center gap-1 rounded-full border border-white/70 bg-white/55 px-2.5 text-[11px] font-medium text-gray-600 shadow-[inset_0_1px_0_rgba(255,255,255,0.75),inset_0_-1px_0_rgba(255,255,255,0.55),0_6px_18px_rgba(15,23,42,0.08)] backdrop-blur-xl transition-colors hover:bg-white/75 hover:text-gray-800"
+                        title={`Download ${selectedFilename}`}
+                        aria-label={`Download ${selectedFilename}`}
+                    >
+                        <Download className="h-3.5 w-3.5" />
+                        <span className="hidden md:inline">Download</span>
+                    </button>
                     <div className="flex h-7 items-center rounded-full bg-gray-200/70 p-0.5 md:hidden">
                         <button
                             type="button"
@@ -621,6 +658,13 @@ export function DocumentSidePanel({
                                 key={`${selectedVersionId ?? "current"}:${selectedUploadedAt ?? ""}:${selectedSizeBytes ?? ""}`}
                                 documentId={doc.id}
                                 versionId={selectedVersionId}
+                            />
+                        ) : canEditDocx ? (
+                            <RichDocxEditor
+                                key={`${selectedVersionId ?? "current"}:${selectedUploadedAt ?? ""}:${selectedSizeBytes ?? ""}`}
+                                documentId={doc.id}
+                                versionId={selectedVersionId}
+                                onSaved={() => void onLoadVersions(doc.id)}
                             />
                         ) : selectedIsDocx ? (
                             <DocxView
