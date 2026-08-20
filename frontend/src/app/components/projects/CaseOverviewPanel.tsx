@@ -48,6 +48,7 @@ export function CaseOverviewPanel({
     onSaved,
     onAutoRememberChange,
     onOpenDocument,
+    onPendingCountChange,
     refreshSignal = 0,
 }: {
     projectId: string;
@@ -62,6 +63,8 @@ export function CaseOverviewPanel({
     onSaved?: (overview: string | null) => void;
     onAutoRememberChange?: (autoRemember: boolean) => Promise<void> | void;
     onOpenDocument?: (documentId: string, filename: string) => void;
+    /** So the page can mark the panel button when suggestions are waiting. */
+    onPendingCountChange?: (pending: number) => void;
     /** Bumped when a chat answer finishes, so new suggestions are picked up. */
     refreshSignal?: number;
 }) {
@@ -241,6 +244,7 @@ export function CaseOverviewPanel({
                     canChangeAutoRemember={canEdit}
                     onOpenDocument={onOpenDocument}
                     onAutoRememberChange={onAutoRememberChange}
+                    onPendingCountChange={onPendingCountChange}
                     refreshSignal={refreshSignal}
                 />
             </div>

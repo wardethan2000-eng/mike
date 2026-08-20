@@ -13,6 +13,7 @@ import { createServerSupabase } from "../lib/supabase";
 import { checkProjectAccess } from "../lib/access";
 import { safeErrorLog } from "../lib/safeError";
 import { fingerprintMemory } from "../lib/memoryEmbedding";
+import { recordAudit } from "../lib/audit";
 import {
     MEMORY_CATEGORIES,
     MEMORY_BODY_MAX_CHARS,
@@ -36,6 +37,36 @@ type MemoryRow = {
 };
 
 export const projectMemoriesRouter = Router({ mergeParams: true });
+
+/**
+ * Every change to what a matter remembers is recorded, because a fact that
+ * shapes every later answer is the sort of thing someone will one day need to
+ * account for: who wrote it down, who accepted Mike's version of it, who
+ * changed the date, who took it out. Fire-and-forget — recording must never
+ * stop the change itself.
+ */
+function noteInHistory(
+    db: ReturnType<typeof createServerSupabase>,
+    res: { locals: Record<string, unknown> },
+    action: string,
+    projectId: string,
+    memory: { id: string; body: string; category?: string } | null,
+    detail?: Record<string, unknown>,
+) {
+    void recordAudit(db, {
+        userId: res.locals.userId as string,
+        userEmail: res.locals.userEmail as string | undefined,
+        action,
+        surface: "project",
+        projectId,
+        title: memory?.body.slice(0, 300) ?? null,
+        detail: {
+            memory_id: memory?.id ?? null,
+            category: memory?.category ?? null,
+            ...(detail ?? {}),
+        },
+    });
+}
 
 /** Everything the client is shown about a fact. */
 const SELECT_COLUMNS =
@@ -150,7 +181,11 @@ projectMemoriesRouter.post("/", requireAuth, async (req, res) => {
     }
     // Written behind the answer: a fact is saved whether or not the model that
     // works out what it is about happens to be up.
-    void fingerprintMemory(db, (data as unknown as MemoryRow).id, body);
+    const created = data as unknown as MemoryRow;
+    void fingerprintMemory(db, created.id, body);
+    noteInHistory(db, res, "memory.added", projectId, created, {
+        origin: "manual",
+    });
     res.status(201).json(data);
 });
 
@@ -198,6 +233,18 @@ projectMemoriesRouter.patch("/:memoryId", requireAuth, async (req, res) => {
     if (typeof updates.body === "string") {
         void fingerprintMemory(db, memoryId, updates.body);
     }
+    // Pinning on its own is a display choice, not a change to the record, so it
+    // is noted as its own thing rather than as an edit to the fact.
+    const onlyPinning =
+        Object.keys(updates).every((key) => key === "pinned" || key === "updated_at");
+    noteInHistory(
+        db,
+        res,
+        onlyPinning ? "memory.pinned" : "memory.edited",
+        projectId,
+        data as unknown as MemoryRow,
+        onlyPinning ? { pinned: updates.pinned === true } : undefined,
+    );
     res.json(data);
 });
 
@@ -266,6 +313,10 @@ projectMemoriesRouter.post("/:memoryId/supersede", requireAuth, async (req, res)
     }
 
     void fingerprintMemory(db, replacement.id, body);
+    noteInHistory(db, res, "memory.replaced", projectId, replacement, {
+        replaces_memory_id: previous.id,
+        previous_body: previous.body.slice(0, 500),
+    });
     res.status(201).json(replacement);
 });
 
@@ -307,11 +358,12 @@ projectMemoriesRouter.post("/:memoryId/accept", requireAuth, async (req, res) =>
             .status(404)
             .json({ detail: "That suggestion is no longer there." });
     }
-    void fingerprintMemory(
-        db,
-        memoryId,
-        (data as unknown as MemoryRow).body,
-    );
+    const accepted = data as unknown as MemoryRow;
+    void fingerprintMemory(db, memoryId, accepted.body);
+    noteInHistory(db, res, "memory.accepted", projectId, accepted, {
+        origin: "assistant",
+        edited_on_accept: "body" in req.body,
+    });
     res.json(data);
 });
 
@@ -336,6 +388,9 @@ projectMemoriesRouter.post("/:memoryId/dismiss", requireAuth, async (req, res) =
             .status(500)
             .json({ detail: "That suggestion could not be turned down." });
     }
+    noteInHistory(db, res, "memory.dismissed", projectId, null, {
+        memory_id: memoryId,
+    });
     res.status(204).end();
 });
 
@@ -381,5 +436,8 @@ projectMemoriesRouter.delete("/:memoryId", requireAuth, async (req, res) => {
         console.error("[project-memories] delete project memory", safeErrorLog(error));
         return void res.status(500).json({ detail: "Could not remove the fact." });
     }
+    noteInHistory(db, res, "memory.removed", projectId, null, {
+        memory_id: memoryId,
+    });
     res.status(204).end();
 });

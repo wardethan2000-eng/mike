@@ -12,6 +12,7 @@
 // never holds up a reply or breaks one.
 import { completeText, type UserApiKeys } from "./llm";
 import { backfillMemoryFingerprints } from "./memoryEmbedding";
+import { recordAudit } from "./audit";
 import {
   MEMORY_CATEGORIES,
   MEMORY_BODY_MAX_CHARS,
@@ -201,12 +202,23 @@ export async function proposeMemoriesForTurn(args: {
       .select("id, body");
 
     // A fact kept without being asked about goes straight into use, so give it
-    // its fingerprint now rather than waiting for the next read to notice.
+    // its fingerprint now rather than waiting for the next read to notice, and
+    // put it in the matter's history: nobody agreed to this one, so the record
+    // of where it came from is all there is.
     if (autoRemember && written) {
-      void backfillMemoryFingerprints(
-        db,
-        written as unknown as { id: string; body: string }[],
-      );
+      const rows = written as unknown as { id: string; body: string }[];
+      void backfillMemoryFingerprints(db, rows);
+      for (const row of rows) {
+        void recordAudit(db, {
+          userId,
+          action: "memory.auto_saved",
+          surface: "project",
+          projectId,
+          chatId,
+          title: row.body.slice(0, 300),
+          detail: { memory_id: row.id, origin: "assistant" },
+        });
+      }
     }
   } catch (error) {
     // Suggestions are a convenience. Losing one is not worth a broken reply.

@@ -28,6 +28,11 @@ import {
 } from "../lib/chat";
 import { getUserModelSettings } from "../lib/userSettings";
 import { safeErrorLog, safeErrorMessage } from "../lib/safeError";
+import { matterFromDocuments } from "../lib/matterFromDocuments";
+import {
+    loadProjectContext,
+    caseOverviewPromptSection,
+} from "../lib/projectOverview";
 
 export const wordChatRouter = Router();
 
@@ -396,10 +401,32 @@ wordChatRouter.post("/", requireAuth, async (req, res) => {
   );
   const apiKeys = { ...configuredApiKeys };
   delete apiKeys.courtlistener;
+  // Drafting in Word should know the case as well as drafting in the web app
+  // does. The add-in has no notion of a matter, but the files pulled into the
+  // conversation belong to one, so the matter is read off them — and only when
+  // they all agree, so a mixed bag of files never brings in the wrong case.
+  // With nothing attached, this is empty and the prompt is exactly as before.
+  const matterId = await matterFromDocuments(
+    db,
+    Object.values(docIndex).map((info) => info.document_id),
+    userId,
+    userEmail,
+  );
+  const caseContext = await loadProjectContext(
+    db,
+    matterId,
+    lastUser?.content ?? "",
+  );
   const apiMessages = buildMessages(
     enrichedMessages,
     docAvailability,
-    buildWordChatSystemPrompt(),
+    buildWordChatSystemPrompt() +
+      caseOverviewPromptSection(
+        caseContext.overview,
+        nonce,
+        caseContext.memories,
+        caseContext.omitted,
+      ),
     docIndex,
     false,
     nonce,

@@ -10,6 +10,7 @@ import {
     X,
     Check,
     Sparkles,
+    CornerDownRight,
 } from "lucide-react";
 import {
     acceptProjectMemory,
@@ -275,6 +276,7 @@ export function CaseMemoryList({
     canChangeAutoRemember = false,
     onOpenDocument,
     onAutoRememberChange,
+    onPendingCountChange,
     /** Bumped when a chat answer finishes, so new suggestions are picked up. */
     refreshSignal = 0,
 }: {
@@ -286,10 +288,18 @@ export function CaseMemoryList({
     canChangeAutoRemember?: boolean;
     onOpenDocument?: (documentId: string, filename: string) => void;
     onAutoRememberChange?: (autoRemember: boolean) => void;
+    /** So the page can mark the panel button when suggestions are waiting. */
+    onPendingCountChange?: (pending: number) => void;
     refreshSignal?: number;
 }) {
     const [memories, setMemories] = useState<ProjectMemory[] | null>(null);
+    /** Wordings that newer facts have replaced, kept for the history view. */
+    const [replaced, setReplaced] = useState<ProjectMemory[]>([]);
     const [proposals, setProposals] = useState<ProjectMemory[]>([]);
+    /** Facts whose earlier wordings the reader has opened up. */
+    const [historyOpen, setHistoryOpen] = useState<Set<string>>(
+        () => new Set(),
+    );
     const [adding, setAdding] = useState(false);
     /** The fact being changed, and whether that change replaces or corrects it. */
     const [editing, setEditing] = useState<{
@@ -322,16 +332,23 @@ export function CaseMemoryList({
     useEffect(() => {
         let cancelled = false;
         const load = () => {
-            listProjectMemories(projectId)
+            // Asked for with their replaced wordings, in one request, so the
+            // history of a fact that has changed is there to open up without
+            // going back to the server for it.
+            listProjectMemories(projectId, { includeReplaced: true })
                 .then((loaded) => {
-                    if (!cancelled) setMemories(loaded);
+                    if (cancelled) return;
+                    setMemories(loaded.filter((m) => !m.superseded_by));
+                    setReplaced(loaded.filter((m) => m.superseded_by));
                 })
                 .catch(() => {
                     if (!cancelled) setMemories((prev) => prev ?? []);
                 });
             listProjectMemories(projectId, { status: "proposed" })
                 .then((loaded) => {
-                    if (!cancelled) setProposals(loaded);
+                    if (cancelled) return;
+                    setProposals(loaded);
+                    onPendingCountChange?.(loaded.length);
                 })
                 .catch(() => {
                     // No suggestions to show is a perfectly good outcome.
@@ -348,6 +365,30 @@ export function CaseMemoryList({
             for (const timer of timers) window.clearTimeout(timer);
         };
     }, [projectId, refreshSignal]);
+
+    /**
+     * For each fact in force, the wordings behind it, newest first. A fact that
+     * has changed twice has two, in the order they were replaced, so a deadline
+     * that moved reads as a history rather than as a number that was edited.
+     */
+    const historyByFact = useMemo(() => {
+        const predecessorOf = new Map<string, ProjectMemory>();
+        for (const old of replaced) {
+            if (old.superseded_by) predecessorOf.set(old.superseded_by, old);
+        }
+        const chains = new Map<string, ProjectMemory[]>();
+        for (const memory of memories ?? []) {
+            const chain: ProjectMemory[] = [];
+            let previous = predecessorOf.get(memory.id);
+            // Guard against a cycle in the data rather than hanging on it.
+            while (previous && chain.length < 20) {
+                chain.push(previous);
+                previous = predecessorOf.get(previous.id);
+            }
+            if (chain.length > 0) chains.set(memory.id, chain);
+        }
+        return chains;
+    }, [memories, replaced]);
 
     const documentsById = useMemo(() => {
         const byId = new Map<string, Document>();
@@ -414,7 +455,11 @@ export function CaseMemoryList({
                     memory.id,
                     { body: values.body, category: values.category },
                 );
-                setProposals((prev) => prev.filter((p) => p.id !== memory.id));
+                setProposals((prev) => {
+                    const next = prev.filter((p) => p.id !== memory.id);
+                    onPendingCountChange?.(next.length);
+                    return next;
+                });
                 setMemories((prev) => [...(prev ?? []), accepted]);
             } else if (mode === "correct") {
                 const updated = await updateProjectMemory(projectId, memory.id, {
@@ -442,6 +487,11 @@ export function CaseMemoryList({
                         m.id === memory.id ? replacement : m,
                     ),
                 );
+                // The wording just replaced belongs behind the new one now.
+                setReplaced((prev) => [
+                    ...prev,
+                    { ...memory, superseded_by: replacement.id },
+                ]);
             }
             setEditing(null);
         } catch {
@@ -455,7 +505,11 @@ export function CaseMemoryList({
         setBusyId(memory.id);
         try {
             const accepted = await acceptProjectMemory(projectId, memory.id);
-            setProposals((prev) => prev.filter((p) => p.id !== memory.id));
+            setProposals((prev) => {
+                const next = prev.filter((p) => p.id !== memory.id);
+                onPendingCountChange?.(next.length);
+                return next;
+            });
             setMemories((prev) => [...(prev ?? []), accepted]);
         } catch {
             showNotice("That suggestion could not be kept. Try again.");
@@ -468,7 +522,11 @@ export function CaseMemoryList({
         setBusyId(memory.id);
         try {
             await dismissProjectMemory(projectId, memory.id);
-            setProposals((prev) => prev.filter((p) => p.id !== memory.id));
+            setProposals((prev) => {
+                const next = prev.filter((p) => p.id !== memory.id);
+                onPendingCountChange?.(next.length);
+                return next;
+            });
         } catch {
             showNotice("That suggestion could not be turned down. Try again.");
         } finally {
@@ -702,6 +760,8 @@ export function CaseMemoryList({
                                           memory.source_document_id,
                                       )
                                     : undefined;
+                                const history = historyByFact.get(memory.id);
+                                const showHistory = historyOpen.has(memory.id);
 
                                 return (
                                     <div
@@ -719,6 +779,41 @@ export function CaseMemoryList({
 
                                         <div className="mt-0.5 flex items-center justify-between gap-2">
                                             <span className="flex min-w-0 items-center gap-1.5">
+                                                {history && (
+                                                    <button
+                                                        type="button"
+                                                        onClick={() =>
+                                                            setHistoryOpen(
+                                                                (open) => {
+                                                                    const next =
+                                                                        new Set(
+                                                                            open,
+                                                                        );
+                                                                    if (
+                                                                        next.has(
+                                                                            memory.id,
+                                                                        )
+                                                                    )
+                                                                        next.delete(
+                                                                            memory.id,
+                                                                        );
+                                                                    else
+                                                                        next.add(
+                                                                            memory.id,
+                                                                        );
+                                                                    return next;
+                                                                },
+                                                            )
+                                                        }
+                                                        className="shrink-0 text-[11px] text-gray-500 hover:text-gray-800 hover:underline"
+                                                    >
+                                                        {showHistory
+                                                            ? "Hide earlier wording"
+                                                            : history.length === 1
+                                                              ? "Earlier wording"
+                                                              : `Earlier wordings (${history.length})`}
+                                                    </button>
+                                                )}
                                                 {source ? (
                                                     <button
                                                         type="button"
@@ -827,6 +922,22 @@ export function CaseMemoryList({
                                                 </div>
                                             )}
                                         </div>
+
+                                        {showHistory && history && (
+                                            <ul className="mt-1 space-y-1 border-l border-gray-200 pl-2">
+                                                {history.map((old) => (
+                                                    <li
+                                                        key={old.id}
+                                                        className="flex items-start gap-1"
+                                                    >
+                                                        <CornerDownRight className="mt-0.5 h-3 w-3 shrink-0 text-gray-300" />
+                                                        <span className="min-w-0 text-xs leading-relaxed text-gray-400 line-through decoration-gray-300">
+                                                            {old.body}
+                                                        </span>
+                                                    </li>
+                                                ))}
+                                            </ul>
+                                        )}
                                     </div>
                                 );
                             })}

@@ -29,6 +29,7 @@ import {
     deleteDocument,
     getChat,
     getProject,
+    listProjectMemories,
     updateProject,
     uploadProjectDocument,
     createProjectFolder,
@@ -278,6 +279,36 @@ export default function ProjectAssistantChatPage({ params }: Props) {
     // has gone out, so the case overview panel is told each time one finishes
     // and looks again for suggestions a moment later.
     const [answersFinished, setAnswersFinished] = useState(0);
+
+    // Suggestions waiting to be looked at. Counted here rather than in the
+    // panel, because the whole point is to show them when the panel is shut —
+    // and the panel is not there to count them then. While it is open it
+    // reports its own count back, which keeps the two in step as the reader
+    // works through them.
+    const [pendingSuggestions, setPendingSuggestions] = useState(0);
+
+    useEffect(() => {
+        let cancelled = false;
+        const count = () => {
+            listProjectMemories(projectId, { status: "proposed" })
+                .then((waiting) => {
+                    if (!cancelled) setPendingSuggestions(waiting.length);
+                })
+                .catch(() => {
+                    // Nothing to mark is the right answer when we cannot ask.
+                });
+        };
+        count();
+        // Suggestions are written after the answer has gone out, so look again
+        // a moment later rather than at the instant it finishes.
+        const timers = answersFinished
+            ? [2500, 9000].map((delay) => window.setTimeout(count, delay))
+            : [];
+        return () => {
+            cancelled = true;
+            for (const timer of timers) window.clearTimeout(timer);
+        };
+    }, [projectId, answersFinished]);
 
     const handleAutoRememberChange = useCallback(
         async (autoRemember: boolean) => {
@@ -1062,6 +1093,7 @@ export default function ProjectAssistantChatPage({ params }: Props) {
                             )
                         }
                         onAutoRememberChange={handleAutoRememberChange}
+                        onPendingCountChange={setPendingSuggestions}
                         onOpenDocument={(documentId, filename) =>
                             openTab(documentId, filename)
                         }
@@ -1543,12 +1575,23 @@ export default function ProjectAssistantChatPage({ params }: Props) {
                 ]}
                 actions={[
                     {
-                        icon: <ClipboardList className="h-4 w-4" />,
+                        icon: (
+                            <span className="relative inline-flex">
+                                <ClipboardList className="h-4 w-4" />
+                                {pendingSuggestions > 0 && !overviewOpen && (
+                                    <span className="absolute -right-1.5 -top-1.5 flex h-3.5 min-w-3.5 items-center justify-center rounded-full bg-blue-600 px-1 text-[9px] font-medium leading-none text-white">
+                                        {pendingSuggestions}
+                                    </span>
+                                )}
+                            </span>
+                        ),
                         onClick: () => setOverviewOpen(!overviewOpen),
                         iconOnly: true,
                         title: overviewOpen
                             ? "Hide the case overview"
-                            : "Show the case overview",
+                            : pendingSuggestions > 0
+                              ? `Case overview — ${pendingSuggestions} suggested fact${pendingSuggestions === 1 ? "" : "s"} waiting`
+                              : "Show the case overview",
                     },
                     {
                         icon: <FolderClosed className="h-4 w-4" />,
