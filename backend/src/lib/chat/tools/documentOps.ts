@@ -7,10 +7,18 @@ import { convertedPdfKey, docxToPdf } from "../../convert";
 import { createServerSupabase } from "../../supabase";
 import {
   applyFormattedEdits,
+  applyHeaderFooterEdits,
   applyTrackedEdits,
+  extractDocxHeadersFooters,
   extractDocxBodyParagraphs,
   extractDocxBodyText,
   extractDocxBodyTextMarked,
+  inlineEditRuns,
+  insertTrackedTables,
+  parseLayoutTokens,
+  runsToMarkedText,
+  stripInlineMarkers,
+  stripLayoutTokens,
   resolveTrackedChange,
   StaleDocumentError,
   type EditInput,
@@ -146,6 +154,51 @@ const lineSpacingTwips = (value: unknown): number | null => {
   if (key === "single" || key === "1" || key === "1.0") return 240;
   return null;
 };
+
+/**
+ * Build a plain .docx from paragraph strings — standard legal formatting
+ * (Times New Roman 12pt, 1" margins), one paragraph per entry. Used when a
+ * PDF precedent is replicated: the PDF's wording carries over into a fully
+ * editable Word file whose look is approximated rather than copied, because
+ * PDF layout does not survive conversion in editable form.
+ */
+export async function docxBytesFromParagraphs(
+  paragraphs: string[],
+): Promise<Buffer> {
+  const { Document, Packer, Paragraph, TextRun, convertInchesToTwip } =
+    await import("docx");
+  const doc = new Document({
+    styles: {
+      default: {
+        document: { run: { font: "Times New Roman", size: 24 } },
+      },
+    },
+    sections: [
+      {
+        properties: {
+          page: {
+            margin: {
+              top: convertInchesToTwip(1),
+              bottom: convertInchesToTwip(1),
+              left: convertInchesToTwip(1),
+              right: convertInchesToTwip(1),
+            },
+          },
+        },
+        children: paragraphs.map(
+          (text) =>
+            new Paragraph({
+              children: [
+                new TextRun({ text, font: "Times New Roman", size: 24 }),
+              ],
+              spacing: { after: 120 },
+            }),
+        ),
+      },
+    ],
+  });
+  return Buffer.from(await Packer.toBuffer(doc));
+}
 
 export async function generateDocx(
   title: string,
@@ -1534,6 +1587,8 @@ export async function runEditDocument(params: {
       download_url: string;
       annotations: EditAnnotation[];
       applied_count: number;
+      /** Edits that landed in the page header/footer, written directly. */
+      header_footer_applied: number;
       tracked: boolean;
       errors: { index: number; reason: string }[];
     }
@@ -1569,13 +1624,19 @@ export async function runEditDocument(params: {
   const current = await loadCurrentVersionBytes(documentId, db);
   if (!current) return { ok: false, error: "Could not load document bytes." };
 
-  // read_document shows the model **bold**/_underline_/*italic* markers that
-  // are not in the document's actual characters. An anchor copied from that
-  // view would never match, so any anchor that does not appear verbatim in
-  // the document is retried with the markers stripped. Replacement text sheds
-  // the markers too — inserted words inherit the formatting around them, and
-  // literal asterisks in a contract would be wrong.
-  const needsStrip = (s: string) => !!s && stripInlineMarkers(s) !== s;
+  // read_document shows the model **bold**/_underline_/*italic* markers and
+  // leading [page break]/[heading N]/[centered]/[right] tokens that are not
+  // in the document's actual characters. An anchor copied from that view
+  // would never match, so any anchor that does not appear verbatim in the
+  // document is retried with the decorations stripped. Inline markers in the
+  // replacement text stay — applyTrackedEdits turns them into formatting on
+  // the inserted words — but the layout tokens are read-view only and come
+  // out of the replacement too.
+  const undecorate = (s: string) =>
+    stripInlineMarkers(s.split("\n").map(stripLayoutTokens).join("\n"));
+  const needsStrip = (s: string) => !!s && undecorate(s) !== s;
+  const stripReplaceTokens = (s: string) =>
+    s.split("\n").map(stripLayoutTokens).join("\n");
   let normalizedEdits = edits;
   if (
     edits.some(
@@ -1583,26 +1644,48 @@ export async function runEditDocument(params: {
         needsStrip(e.find) ||
         needsStrip(e.context_before) ||
         needsStrip(e.context_after) ||
-        needsStrip(e.replace),
+        stripReplaceTokens(e.replace) !== e.replace,
     )
   ) {
     const flatText = await extractDocxBodyText(current.bytes);
     const anchor = (s: string) =>
-      !needsStrip(s) || flatText.includes(s) ? s : stripInlineMarkers(s);
+      !needsStrip(s) || flatText.includes(s) ? s : undecorate(s);
     normalizedEdits = edits.map((e) => ({
       ...e,
       find: anchor(e.find),
       context_before: anchor(e.context_before),
       context_after: anchor(e.context_after),
-      replace: needsStrip(e.replace) ? stripInlineMarkers(e.replace) : e.replace,
+      replace: stripReplaceTokens(e.replace),
     }));
   }
 
   const applied = await applyTrackedEdits(current.bytes, normalizedEdits, {
     author: "Mike",
   });
-  const { changes, errors } = applied;
+  const { changes } = applied;
+  let errors = applied.errors;
   let editedBytes = applied.bytes;
+
+  // An edit whose anchor is nowhere in the body may belong to the page
+  // header or footer (the letterhead). Those are applied directly — a
+  // letterhead correction is not reviewed word by word — and reported
+  // alongside the body changes.
+  let headerFooterApplied: { index: number; part: "header" | "footer" }[] = [];
+  if (errors.length > 0) {
+    const failed = new Set(errors.map((e) => e.index));
+    const candidates = normalizedEdits
+      .map((e, index) => ({ index, find: e.find, replace: e.replace }))
+      .filter((e) => failed.has(e.index) && e.find);
+    if (candidates.length > 0) {
+      const hf = await applyHeaderFooterEdits(editedBytes, candidates);
+      if (hf.applied.length > 0) {
+        editedBytes = hf.bytes;
+        headerFooterApplied = hf.applied;
+        const landed = new Set(hf.applied.map((a) => a.index));
+        errors = errors.filter((e) => !landed.has(e.index));
+      }
+    }
+  }
 
   if (!tracked && changes.length > 0) {
     // Accept every change as it is written, so the saved file reads as the
@@ -1625,7 +1708,7 @@ export async function runEditDocument(params: {
     }
   }
 
-  if (changes.length === 0) {
+  if (changes.length === 0 && headerFooterApplied.length === 0) {
     return {
       ok: false,
       error:
@@ -1664,7 +1747,8 @@ export async function runEditDocument(params: {
       storage_path: newPath,
       download_url: buildDownloadUrl(newPath, cleanFilename),
       annotations: [],
-      applied_count: changes.length,
+      applied_count: changes.length + headerFooterApplied.length,
+      header_footer_applied: headerFooterApplied.length,
       tracked: false,
       errors,
     };
@@ -1687,15 +1771,29 @@ export async function runEditDocument(params: {
     context_after: c.contextAfter ?? "",
     status: "pending" as const,
   }));
-  const { data: insertedEdits, error: editsErr } = await db
-    .from("document_edits")
-    .insert(editRows)
-    .select(
-      "id, change_id, del_w_id, ins_w_id, deleted_text, inserted_text, context_before, context_after",
-    );
-
-  if (editsErr || !insertedEdits) {
-    return { ok: false, error: "Failed to record edits." };
+  // A run whose only landed edits were header/footer ones has no body
+  // changes to review — nothing to record, no cards.
+  let insertedEdits: {
+    id: string;
+    change_id: string;
+    del_w_id: string | null;
+    ins_w_id: string | null;
+    deleted_text: string;
+    inserted_text: string;
+    context_before: string | null;
+    context_after: string | null;
+  }[] = [];
+  if (editRows.length > 0) {
+    const { data, error: editsErr } = await db
+      .from("document_edits")
+      .insert(editRows)
+      .select(
+        "id, change_id, del_w_id, ins_w_id, deleted_text, inserted_text, context_before, context_after",
+      );
+    if (editsErr || !data) {
+      return { ok: false, error: "Failed to record edits." };
+    }
+    insertedEdits = data;
   }
 
   await db
@@ -1746,7 +1844,8 @@ export async function runEditDocument(params: {
     storage_path: newPath,
     download_url: permalink,
     annotations,
-    applied_count: annotations.length,
+    applied_count: annotations.length + headerFooterApplied.length,
+    header_footer_applied: headerFooterApplied.length,
     tracked: true,
     errors,
   };
@@ -1756,38 +1855,9 @@ export async function runEditDocument(params: {
 // Writing a whole document
 // ---------------------------------------------------------------------------
 
-/** The plain characters of a marker-carrying string, as inlineEditRuns reads it. */
-export function stripInlineMarkers(line: string): string {
-  return inlineEditRuns(line)
-    .map((run) => run.text)
-    .join("");
-}
-
-/**
- * Split a line into runs on the inline markers the assistant already uses when
- * generating a document: **bold**, _underline_, *italic*.
- */
-export function inlineEditRuns(line: string): EditRun[] {
-  const runs: EditRun[] = [];
-  const pattern = /(\*\*[^*]+\*\*|_[^_\n]+_|\*[^*\n]+\*)/g;
-  const push = (text: string, marks: Partial<EditRun>) => {
-    if (!text) return;
-    runs.push({ text, ...marks });
-  };
-  let last = 0;
-  for (const match of line.matchAll(pattern)) {
-    const at = match.index ?? 0;
-    push(line.slice(last, at), {});
-    const token = match[0];
-    if (token.startsWith("**")) push(token.slice(2, -2), { bold: true });
-    else if (token.startsWith("_")) push(token.slice(1, -1), { underline: true });
-    else push(token.slice(1, -1), { italic: true });
-    last = at + token.length;
-  }
-  push(line.slice(last), {});
-  if (runs.length === 0) runs.push({ text: "" });
-  return runs;
-}
+// The inline-marker parser lives with the docx machinery so tracked-change
+// insertions can format their runs; re-exported here for existing importers.
+export { inlineEditRuns, stripInlineMarkers };
 
 /**
  * Write a document's whole body in one go, keeping the file's own look.
@@ -1863,6 +1933,14 @@ export function redlineEditsForRewrite(
   next: EditParagraph[],
 ): EditInput[] {
   const newTexts = next.map((paragraph) => paragraph.text);
+  // Replacement strings keep the paragraphs' bold/italic/underline as inline
+  // markers, which applyTrackedEdits turns back into formatted runs — so a
+  // redlined rewrite keeps its emphasis just like a clean one.
+  const newMarked = next.map((paragraph) =>
+    paragraph.runs && paragraph.runs.length
+      ? runsToMarkedText(paragraph.runs)
+      : paragraph.text,
+  );
   const pairs = alignParagraphs(baseline, newTexts);
   const matchedOld = new Set(pairs.map(([o]) => o));
   const matchedNew = new Map(pairs.map(([o, n]) => [n, o]));
@@ -1897,7 +1975,7 @@ export function redlineEditsForRewrite(
       if (baseline[oi] && newTexts[nj] !== baseline[oi]) {
         edits.push({
           find: baseline[oi],
-          replace: newTexts[nj],
+          replace: newMarked[nj],
           context_before: before(oi),
           context_after: after(oi + 1),
         });
@@ -1924,7 +2002,7 @@ export function redlineEditsForRewrite(
       if (newTexts[nj]) {
         edits.push({
           find: "",
-          replace: `\n\n${newTexts[nj]}`,
+          replace: `\n\n${newMarked[nj]}`,
           context_before: before(oi),
           context_after: after(oi),
         });
@@ -1941,15 +2019,30 @@ export function redlineEditsForRewrite(
 /** Turn one entry from the tool call into what the document writer wants. */
 export function writeBlockToParagraph(block: WriteBlock): EditParagraph {
   if (typeof block === "string") {
-    const runs = inlineEditRuns(block);
-    return { text: runs.map((run) => run.text).join(""), runs };
+    // A string paragraph may open with the layout tokens the read view
+    // shows — [page break], [heading N], [centered], [right]. Echoing them
+    // reproduces the layout, the same way the inline markers work.
+    const layout = parseLayoutTokens(block);
+    const runs = inlineEditRuns(layout.text);
+    const paragraph: EditParagraph = {
+      text: runs.map((run) => run.text).join(""),
+      runs,
+    };
+    if (layout.align !== undefined) paragraph.align = layout.align;
+    if (layout.heading !== undefined) paragraph.heading = layout.heading;
+    if (layout.pageBreak) paragraph.pageBreak = true;
+    return paragraph;
   }
-  const line = block.text ?? "";
-  const runs = inlineEditRuns(line);
+  const layout = parseLayoutTokens(block.text ?? "");
+  const runs = inlineEditRuns(layout.text);
   const paragraph: EditParagraph = {
     text: runs.map((run) => run.text).join(""),
     runs,
   };
+  // Tokens in the text apply unless the object form says otherwise below.
+  if (layout.align !== undefined) paragraph.align = layout.align;
+  if (layout.heading !== undefined) paragraph.heading = layout.heading;
+  if (layout.pageBreak) paragraph.pageBreak = true;
   if (block.style !== undefined) {
     paragraph.heading =
       block.style === "heading1"
@@ -2027,36 +2120,183 @@ export async function runWriteDocument(params: {
   const next: EditParagraph[] = paragraphs.map(writeBlockToParagraph);
 
   if (params.trackChanges) {
-    if (next.some((paragraph) => paragraph.table)) {
-      return {
-        ok: false,
-        error:
-          "A table cannot be added as a tracked change. Write the document straight in, or add the table in a separate step.",
-      };
+    // Tables ride separately: text changes travel as find/replace redlines,
+    // and each NEW table is inserted afterwards as one tracked insertion
+    // (rows marked inserted; one Accept/Reject card per table). A table block
+    // whose cells all already appear in the document is the model re-sending
+    // an existing table, not adding one — it is left alone, and its cell
+    // lines are protected from being read as deletions.
+    const textNext: EditParagraph[] = [];
+    const newTables: {
+      afterParagraphText: string | null;
+      rows: string[][];
+      borders?: boolean;
+      widths?: number[];
+    }[] = [];
+    const baselineLines = new Set(baseline);
+    const protectedLines = new Set<string>();
+    for (const paragraph of next) {
+      if (!paragraph.table) {
+        textNext.push(paragraph);
+        continue;
+      }
+      const cells = paragraph.table.rows.flat().filter((cell) => cell.trim());
+      const existing =
+        cells.length > 0 && cells.every((cell) => baselineLines.has(cell));
+      if (existing) {
+        for (const cell of cells) protectedLines.add(cell);
+        continue;
+      }
+      newTables.push({
+        afterParagraphText: textNext.length
+          ? textNext[textNext.length - 1].text
+          : null,
+        rows: paragraph.table.rows,
+        borders: paragraph.table.borders,
+        widths: paragraph.table.widths,
+      });
     }
-    const edits = redlineEditsForRewrite(baseline, next);
-    if (edits.length === 0) {
+    const edits = redlineEditsForRewrite(baseline, textNext).filter(
+      (edit) => !(edit.replace === "" && protectedLines.has(edit.find)),
+    );
+    if (edits.length === 0 && newTables.length === 0) {
       return { ok: false, error: "The document already reads that way." };
     }
-    const result = await runEditDocument({
-      documentId,
-      userId,
-      edits,
-      db,
-      trackChanges: true,
-      reuseVersion,
-    });
-    if (!result.ok) return result;
+
+    let base: {
+      version_id: string;
+      version_number: number;
+      storage_path: string;
+      download_url: string;
+      changes: number;
+      annotations: EditAnnotation[];
+    };
+    if (edits.length > 0) {
+      const result = await runEditDocument({
+        documentId,
+        userId,
+        edits,
+        db,
+        trackChanges: true,
+        reuseVersion,
+      });
+      if (!result.ok) return result;
+      base = {
+        version_id: result.version_id,
+        version_number: result.version_number,
+        storage_path: result.storage_path,
+        download_url: result.download_url,
+        changes: result.applied_count,
+        annotations: result.annotations,
+      };
+    } else {
+      // Only tables to add — open a version from the document as it stands.
+      const saved = await saveEditedDocxVersion({
+        documentId,
+        userId,
+        bytes: current.bytes,
+        db,
+        reuseVersion,
+        fallbackFilename,
+      });
+      if (!saved) {
+        return { ok: false, error: "Failed to record document version." };
+      }
+      await db
+        .from("documents")
+        .update({ current_version_id: saved.versionRowId })
+        .eq("id", documentId);
+      base = {
+        version_id: saved.versionRowId,
+        version_number: saved.nextVersionNumber,
+        storage_path: saved.newPath,
+        download_url: buildDownloadUrl(
+          saved.newPath,
+          saved.versionFilename.trim() || "Untitled document.docx",
+        ),
+        changes: 0,
+        annotations: [],
+      };
+    }
+
+    if (newTables.length > 0) {
+      const rawVersion = await downloadFile(base.storage_path);
+      if (!rawVersion) {
+        return { ok: false, error: "Could not load document bytes." };
+      }
+      const inserted = await insertTrackedTables(
+        Buffer.from(rawVersion),
+        newTables,
+        { author: "Mike" },
+      );
+      const tableBytes = inserted.bytes;
+      await uploadFile(
+        base.storage_path,
+        tableBytes.buffer.slice(
+          tableBytes.byteOffset,
+          tableBytes.byteOffset + tableBytes.byteLength,
+        ) as ArrayBuffer,
+        "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+      );
+
+      const stamp = Date.now();
+      const rows = inserted.changes.map((change, i) => ({
+        document_id: documentId,
+        version_id: base.version_id,
+        change_id: `mike-table-${i}-${stamp}`,
+        del_w_id: null,
+        ins_w_id: change.insId,
+        mark_w_ids: change.extraIds,
+        deleted_text: "",
+        inserted_text: change.preview,
+        context_before: "",
+        context_after: "",
+        status: "pending" as const,
+      }));
+      const { data: tableEdits, error: tableEditsErr } = await db
+        .from("document_edits")
+        .insert(rows)
+        .select("id, change_id, ins_w_id, inserted_text");
+      if (tableEditsErr || !tableEdits) {
+        return { ok: false, error: "Failed to record table insertions." };
+      }
+      base.annotations = [
+        ...base.annotations,
+        ...tableEdits.map(
+          (r: {
+            id: string;
+            change_id: string;
+            ins_w_id: string;
+            inserted_text: string;
+          }): EditAnnotation => ({
+            kind: "edit",
+            edit_id: r.id,
+            document_id: documentId,
+            version_id: base.version_id,
+            version_number: base.version_number,
+            change_id: r.change_id,
+            ins_w_id: r.ins_w_id,
+            deleted_text: "",
+            inserted_text: r.inserted_text,
+            context_before: "",
+            context_after: "",
+            status: "pending",
+          }),
+        ),
+      ];
+      base.changes += tableEdits.length;
+    }
+
     return {
       ok: true,
-      version_id: result.version_id,
-      version_number: result.version_number,
-      storage_path: result.storage_path,
-      download_url: result.download_url,
+      version_id: base.version_id,
+      version_number: base.version_number,
+      storage_path: base.storage_path,
+      download_url: base.download_url,
       paragraph_count: next.length,
       tracked: true,
-      changes: result.applied_count,
-      annotations: result.annotations,
+      changes: base.changes,
+      annotations: base.annotations,
     };
   }
 
@@ -2312,10 +2552,22 @@ export async function readDocumentContent(
       );
     } else if (fileType === "docx") {
       // Same flattening as the edit_document matcher, plus inline
-      // **bold** / *italic* / _underline_ markers so the model can see —
-      // and keep — the document's emphasis when it rewrites. Anchors that
-      // echo the markers are normalised back in runEditDocument.
+      // **bold** / *italic* / _underline_ markers and [centered]-style
+      // layout tokens so the model can see — and keep — the document's
+      // emphasis and layout when it rewrites. Anchors that echo the
+      // decorations are normalised back in runEditDocument.
       text = await extractDocxBodyTextMarked(Buffer.from(raw));
+      try {
+        const hf = await extractDocxHeadersFooters(Buffer.from(raw));
+        for (const header of hf.headers) {
+          text += `\n\n--- Page header ---\n${header}`;
+        }
+        for (const footer of hf.footers) {
+          text += `\n\n--- Page footer ---\n${footer}`;
+        }
+      } catch {
+        // A malformed header part never blocks reading the body.
+      }
       devLog(
         `[read_document] docx extractDocxBodyText length=${text.length} for filename="${docInfo.filename}"`,
       );

@@ -568,6 +568,9 @@ function reconstructParagraph(
 
     // Emit a w:ins at position `pos` inheriting rPr from there. A blank line
     // in the text starts a new paragraph, marked here and cut apart below.
+    // Inline **bold**/_underline_/*italic* markers in the inserted text become
+    // formatting on top of the inherited look, so a redline can add a bold
+    // heading or an underlined defined term rather than only plain words.
     const emitIns = (pos: number, text: string, wId: string) => {
         if (!text) return;
         const rPr = rPrForPos(pos === spanEnd ? pos - 1 : pos);
@@ -575,12 +578,19 @@ function reconstructParagraph(
         for (let i = 0; i < pieces.length; i++) {
             if (i > 0) newRunGroup.push(makeParagraphBreakMarker());
             if (!pieces[i]) continue;
+            const segs = inlineEditRuns(pieces[i]).filter((s) => s.text);
             newRunGroup.push(
-                makeEl("w:ins", [buildRun(rPr, pieces[i], "w:t")], {
-                    "w:id": wId,
-                    "w:author": author,
-                    "w:date": now,
-                }),
+                makeEl(
+                    "w:ins",
+                    segs.map((seg) =>
+                        buildRun(rPrWithMarks(rPr, seg), seg.text, "w:t"),
+                    ),
+                    {
+                        "w:id": wId,
+                        "w:author": author,
+                        "w:date": now,
+                    },
+                ),
             );
         }
     };
@@ -987,15 +997,59 @@ function wrapMarked(text: string, marker: "**" | "*" | "_"): string {
 }
 
 /**
+ * The layout tokens the marked read view prefixes onto a body paragraph, so
+ * the model can see — and reproduce — what plain text cannot carry: a page
+ * break before the paragraph, its heading level, its centering. They match
+ * what parseLayoutTokens reads back off a write_document paragraph.
+ */
+const LAYOUT_TOKEN_RE =
+    /^\[(page break|heading [1-3]|centered|right)\]\s*/;
+
+/**
+ * Read leading `[page break]`/`[heading N]`/`[centered]`/`[right]` tokens off
+ * a line. Returns the remaining text and the layout they describe.
+ */
+export function parseLayoutTokens(line: string): {
+    text: string;
+    align?: "center" | "right";
+    heading?: 1 | 2 | 3;
+    pageBreak?: boolean;
+} {
+    const out: ReturnType<typeof parseLayoutTokens> = { text: line };
+    let rest = line;
+    for (;;) {
+        const m = LAYOUT_TOKEN_RE.exec(rest);
+        if (!m) break;
+        const token = m[1];
+        if (token === "page break") out.pageBreak = true;
+        else if (token === "centered") out.align = "center";
+        else if (token === "right") out.align = "right";
+        else out.heading = Number(token.slice(-1)) as 1 | 2 | 3;
+        rest = rest.slice(m[0].length);
+    }
+    out.text = rest;
+    return out;
+}
+
+/** A line with the read view's layout tokens removed. */
+export function stripLayoutTokens(line: string): string {
+    return parseLayoutTokens(line).text;
+}
+
+/**
  * The body text with bold/italic/underline shown as inline markers —
- * `**bold**`, `*italic*`, `_underline_` — one string per paragraph. This is
- * what the model reads: without the markers it cannot know which words the
- * source document emphasises, so it cannot keep them when rewriting.
+ * `**bold**`, `*italic*`, `_underline_` — one string per paragraph, and
+ * body-level paragraphs prefixed with layout tokens (`[page break]`,
+ * `[heading 1]`, `[centered]`, `[right]`) where they apply. This is what the
+ * model reads: without it, it cannot know which words the source emphasises
+ * or which lines are centered, so it cannot keep them when rewriting.
  *
- * The syntax matches what the drafting tools parse back (inlineEditRuns), so
- * a model that echoes the markers reproduces the formatting. A run carrying
- * more than one mark gets the strongest one (bold, then underline, then
- * italic) — the parser has no syntax for combinations.
+ * The syntax matches what the drafting tools parse back (inlineEditRuns and
+ * parseLayoutTokens), so a model that echoes it reproduces the formatting.
+ * A run carrying more than one mark gets the strongest one (bold, then
+ * underline, then italic) — the parser has no syntax for combinations.
+ * Paragraphs inside tables get no layout tokens; cells are too small for the
+ * noise to pay for itself.
  */
 export async function extractDocxBodyParagraphsMarked(
     bytes: Buffer,
@@ -1008,6 +1062,37 @@ export async function extractDocxBodyParagraphsMarked(
     const tree = parser.parse(docXmlRaw) as XNode[];
     const bodyChildren = findBody(tree);
     if (!bodyChildren) return [];
+
+    const hasPageBreakRun = (n: unknown): boolean => {
+        const name = elName(n);
+        if (!name) return false;
+        if (name === "w:br") {
+            return String(elAttrs(n)["@_w:type"] ?? "") === "page";
+        }
+        return elChildren(n as XNode).some(hasPageBreakRun);
+    };
+
+    const layoutTokens = (paraNode: XNode): string => {
+        const kids = elChildren(paraNode);
+        const pPr = findChildByName(kids, "w:pPr");
+        const pPrKids = pPr ? elChildren(pPr) : [];
+        const tokens: string[] = [];
+        if (
+            findChildByName(pPrKids, "w:pageBreakBefore") ||
+            kids.some(hasPageBreakRun)
+        ) {
+            tokens.push("[page break]");
+        }
+        const pStyle = findChildByName(pPrKids, "w:pStyle");
+        const styleVal = pStyle ? String(elAttrs(pStyle)["@_w:val"] ?? "") : "";
+        const hm = /^Heading([1-3])$/.exec(styleVal);
+        if (hm) tokens.push(`[heading ${hm[1]}]`);
+        const jc = findChildByName(pPrKids, "w:jc");
+        const jcVal = jc ? String(elAttrs(jc)["@_w:val"] ?? "") : "";
+        if (jcVal === "center") tokens.push("[centered]");
+        else if (jcVal === "right" || jcVal === "end") tokens.push("[right]");
+        return tokens.length ? tokens.join(" ") + " " : "";
+    };
 
     const paragraphMarked = (paraChildren: XNode[]): string => {
         const flat = flattenParagraph(paraChildren);
@@ -1034,24 +1119,25 @@ export async function extractDocxBodyParagraphsMarked(
     };
 
     const lines: string[] = [];
-    const collect = (nodes: XNode[]) => {
+    const collect = (nodes: XNode[], inTable: boolean) => {
         for (const n of nodes) {
             const name = elName(n);
             if (!name) continue;
             if (name === "w:p") {
-                lines.push(paragraphMarked(elChildren(n)));
+                const prefix = inTable ? "" : layoutTokens(n);
+                lines.push(prefix + paragraphMarked(elChildren(n)));
             } else if (
                 name === "w:tbl" ||
                 name === "w:tr" ||
-                name === "w:tc" ||
-                name === "w:sdt" ||
-                name === "w:sdtContent"
+                name === "w:tc"
             ) {
-                collect(elChildren(n));
+                collect(elChildren(n), true);
+            } else if (name === "w:sdt" || name === "w:sdtContent") {
+                collect(elChildren(n), inTable);
             }
         }
     };
-    collect(bodyChildren);
+    collect(bodyChildren, false);
     return lines;
 }
 
@@ -1060,6 +1146,155 @@ export async function extractDocxBodyTextMarked(
     bytes: Buffer,
 ): Promise<string> {
     return (await extractDocxBodyParagraphsMarked(bytes)).join("\n");
+}
+
+const HEADER_FOOTER_PART_RE = /^word\/(header|footer)\d*\.xml$/;
+
+/** Every w:p under `nodes`, depth-first — headers nest them in tables too. */
+function collectParagraphNodes(nodes: XNode[], out: XNode[]): void {
+    for (const n of nodes) {
+        const name = elName(n);
+        if (!name) continue;
+        if (name === "w:p") out.push(n);
+        else collectParagraphNodes(elChildren(n), out);
+    }
+}
+
+/**
+ * The text of the document's page headers and footers, one entry per distinct
+ * part, paragraphs joined with newlines. Empty parts are dropped and repeats
+ * (the same header declared for first/even/odd pages) deduplicated.
+ */
+export async function extractDocxHeadersFooters(bytes: Buffer): Promise<{
+    headers: string[];
+    footers: string[];
+}> {
+    const zip = await JSZip.loadAsync(bytes);
+    const parser = createParser();
+    const headers: string[] = [];
+    const footers: string[] = [];
+    for (const path of Object.keys(zip.files).sort()) {
+        const m = HEADER_FOOTER_PART_RE.exec(path.replace(/\\/g, "/"));
+        if (!m) continue;
+        const raw = await zip.files[path].async("string");
+        const tree = parser.parse(raw) as XNode[];
+        const paras: XNode[] = [];
+        collectParagraphNodes(tree, paras);
+        const text = paras
+            .map((p) => flattenParagraph(elChildren(p)).paraText)
+            .filter((line) => line.trim())
+            .join("\n");
+        if (!text) continue;
+        const bucket = m[1] === "header" ? headers : footers;
+        if (!bucket.includes(text)) bucket.push(text);
+    }
+    return { headers, footers };
+}
+
+/** Overwrite a w:t's text, preserving its element identity and attributes. */
+function setWtText(wtEl: XNode, text: string): void {
+    setChildren(wtEl, [makeText(text)]);
+    const attrs = (wtEl[ATTR_KEY] as Record<string, string>) ?? {};
+    attrs["@_xml:space"] = "preserve";
+    wtEl[ATTR_KEY] = attrs;
+}
+
+/**
+ * Apply plain find/replace edits to the page headers and footers. Tracked
+ * changes are not written here — a letterhead correction is not something to
+ * accept word by word — so the text is simply replaced, keeping every run,
+ * logo and layout element in place: only the matched characters change, and
+ * the replacement takes the look of the run the match starts in.
+ *
+ * Each edit carries its caller-side index so the caller can tell which of a
+ * larger batch landed. An edit with an empty `find` is skipped — inserting
+ * new material into a header is not supported.
+ */
+export async function applyHeaderFooterEdits(
+    bytes: Buffer,
+    edits: { index: number; find: string; replace: string }[],
+): Promise<{
+    bytes: Buffer;
+    applied: { index: number; part: "header" | "footer" }[];
+}> {
+    const applied: { index: number; part: "header" | "footer" }[] = [];
+    const todo = edits.filter((e) => e.find);
+    if (todo.length === 0) return { bytes, applied };
+
+    const zip = await JSZip.loadAsync(bytes);
+    const parser = createParser();
+    const builder = createBuilder();
+    const done = new Set<number>();
+    let anyPartChanged = false;
+
+    for (const path of Object.keys(zip.files).sort()) {
+        const m = HEADER_FOOTER_PART_RE.exec(path.replace(/\\/g, "/"));
+        if (!m) continue;
+        const raw = await zip.files[path].async("string");
+        const tree = parser.parse(raw) as XNode[];
+        const paras: XNode[] = [];
+        collectParagraphNodes(tree, paras);
+        let partChanged = false;
+
+        for (const edit of todo) {
+            if (done.has(edit.index)) continue;
+            // Header text is short and shown to the model verbatim, so the
+            // replacement is plain: markers stripped, newlines flattened.
+            const replaceText = stripInlineMarkers(edit.replace).replace(
+                /\s*\n\s*/g,
+                " ",
+            );
+            for (const p of paras) {
+                const flat = flattenParagraph(elChildren(p));
+                const at = flat.paraText.indexOf(edit.find);
+                if (at < 0) continue;
+                const end = at + edit.find.length;
+                // Splice per text node: the node containing the match start
+                // keeps its lead and gains the replacement; nodes wholly
+                // inside the range are emptied; the node containing the end
+                // keeps its tail.
+                let inserted = false;
+                for (const slot of flat.runs) {
+                    for (const tn of slot.textNodes) {
+                        if (tn.paraEnd <= at || tn.paraStart >= end) continue;
+                        const lead =
+                            at > tn.paraStart
+                                ? tn.text.slice(0, at - tn.paraStart)
+                                : "";
+                        const tail =
+                            end < tn.paraEnd
+                                ? tn.text.slice(end - tn.paraStart)
+                                : "";
+                        const middle = inserted ? "" : replaceText;
+                        inserted = true;
+                        setWtText(tn.wtEl, lead + middle + tail);
+                    }
+                }
+                if (inserted) {
+                    done.add(edit.index);
+                    applied.push({
+                        index: edit.index,
+                        part: m[1] as "header" | "footer",
+                    });
+                    partChanged = true;
+                }
+                break;
+            }
+        }
+
+        if (partChanged) {
+            zip.file(
+                path,
+                `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>\n` +
+                    (builder.build(tree) as string),
+            );
+            anyPartChanged = true;
+        }
+    }
+
+    if (!anyPartChanged) return { bytes, applied };
+    const out = await zip.generateAsync({ type: "nodebuffer" });
+    return { bytes: Buffer.from(out), applied };
 }
 
 /**
@@ -1081,10 +1316,10 @@ export async function extractTrackedChangeIds(
     const visit = (n: unknown) => {
         const name = elName(n);
         if (!name) return;
-        // Paragraph-mark changes live in w:pPr and are not rendered as
-        // <ins>/<del> elements, so including them would shift the index
-        // mapping the frontend relies on.
-        if (name === "w:pPr") return;
+        // Paragraph-mark changes live in w:pPr and row-insertion marks in
+        // w:trPr; neither is rendered as an <ins>/<del> element, so including
+        // them would shift the index mapping the frontend relies on.
+        if (name === "w:pPr" || name === "w:trPr") return;
         if (name === "w:ins" || name === "w:del") {
             const a = elAttrs(n);
             const raw = a["@_w:id"];
@@ -1273,10 +1508,14 @@ export async function applyTrackedEdits(
             findEnd,
         );
 
-        const { deleted, inserted, leadingEq } = collapseDiff(
-            originalFind,
-            replace,
-        );
+        // A replace carrying **bold**/_underline_/*italic* markers skips the
+        // diff-collapse: the collapse compares characters and could cut a
+        // marker in half, leaving stray asterisks in the document. The whole
+        // find is deleted and the whole marked text inserted instead.
+        const replaceIsMarked = stripInlineMarkers(replace) !== replace;
+        const { deleted, inserted, leadingEq } = replaceIsMarked
+            ? { deleted: originalFind, inserted: replace, leadingEq: 0 }
+            : collapseDiff(originalFind, replace);
         const minStart = findStart + leadingEq;
         const minEnd = minStart + deleted.length;
         void findEnd;
@@ -1320,7 +1559,9 @@ export async function applyTrackedEdits(
             delId: plan.delWId,
             insId: plan.insWId,
             deletedText: plan.deletedText,
-            insertedText: plan.insertedText,
+            // Reported as the plain characters that landed in the document —
+            // the markers themselves are formatting, not text.
+            insertedText: stripInlineMarkers(plan.insertedText),
             contextBefore: plan.contextBefore,
             contextAfter: plan.contextAfter,
             reason: plan.reason,
@@ -1821,6 +2062,83 @@ export interface FormattedEditResult {
     changed: boolean;
 }
 
+/**
+ * Split a line into runs on the inline markers the assistant uses when
+ * writing document text: **bold**, _underline_, *italic*.
+ */
+export function inlineEditRuns(line: string): EditRun[] {
+    const runs: EditRun[] = [];
+    const pattern = /(\*\*[^*]+\*\*|_[^_\n]+_|\*[^*\n]+\*)/g;
+    const push = (text: string, marks: Partial<EditRun>) => {
+        if (!text) return;
+        runs.push({ text, ...marks });
+    };
+    let last = 0;
+    for (const match of line.matchAll(pattern)) {
+        const at = match.index ?? 0;
+        push(line.slice(last, at), {});
+        const token = match[0];
+        if (token.startsWith("**")) push(token.slice(2, -2), { bold: true });
+        else if (token.startsWith("_"))
+            push(token.slice(1, -1), { underline: true });
+        else push(token.slice(1, -1), { italic: true });
+        last = at + token.length;
+    }
+    push(line.slice(last), {});
+    if (runs.length === 0) runs.push({ text: "" });
+    return runs;
+}
+
+/** The plain characters of a marker-carrying string, as inlineEditRuns reads it. */
+export function stripInlineMarkers(line: string): string {
+    return inlineEditRuns(line)
+        .map((run) => run.text)
+        .join("");
+}
+
+/**
+ * Serialize runs back into marker text — the inverse of inlineEditRuns, used
+ * when a formatted rewrite has to travel through the find/replace redline
+ * pipeline as a string. Spans the syntax cannot express stay plain.
+ */
+export function runsToMarkedText(runs: EditRun[]): string {
+    return runs
+        .map((run) => {
+            const marker = run.bold ? "**" : run.underline ? "_" : run.italic ? "*" : "";
+            return marker ? wrapMarked(run.text, marker) : run.text;
+        })
+        .join("");
+}
+
+/**
+ * A copy of `base` with the run's marks (bold/italic/underline) ADDED on top.
+ * Unlike buildRunProps this keeps whatever toggles the base already has —
+ * plain inserted text should inherit its surroundings exactly, and marked
+ * text should only gain the mark.
+ */
+function rPrWithMarks(base: XNode | null, run: EditRun): XNode | null {
+    if (!run.bold && !run.italic && !run.underline) return base;
+    const kids: XNode[] = base ? elChildren(base).map(cloneNode) : [];
+    const has = (name: string) => kids.some((c) => elName(c) === name);
+    const marks: XNode[] = [];
+    if (run.bold && !has("w:b")) {
+        marks.push(makeEl("w:b", []));
+        marks.push(makeEl("w:bCs", []));
+    }
+    if (run.italic && !has("w:i")) {
+        marks.push(makeEl("w:i", []));
+        marks.push(makeEl("w:iCs", []));
+    }
+    if (run.underline && !has("w:u")) {
+        marks.push(makeEl("w:u", [], { "w:val": "single" }));
+    }
+    if (marks.length === 0) return base;
+    // Keep w:rFonts first, as the schema's ordering expects.
+    const rFontsIdx = kids.findIndex((c) => elName(c) === "w:rFonts");
+    const at = rFontsIdx >= 0 ? rFontsIdx + 1 : 0;
+    return makeEl("w:rPr", [...kids.slice(0, at), ...marks, ...kids.slice(at)]);
+}
+
 const RPR_TOGGLE_NAMES = new Set([
     "w:b",
     "w:bCs",
@@ -2308,6 +2626,136 @@ export function buildSimpleTable(
     return makeEl("w:tbl", [tblPr, tblGrid, ...trs]);
 }
 
+/**
+ * Insert tables into the body as tracked changes. Each table's rows carry a
+ * w:ins row-insertion mark and every cell run is wrapped in w:ins, so the
+ * whole table reads as one reviewable insertion: accepting strips the marks,
+ * rejecting removes the rows (and the empty shell with them — see
+ * resolveInTree). Each table goes in after the first body paragraph whose
+ * text equals `afterParagraphText`, or before the document's final paragraph
+ * when that anchor is missing.
+ *
+ * Returns one change per table: `insId` is the first cell-run wrapper (a
+ * rendered element the UI can anchor a card to) and `extraIds` the rest.
+ */
+export async function insertTrackedTables(
+    bytes: Buffer,
+    tables: {
+        afterParagraphText: string | null;
+        rows: string[][];
+        borders?: boolean;
+        widths?: number[];
+    }[],
+    opts?: { author?: string },
+): Promise<{
+    bytes: Buffer;
+    changes: { insId: string; extraIds: string[]; preview: string }[];
+}> {
+    const author = opts?.author ?? "Mike";
+    const now = new Date().toISOString();
+    const zip = await JSZip.loadAsync(bytes);
+    const docXmlFile = getZipEntry(zip, "word/document.xml");
+    if (!docXmlFile) throw new Error("document.xml missing from docx");
+    const docXmlRaw = await docXmlFile.async("string");
+    const parser = createParser();
+    const tree = parser.parse(docXmlRaw) as XNode[];
+    const bodyChildren = findBody(tree);
+    if (!bodyChildren) throw new Error("document body missing from docx");
+
+    let nextId = maxTrackedId(tree) + 1;
+    const changes: { insId: string; extraIds: string[]; preview: string }[] =
+        [];
+
+    for (const spec of tables) {
+        const tbl = buildSimpleTable(spec.rows, {
+            borders: spec.borders,
+            widths: spec.widths,
+        });
+        const ids: string[] = [];
+        let firstRunId: string | null = null;
+        for (const tr of elChildren(tbl)) {
+            if (elName(tr) !== "w:tr") continue;
+            const rowId = String(nextId++);
+            ids.push(rowId);
+            const trPr = makeEl("w:trPr", [
+                makeEl("w:ins", [], {
+                    "w:id": rowId,
+                    "w:author": author,
+                    "w:date": now,
+                }),
+            ]);
+            const cells = elChildren(tr);
+            setChildren(tr, [trPr, ...cells]);
+            for (const tc of cells) {
+                if (elName(tc) !== "w:tc") continue;
+                for (const p of elChildren(tc)) {
+                    if (elName(p) !== "w:p") continue;
+                    const newKids = elChildren(p).map((k) => {
+                        if (elName(k) !== "w:r") return k;
+                        const runId = String(nextId++);
+                        ids.push(runId);
+                        if (
+                            firstRunId === null &&
+                            elChildren(k).some((c) => elName(c) === "w:t")
+                        ) {
+                            firstRunId = runId;
+                        }
+                        return makeEl("w:ins", [k], {
+                            "w:id": runId,
+                            "w:author": author,
+                            "w:date": now,
+                        });
+                    });
+                    setChildren(p, newKids);
+                }
+            }
+        }
+
+        // Where the table goes: after its anchor paragraph, else before the
+        // final paragraph (which carries the section properties).
+        let at = -1;
+        if (spec.afterParagraphText) {
+            for (let i = 0; i < bodyChildren.length; i++) {
+                if (elName(bodyChildren[i]) !== "w:p") continue;
+                const text = flattenParagraph(
+                    elChildren(bodyChildren[i]),
+                ).paraText;
+                if (text === spec.afterParagraphText) {
+                    at = i + 1;
+                    break;
+                }
+            }
+        }
+        if (at < 0) {
+            for (let i = bodyChildren.length - 1; i >= 0; i--) {
+                if (elName(bodyChildren[i]) === "w:p") {
+                    at = i;
+                    break;
+                }
+            }
+            if (at < 0) at = bodyChildren.length;
+        }
+        bodyChildren.splice(at, 0, tbl);
+
+        const insId = firstRunId ?? ids[ids.length - 1];
+        changes.push({
+            insId,
+            extraIds: ids.filter((id) => id !== insId),
+            preview: spec.rows.map((row) => row.join(" | ")).join("\n"),
+        });
+    }
+
+    replaceBody(tree, bodyChildren);
+    const builder = createBuilder();
+    zip.file(
+        "word/document.xml",
+        `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>\n` +
+            (builder.build(tree) as string),
+    );
+    const out = await zip.generateAsync({ type: "nodebuffer" });
+    return { bytes: Buffer.from(out), changes };
+}
+
 /** The first run's rPr in a paragraph, if any (used as the formatting base). */
 function firstRunRPr(paraChildren: XNode[]): XNode | null {
     for (const c of paraChildren) {
@@ -2736,11 +3184,44 @@ function resolveInTree(
                 continue;
             }
 
+            // A row whose w:trPr carries a matching w:ins was inserted as
+            // part of a tracked table. Rejecting removes the whole row;
+            // accepting removes the marker and keeps it (the run wrappers
+            // inside its cells are handled by the recursion below).
+            if (name === "w:tr") {
+                const rowKids = elChildren(n);
+                const trPr = findChildByName(rowKids, "w:trPr");
+                const rowMark = trPr
+                    ? findChildByName(elChildren(trPr), "w:ins")
+                    : null;
+                const rowId = rowMark
+                    ? String(elAttrs(rowMark)["@_w:id"] ?? "")
+                    : "";
+                if (rowMark && ids.has(rowId)) {
+                    touched = true;
+                    if (mode === "reject") continue;
+                    setChildren(
+                        trPr!,
+                        elChildren(trPr!).filter((c) => c !== rowMark),
+                    );
+                }
+            }
+
             // Recurse first so nested tables/sdts get processed
             const kids = elChildren(n);
             if (kids.length) {
                 const newKids = rewrite(kids);
                 if (newKids !== kids) setChildren(n, newKids);
+            }
+
+            // A table whose every row was a rejected insertion is an empty
+            // shell — drop it rather than leave an invalid element behind.
+            if (
+                name === "w:tbl" &&
+                !elChildren(n).some((c) => elName(c) === "w:tr")
+            ) {
+                touched = true;
+                continue;
             }
 
             if (name === "w:ins" || name === "w:del") {
