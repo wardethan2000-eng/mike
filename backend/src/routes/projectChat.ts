@@ -346,7 +346,9 @@ projectChatRouter.post("/", requireAuth, async (req, res) => {
     const stopHeartbeat = startSseHeartbeat(res);
 
     try {
-        write(`data: ${JSON.stringify({ type: "chat_id", chatId })}\n\n`);
+        write(
+            `data: ${JSON.stringify({ type: "chat_id", chatId, model: runModel })}\n\n`,
+        );
 
         const shouldGenerateTitle =
             !chatTitle && !!lastUser?.content && !appendToPrevious;
@@ -427,6 +429,7 @@ projectChatRouter.post("/", requireAuth, async (req, res) => {
                 role: "assistant",
                 content: persistedEvents.length ? persistedEvents : null,
                 citations: citations.length ? citations : null,
+                model: runModel,
             });
         }
 
@@ -501,6 +504,7 @@ projectChatRouter.post("/", requireAuth, async (req, res) => {
                               citations: partial.citations.length
                                   ? partial.citations
                                   : null,
+                              model: runModel,
                           })
                       ).error;
                 if (appendToPrevious) {
@@ -541,6 +545,7 @@ projectChatRouter.post("/", requireAuth, async (req, res) => {
                           role: "assistant",
                           content: errorEvents.length ? errorEvents : null,
                           citations: citations.length ? citations : null,
+                          model: runModel,
                       })
                   ).error;
             if (appendToPrevious) {

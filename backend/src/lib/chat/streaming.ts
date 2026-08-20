@@ -36,12 +36,18 @@ import {
   parsePartialCitationObjects,
   createCitation,
   CITATIONS_OPEN_TAG,
+  type ParsedCitation,
 } from "./citations";
 import {
   applyMarkerRewrites,
   extractProseCitations,
   type MarkerRewrite,
 } from "./proseCitations";
+import {
+  MAX_CITE_ATTEMPTS,
+  readCiteCall,
+  type CiteOutcome,
+} from "./citeTool";
 import { runToolCalls } from "./tools/toolDispatcher";
 import { newLegislationTurnState } from "./tools/legislationTurnState";
 import {
@@ -154,6 +160,18 @@ class AssistantStreamAskInputsPause extends Error {
   constructor() {
     super("Waiting for user input.");
     this.name = "AssistantStreamAskInputsPause";
+  }
+}
+
+/**
+ * The answer is written and its citations have been filed and checked. The
+ * turn ends here: anything the model wrote after filing them would come after
+ * the answer the reader has already been given.
+ */
+class AssistantStreamCitationsFiled extends Error {
+  constructor() {
+    super("Citations filed.");
+    this.name = "AssistantStreamCitationsFiled";
   }
 }
 
@@ -271,6 +289,10 @@ export async function runLLMStream(params: {
     casesByClusterId: new Map(),
   };
   const legislationTurnState = newLegislationTurnState();
+  // Citations filed by the answer itself with cite_sources. These are checked
+  // as they arrive, so they are preferred over anything parsed out of the text.
+  let filedCitations: ParsedCitation[] = [];
+  let citeAttempts = 0;
   let fullText = "";
   let iterText = "";
   let iterVisibleText = "";
@@ -444,6 +466,73 @@ export async function runLLMStream(params: {
             arguments: JSON.stringify(c.input),
           },
         }));
+
+        // Citations are filed by the answer rather than dispatched like an
+        // ordinary tool: they are checked here against the documents, cases and
+        // statutes this conversation actually opened, and against the markers
+        // in the answer. Anything wrong goes straight back so it can be put
+        // right while the turn is still running.
+        const citeResults = new Map<string, string>();
+        let citationsAccepted = false;
+        for (const call of calls) {
+          if (call.name !== "cite_sources") continue;
+          citeAttempts += 1;
+          const outcome: CiteOutcome = readCiteCall(call.input, {
+            prose: fullText,
+            docIndex,
+            knownClusterIds: new Set(
+              courtlistenerTurnState.casesByClusterId.keys(),
+            ),
+            knownLegIds: new Set(legislationTurnState.byId.keys()),
+          });
+          const lastChance = citeAttempts >= MAX_CITE_ATTEMPTS;
+          if (outcome.problems.length && !lastChance) {
+            citeResults.set(
+              call.id,
+              JSON.stringify({
+                filed: false,
+                problems: outcome.problems,
+                instruction:
+                  "Fix these and call cite_sources again. Do not rewrite the answer.",
+              }),
+            );
+            devLog("[chat/stream] cite_sources sent back", {
+              attempt: citeAttempts,
+              problems: outcome.problems,
+            });
+            continue;
+          }
+          // Out of attempts: keep whatever checked out rather than losing every
+          // citation over one bad entry.
+          if (outcome.citations.length) {
+            filedCitations = outcome.citations;
+            citationsAccepted = true;
+          }
+          citeResults.set(
+            call.id,
+            JSON.stringify({
+              filed: outcome.citations.length,
+              ...(outcome.problems.length
+                ? { ignored: outcome.problems }
+                : {}),
+            }),
+          );
+          devLog("[chat/stream] cite_sources filed", {
+            attempt: citeAttempts,
+            citationCount: outcome.citations.length,
+            problems: outcome.problems,
+          });
+        }
+
+        // The answer is complete and its citations are in order, so there is
+        // nothing left for this turn to do.
+        if (citationsAccepted && calls.every((c) => c.name === "cite_sources")) {
+          throw new AssistantStreamCitationsFiled();
+        }
+
+        const dispatchCalls = toolCalls.filter(
+          (c) => c.function.name !== "cite_sources",
+        );
         const {
           toolResults,
           docsRead,
@@ -457,7 +546,7 @@ export async function runLLMStream(params: {
           caseCitationEvents,
           mcpEvents,
         } = await runToolCalls(
-          toolCalls,
+          dispatchCalls,
           docStore,
           userId,
           db,
@@ -559,6 +648,9 @@ export async function runLLMStream(params: {
           };
           resultByCallId.set(row.tool_call_id, String(row.content ?? ""));
         }
+        for (const [callId, content] of citeResults) {
+          resultByCallId.set(callId, content);
+        }
         return toolCalls.map((c) => ({
           tool_use_id: c.id,
           content:
@@ -570,7 +662,11 @@ export async function runLLMStream(params: {
       },
     });
   } catch (err) {
-    if (err instanceof AssistantStreamAskInputsPause) {
+    if (err instanceof AssistantStreamCitationsFiled) {
+      // The answer and its citations are both complete. Fall through to the
+      // citation handling below, which will use what was filed.
+      flushText();
+    } else if (err instanceof AssistantStreamAskInputsPause) {
       // The ask_inputs event has already been emitted and persisted in `events`.
       // Stop this assistant turn here so the model does not add redundant
       // prose telling the user to answer the picker or attach documents.
@@ -609,7 +705,11 @@ export async function runLLMStream(params: {
   // Parse and emit citations from <CITATIONS> block
   const { citations: parsedCitationsInitial, diagnostics: citationDiagnostics } =
     parseCitationsWithDiagnostics(fullText);
-  let parsedCitations = parsedCitationsInitial;
+  // Citations filed with cite_sources were checked as they arrived, so they
+  // win over anything read back out of the text afterwards.
+  let parsedCitations = filedCitations.length
+    ? filedCitations
+    : parsedCitationsInitial;
 
   // Repair pass: the answer carries [N] markers but no usable <CITATIONS>
   // block (the model dropped it, or its JSON failed to parse). Without the

@@ -426,6 +426,16 @@ export function useAssistantChat({
               streamedChatId = data.chatId;
               setChatId(data.chatId);
               setCurrentChatId(data.chatId);
+              // Which model is actually answering. It can differ from the one
+              // picked — a resumed turn keeps the model it started on — so it
+              // is taken from the answer rather than assumed.
+              if (typeof data.model === "string" && data.model) {
+                const answeringModel = data.model;
+                updateLatestAssistantMessage((message) => ({
+                  ...message,
+                  model: answeringModel,
+                }));
+              }
               continue;
             }
 

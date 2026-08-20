@@ -9,6 +9,8 @@ export async function reserveAssistantMessage(args: {
   table: AssistantMessageTable;
   id: string;
   chatId: string;
+  /** Which model is answering, kept so a poor answer can be traced to it. */
+  model?: string | null;
 }): Promise<unknown | null> {
   const { error } = await args.db.from(args.table).insert({
     id: args.id,
@@ -16,6 +18,7 @@ export async function reserveAssistantMessage(args: {
     role: "assistant",
     content: null,
     citations: null,
+    model: args.model ?? null,
   });
   return error;
 }

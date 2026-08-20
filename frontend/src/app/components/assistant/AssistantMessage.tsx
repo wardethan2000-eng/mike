@@ -32,10 +32,13 @@ import {
     type CourtListenerBlockItem,
 } from "./message/EventBlocks";
 import { PausedBlock } from "./message/PausedBlock";
+import { modelLabel } from "@/app/lib/modelLabels";
 
 interface Props {
     events?: AssistantEvent[];
     isStreaming?: boolean;
+    /** Which model wrote this answer, shown quietly under it. */
+    model?: string | null;
     isError?: boolean;
     /** Human-readable error text rendered alongside the red Mike icon. */
     errorMessage?: string;
@@ -113,6 +116,7 @@ interface Props {
 
 export function AssistantMessage({
     events,
+    model,
     isStreaming = false,
     isError = false,
     errorMessage,
@@ -1207,7 +1211,7 @@ export function AssistantMessage({
                     />
                 )}
 
-                {/* Copy button */}
+                {/* Copy button, and what wrote the answer */}
                 <div className="flex items-center gap-2 py-2 font-sans justify-start">
                     {!isStreaming && (
                         <button
@@ -1220,6 +1224,11 @@ export function AssistantMessage({
                                 <Copy className="h-3.5 w-3.5" />
                             )}
                         </button>
+                    )}
+                    {!isStreaming && !!model && (
+                        <span className="text-[11px] text-gray-400">
+                            {modelLabel(model)}
+                        </span>
                     )}
                 </div>
             </div>

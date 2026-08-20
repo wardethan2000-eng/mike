@@ -706,6 +706,7 @@ export function ChatView({
                                         ) : (
                                             <AssistantMessage
                                                 events={msg.events}
+                                                model={msg.model}
                                                 isStreaming={
                                                     i === messages.length - 1 &&
                                                     isResponseLoading

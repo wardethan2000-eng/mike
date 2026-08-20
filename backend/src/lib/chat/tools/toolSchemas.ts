@@ -799,4 +799,89 @@ export const TOOLS = [
       },
     },
   },
+  {
+    type: "function",
+    function: {
+      name: "cite_sources",
+      description:
+        "File the citations for the answer you have just written. Call this ONCE, as the very last thing you do, in any response whose prose carries [N] markers — including markers pointing at a statute or a case you looked up. The answer must already be complete: nothing you write after this call is shown to the user. Send one entry per distinct marker, numbered to match. An entry naming a document, case or statute that was not opened in this conversation is refused, and the call comes back with what to fix.",
+      parameters: {
+        type: "object",
+        properties: {
+          citations: {
+            type: "array",
+            minItems: 1,
+            maxItems: 40,
+            description:
+              "One entry per [N] marker in the answer, in marker order.",
+            items: {
+              type: "object",
+              properties: {
+                ref: {
+                  type: "number",
+                  description:
+                    "The marker this entry belongs to: 1 for [1], 2 for [2]. Not a page, section or document number.",
+                },
+                doc_id: {
+                  type: "string",
+                  description:
+                    "For a document: the exact chat-local label you were given, such as \"doc-0\". Never a filename or a UUID.",
+                },
+                cluster_id: {
+                  type: "number",
+                  description:
+                    "For a case: the cluster id of a case retrieved with the case-law research tools in this conversation.",
+                },
+                leg_id: {
+                  type: "string",
+                  description:
+                    "For a statute: the citation exactly as shown on the first line of the statute lookup result, such as \"K.S.A. 58-2540\".",
+                },
+                quotes: {
+                  type: "array",
+                  minItems: 1,
+                  maxItems: 3,
+                  description:
+                    "The words being relied on, taken verbatim from the source. One quote by default.",
+                  items: {
+                    type: "object",
+                    properties: {
+                      quote: {
+                        type: "string",
+                        description:
+                          "Exact text from the source, ideally 25 words or fewer. For a quote crossing a page break, put [[PAGE_BREAK]] at the break.",
+                      },
+                      page: {
+                        type: "string",
+                        description:
+                          "For a document: the [Page N] number the quote is on, as a string. Use \"N-M\" for a quote crossing a page break. Omit for spreadsheets and for statutes.",
+                      },
+                      sheet: {
+                        type: "string",
+                        description:
+                          "For a spreadsheet: the worksheet name the quote is on.",
+                      },
+                      cell: {
+                        type: "string",
+                        description:
+                          "For a spreadsheet: the A1 address or range, such as \"B7\" or \"B7:C9\".",
+                      },
+                      opinion_id: {
+                        type: "number",
+                        description:
+                          "For a case: the opinion the quote came from.",
+                      },
+                    },
+                    required: ["quote"],
+                  },
+                },
+              },
+              required: ["ref", "quotes"],
+            },
+          },
+        },
+        required: ["citations"],
+      },
+    },
+  },
 ];

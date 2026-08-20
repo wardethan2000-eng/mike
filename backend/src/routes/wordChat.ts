@@ -456,6 +456,7 @@ wordChatRouter.post("/", requireAuth, async (req, res) => {
       table: "word_chat_messages",
       id: assistantMessageId,
       chatId,
+      model,
     });
     if (error) {
       console.error("[word-chat] failed to reserve assistant message", error);

@@ -55,7 +55,7 @@ export type ParsedCitation =
   | ParsedCaseCitation
   | ParsedLegislationCitation;
 
-function normalizeCitation(raw: unknown): ParsedCitation | null {
+export function normalizeCitation(raw: unknown): ParsedCitation | null {
   if (!raw || typeof raw !== "object") return null;
   const c = raw as Record<string, unknown>;
   const markerRef =

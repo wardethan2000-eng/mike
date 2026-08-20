@@ -602,6 +602,7 @@ chatRouter.post("/", requireAuth, async (req, res) => {
             table: "chat_messages",
             id: assistantMessageId,
             chatId,
+            model: runModel,
         });
         if (reserveError) {
             console.error(
@@ -630,6 +631,7 @@ chatRouter.post("/", requireAuth, async (req, res) => {
             `data: ${JSON.stringify({
                 type: "chat_id",
                 chatId,
+                model: runModel,
                 ...(assistantMessageId ? { assistantMessageId } : {}),
             })}\n\n`,
         );
