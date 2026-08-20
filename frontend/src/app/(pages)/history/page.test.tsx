@@ -41,11 +41,31 @@ function expectedDefaultDateRange() {
 }
 
 function expectedDateRange(from: Date, to: Date) {
-  const localValue = (date: Date) => {
-    const offset = date.getTimezoneOffset() * 60_000;
-    return new Date(date.getTime() - offset).toISOString().slice(0, 10);
-  };
-  return { from: localValue(from), to: localValue(to) };
+  // The page sends the exact instants the reader means: the start of their
+  // first day and the end of their last, in their own timezone. A bare
+  // calendar day would be read as a UTC day and cut the evening off anywhere
+  // west of London.
+  const dayStart = (date: Date) =>
+    new Date(
+      date.getFullYear(),
+      date.getMonth(),
+      date.getDate(),
+      0,
+      0,
+      0,
+      0,
+    ).toISOString();
+  const dayEnd = (date: Date) =>
+    new Date(
+      date.getFullYear(),
+      date.getMonth(),
+      date.getDate(),
+      23,
+      59,
+      59,
+      999,
+    ).toISOString();
+  return { from: dayStart(from), to: dayEnd(to) };
 }
 
 describe("HistoryPage", () => {

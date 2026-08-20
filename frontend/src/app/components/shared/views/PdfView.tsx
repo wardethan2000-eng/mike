@@ -498,9 +498,18 @@ export function PdfView({
             if (scrollToPage && scrollToPage > 1) {
                 const slot = slotsRef.current[scrollToPage - 1];
                 if (slot) {
-                    await drawSlot(slot, generation);
-                    if (superseded()) return;
+                    // Scroll first, draw after. The wrappers were laid out at
+                    // their true sizes above, so the place is already right —
+                    // and the drawing can take seconds when several pages
+                    // queue, during which the panel may settle its width and
+                    // redraw everything. A scroll that waited for the drawing
+                    // was routinely wiped out by that; a scroll made now is
+                    // simply repeated by the next redraw, which is told the
+                    // same page.
                     scrollToHighlightOnPage(scrollToPage);
+                    currentPageRef.current = scrollToPage;
+                    setCurrentPage(scrollToPage);
+                    void drawSlot(slot, generation);
                 }
             } else {
                 const first = slotsRef.current[0];
