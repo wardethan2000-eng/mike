@@ -241,16 +241,27 @@ describe("HistoryPage", () => {
     rangeEnd.setDate(rangeEnd.getDate() - 1);
     const rangeStart = new Date();
     rangeStart.setDate(rangeStart.getDate() - 25);
+    // The calendar labels its day cells with bare local dates; what the page
+    // SENDS for those days is the exact start and end instants (see
+    // expectedDateRange). The picking and the payload use different shapes.
+    const dayValue = (date: Date) => {
+      const offset = date.getTimezoneOffset() * 60_000;
+      return new Date(date.getTime() - offset).toISOString().slice(0, 10);
+    };
     const { from: selectedFrom, to: selectedTo } = expectedDateRange(
       rangeStart,
       rangeEnd,
     );
     const startButton = screen
       .getByTestId("start-date-picker")
-      .querySelector<HTMLButtonElement>(`[data-day="${selectedFrom}"] button`);
+      .querySelector<HTMLButtonElement>(
+        `[data-day="${dayValue(rangeStart)}"] button`,
+      );
     const endButton = screen
       .getByTestId("end-date-picker")
-      .querySelector<HTMLButtonElement>(`[data-day="${selectedTo}"] button`);
+      .querySelector<HTMLButtonElement>(
+        `[data-day="${dayValue(rangeEnd)}"] button`,
+      );
     expect(startButton).not.toBeNull();
     expect(endButton).not.toBeNull();
 
