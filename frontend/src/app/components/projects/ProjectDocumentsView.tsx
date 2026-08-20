@@ -103,24 +103,35 @@ export function ProjectDocumentsView({ projectId, folderId = null }: Props) {
      */
     const requestedDocumentId = searchParams.get("open");
     const requestedPage = Number.parseInt(searchParams.get("page") ?? "", 10);
+    const requestedQuote = searchParams.get("quote") ?? "";
     const openedDocumentIdRef = useRef<string | null>(null);
     useEffect(() => {
         if (!requestedDocumentId || projectLoading) return;
-        if (openedDocumentIdRef.current === requestedDocumentId) return;
+        // Keyed on the passage too, not just the file: two search results in
+        // the same document are two different requests, and the second must
+        // still move the reader to its own words.
+        const request = [requestedDocumentId, requestedPage, requestedQuote].join('|');
+        if (openedDocumentIdRef.current === request) return;
         const match = (project?.documents ?? []).find(
             (document) => document.id === requestedDocumentId,
         );
         if (!match) return;
-        openedDocumentIdRef.current = requestedDocumentId;
+        openedDocumentIdRef.current = request;
         openSourceCount.current += 1;
         setOpenSource({
             documentId: match.id,
             filename: match.filename,
             page: Number.isNaN(requestedPage) ? null : requestedPage,
-            quote: "",
+            quote: requestedQuote,
             key: openSourceCount.current,
         });
-    }, [requestedDocumentId, requestedPage, projectLoading, project?.documents]);
+    }, [
+        requestedDocumentId,
+        requestedPage,
+        requestedQuote,
+        projectLoading,
+        project?.documents,
+    ]);
 
     useEffect(() => {
         function handleClick(event: MouseEvent) {

@@ -38,6 +38,7 @@ import { FileTypeIcon } from "@/app/components/shared/FileTypeIcon";
 import { Button } from "@/app/components/ui/button";
 import { TabPillButton } from "@/app/components/ui/tab-pill-button";
 import { CaseInstructionsEditor } from "./CaseOverviewPanel";
+import { MatterSearchPanel } from "./MatterSearchPanel";
 import { CaseMemoryList, type SuggestionMode } from "./CaseMemoryList";
 import { ProjectSectionToolbar, useProjectWorkspace } from "./ProjectWorkspace";
 
@@ -285,13 +286,19 @@ export function ProjectOverviewView({ projectId }: { projectId: string }) {
         }
     }
 
-    /** Open a document on the Documents tab, beside the file list. */
+    /**
+     * Open a document on the Documents tab, beside the file list. A passage
+     * travels with it so a search result lands on the words themselves; long
+     * ones are trimmed, since the highlight matches from the start and a whole
+     * paragraph would not survive the address bar.
+     */
     const openDocument = useCallback(
-        (documentId: string, page?: number | null) => {
-            const at = page != null ? `&page=${page}` : "";
-            router.push(
-                `/projects/${projectId}/documents?open=${encodeURIComponent(documentId)}${at}`,
-            );
+        (documentId: string, page?: number | null, quote?: string) => {
+            const params = new URLSearchParams({ open: documentId });
+            if (page != null) params.set("page", String(page));
+            const passage = (quote ?? "").trim();
+            if (passage) params.set("quote", passage.slice(0, 400));
+            router.push(`/projects/${projectId}/documents?${params.toString()}`);
         },
         [projectId, router],
     );
@@ -337,6 +344,14 @@ export function ProjectOverviewView({ projectId }: { projectId: string }) {
             <ProjectSectionToolbar />
 
             <div className="flex min-h-0 flex-1 flex-col">
+                {/* Ask the matter ----------------------------------------- */}
+                <MatterSearchPanel
+                    projectId={projectId}
+                    onOpenSource={(source) =>
+                        openDocument(source.documentId, source.page, source.quote)
+                    }
+                />
+
                 {/* Next up ------------------------------------------------ */}
                 {dates.length > 0 && (
                     <div className="flex flex-wrap items-center gap-x-5 gap-y-2 border-b border-gray-200/70 px-4 pb-3 md:px-8">
