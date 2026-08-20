@@ -20,6 +20,7 @@ import { downloadsRouter } from "./routes/downloads";
 import { sourceDocumentsRouter } from "./routes/sourceDocuments";
 import { auditRouter } from "./routes/audit";
 import { adminRouter } from "./routes/admin";
+import { adminFormsRouter } from "./routes/adminForms";
 import { firmInvitesRouter } from "./routes/firmInvites";
 import { manifestPublicKey } from "./lib/manifestSigning";
 import { safeErrorLog } from "./lib/safeError";
@@ -215,6 +216,10 @@ app.use("/users", userRouter);
 app.use("/download", downloadsRouter);
 app.use("/documents", sourceDocumentsRouter);
 app.use("/audit", auditRouter);
+// The form bank sits under /admin but is not administrators-only: whoever
+// looks after the firm library runs it too. It has to be mounted first, or
+// the administrators-only gate below would turn them away.
+app.use("/admin/forms", adminFormsRouter);
 app.use("/admin", adminRouter);
 app.use("/auth", inviteLimiter, firmInvitesRouter);
 

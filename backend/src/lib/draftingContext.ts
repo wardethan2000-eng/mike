@@ -13,6 +13,7 @@
 
 import type { createServerSupabase } from "./supabase";
 import { getFirm } from "./firm";
+import { formBankSection } from "./formBank";
 
 type Db = ReturnType<typeof createServerSupabase>;
 
@@ -251,18 +252,23 @@ export async function firmContextSection(db: Db): Promise<string> {
 /**
  * Everything about the asker and their firm, ready to append to a chat's
  * system prompt. Empty when neither has anything to say.
+ *
+ * The firm's banked model documents ride along here too, so drafting starts
+ * from the firm's own paperwork in a matter, outside a matter and in Word
+ * alike — all three go through this one place.
  */
 export async function whoIsAskingSection(
     db: Db,
     userId: string,
     email?: string | null,
 ): Promise<string> {
-    const [details, firmSection] = await Promise.all([
+    const [details, firmSection, bankSection] = await Promise.all([
         loadProfessionalDetails(db, userId),
         firmContextSection(db),
+        formBankSection(db, userId),
     ]);
     return `${firmSection}${attorneyContextSection(
         { displayName: details.display_name, email },
         details,
-    )}`;
+    )}${bankSection}`;
 }

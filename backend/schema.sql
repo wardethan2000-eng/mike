@@ -2290,6 +2290,38 @@ create table if not exists public.firm_api_keys (
 create index if not exists firm_api_keys_firm_idx
   on public.firm_api_keys(firm_id);
 
+-- The firm's form bank: notes about documents already on the firm's library
+-- shelves, so Mike can pick the right starting point for a draft on its own.
+-- No document lives here; removing a note leaves the document untouched.
+create table if not exists public.firm_forms (
+  id uuid primary key default gen_random_uuid(),
+  firm_id uuid not null references public.firms(id) on delete cascade,
+  document_id uuid not null unique references public.documents(id) on delete cascade,
+  title text not null,
+  -- Versions of the same kind of document share this slug.
+  document_type text not null,
+  usage_mode text not null default 'precedent'
+    check (usage_mode in ('precedent','fill')),
+  -- What situation this version covers, read against its siblings.
+  variant_notes text,
+  practice text,
+  jurisdictions text[] not null default '{}',
+  description text,
+  drafting_guidance text,
+  -- Fill forms only: {"key","label","source":"ask|matter|attorney|firm","hint"}.
+  required_fields jsonb not null default '[]',
+  status text not null default 'draft' check (status in ('draft','approved')),
+  created_by uuid references auth.users(id) on delete set null,
+  created_at timestamptz not null default now(),
+  updated_at timestamptz not null default now()
+);
+
+create index if not exists firm_forms_firm_status_idx
+  on public.firm_forms(firm_id, status);
+
+create index if not exists firm_forms_type_idx
+  on public.firm_forms(firm_id, document_type);
+
 create index if not exists audit_events_user_created on public.audit_events (user_id, created_at desc);
 create index if not exists audit_events_project_created on public.audit_events (project_id, created_at desc);
 alter table public.audit_events enable row level security;
@@ -2297,12 +2329,14 @@ alter table public.firms enable row level security;
 alter table public.firm_members enable row level security;
 alter table public.firm_invites enable row level security;
 alter table public.firm_api_keys enable row level security;
+alter table public.firm_forms enable row level security;
 
 revoke all on public.user_profiles from anon, authenticated;
 revoke all on public.firms from anon, authenticated;
 revoke all on public.firm_members from anon, authenticated;
 revoke all on public.firm_invites from anon, authenticated;
 revoke all on public.firm_api_keys from anon, authenticated;
+revoke all on public.firm_forms from anon, authenticated;
 revoke all on public.projects from anon, authenticated;
 revoke all on public.project_subfolders from anon, authenticated;
 revoke all on public.library_folders from anon, authenticated;

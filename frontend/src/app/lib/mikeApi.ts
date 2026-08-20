@@ -736,6 +736,111 @@ export async function getFirmUsage(
     return apiRequest(`/admin/usage${month ? `?month=${month}` : ""}`);
 }
 
+// ---------------------------------------------------------------------------
+// The firm's form bank — notes about the firm's own model documents, so Mike
+// can start a draft from them without anybody attaching anything.
+// ---------------------------------------------------------------------------
+
+export type FormUsageMode = "precedent" | "fill";
+export type FormStatus = "draft" | "approved";
+export type FormFieldSource = "ask" | "matter" | "attorney" | "firm";
+
+export interface FormRequiredField {
+    key: string;
+    label: string;
+    source: FormFieldSource;
+    hint?: string;
+}
+
+export interface FirmForm {
+    id: string;
+    firm_id: string;
+    document_id: string;
+    title: string;
+    document_type: string;
+    usage_mode: FormUsageMode;
+    variant_notes: string | null;
+    practice: string | null;
+    jurisdictions: string[];
+    description: string | null;
+    drafting_guidance: string | null;
+    required_fields: FormRequiredField[];
+    status: FormStatus;
+    created_by: string | null;
+    created_at?: string;
+    updated_at?: string;
+    /** The name of the document on the firm's shelves this is about. */
+    filename?: string | null;
+}
+
+/** What Mike suggests the notes should say, for a person to correct. */
+export interface FirmFormProposal {
+    title: string;
+    document_type: string;
+    usage_mode: FormUsageMode;
+    variant_notes: string;
+    description: string;
+    drafting_guidance: string;
+    practice: string;
+    jurisdictions: string[];
+    required_fields: FormRequiredField[];
+}
+
+export interface FirmFormInput {
+    title?: string;
+    document_type?: string;
+    usage_mode?: FormUsageMode;
+    variant_notes?: string | null;
+    practice?: string | null;
+    jurisdictions?: string[];
+    description?: string | null;
+    drafting_guidance?: string | null;
+    required_fields?: FormRequiredField[];
+    status?: FormStatus;
+}
+
+export async function getFirmForms(): Promise<FirmForm[]> {
+    const result = await apiRequest<{ forms: FirmForm[] }>("/admin/forms");
+    return result.forms;
+}
+
+export async function addFirmForm(
+    documentId: string,
+    notes: FirmFormInput,
+): Promise<FirmForm> {
+    return apiRequest<FirmForm>("/admin/forms", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ document_id: documentId, ...notes }),
+    });
+}
+
+export async function updateFirmForm(
+    formId: string,
+    notes: FirmFormInput,
+): Promise<FirmForm> {
+    return apiRequest<FirmForm>(`/admin/forms/${formId}`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(notes),
+    });
+}
+
+export async function removeFirmForm(formId: string): Promise<void> {
+    await apiRequest(`/admin/forms/${formId}`, { method: "DELETE" });
+}
+
+/** Read a banked document and suggest its notes. Nothing is saved. */
+export async function suggestFirmFormNotes(
+    documentId: string,
+): Promise<FirmFormProposal> {
+    return apiRequest<FirmFormProposal>("/admin/forms/analyze", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ document_id: documentId }),
+    });
+}
+
 export async function getFirmWorkflows(): Promise<FirmWorkflow[]> {
     return apiRequest<FirmWorkflow[]>("/admin/workflows");
 }

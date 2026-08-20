@@ -29,7 +29,7 @@ import {
   devLog,
   resolveDocLabel,
 } from "./types";
-import { TOOLS, WORKFLOW_TOOLS } from "./tools/toolSchemas";
+import { FORM_BANK_TOOLS, TOOLS, WORKFLOW_TOOLS } from "./tools/toolSchemas";
 import {
   parseCitationsWithDiagnostics,
   parsePartialCitationObjects,
@@ -228,7 +228,12 @@ export async function runLLMStream(params: {
   const conversationTools = includeAskInputs
     ? TOOLS
     : TOOLS.filter((tool) => tool.function.name !== "ask_inputs");
-  const baseTools = [...conversationTools, ...researchTools, ...WORKFLOW_TOOLS];
+  const baseTools = [
+    ...conversationTools,
+    ...researchTools,
+    ...WORKFLOW_TOOLS,
+    ...FORM_BANK_TOOLS,
+  ];
   const activeTools = extraTools?.length
     ? [...baseTools, ...mcpTools, ...extraTools]
     : [...baseTools, ...mcpTools];

@@ -112,6 +112,54 @@ export const WORKFLOW_TOOLS = [
   },
 ];
 
+// The firm's own model documents. The list of what the firm banks is already
+// in the system prompt; these are for comparing the versions of one kind of
+// document and opening the one that fits.
+export const FORM_BANK_TOOLS = [
+  {
+    type: "function",
+    function: {
+      name: "open_firm_form",
+      description:
+        "Work with the firm's banked model documents. Give a document_type to get the notes on every version the firm keeps of that kind of document, without opening any of them — that is how you compare them and choose. Give a form_id to open one: its document becomes available in this chat as a Library Template, and its notes come back with it, including the firm's drafting guidance and, for a fill-in form, the blanks to fill. Copy the opened document with replicate_document before changing anything.",
+      parameters: {
+        type: "object",
+        properties: {
+          form_id: {
+            type: "string",
+            description:
+              "The id of one banked entry, as shown in the firm's form bank list.",
+          },
+          document_type: {
+            type: "string",
+            description:
+              "The kind of document, as shown in the firm's form bank list (for example 'operating-agreement'). Returns the notes on every version, opening none.",
+          },
+        },
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "find_firm_form",
+      description:
+        "Search the firm's banked model documents by a few words — the kind of document, the situation it covers, the practice area. Returns matching entries' notes without opening any document. Use this when the firm's form bank list in your instructions says it is not the whole bank.",
+      parameters: {
+        type: "object",
+        properties: {
+          query: {
+            type: "string",
+            description:
+              "A few words describing the document you are looking for.",
+          },
+        },
+        required: ["query"],
+      },
+    },
+  },
+];
+
 export const TOOLS = [
   {
     type: "function",

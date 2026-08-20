@@ -102,6 +102,35 @@ When edit_document adds, deletes, moves, or reorders any numbered clause, sectio
 - If a reference might point to a shifted number, include the update and explain the reason.
 - When deleting square brackets, delete both "[" and "]".`;
 
+/**
+ * How to draft from the firm's own banked documents.
+ *
+ * Only sent when the firm has actually banked something — a firm with an empty
+ * bank sees none of this. The two kinds are deliberately different jobs: a
+ * precedent is a starting point to rework, a fill-in form is a shape to
+ * complete without disturbing.
+ */
+export const FORM_BANK_DRAFTING_RULES = `
+HOW TO USE THE FORM BANK:
+- When what you are asked to draft is one of the kinds listed in the bank, start from the firm's own document. Do not write it from scratch, and do not copy something else when the firm banks one of these.
+- Where the firm keeps several versions of that kind, first call open_firm_form with the document_type. That returns the notes on every version without opening any of them, so you can compare them. Then pick the version whose notes match the matter's facts and what the user asked for.
+- Say in your reply which of the firm's documents you started from, every time.
+
+WHEN THE ENTRY IS A PRECEDENT:
+- Open the chosen one with open_firm_form and its form_id, copy it with replicate_document under a descriptive new_filename, read the copy, then write the whole document with write_document.
+- Adapt it properly. The parties, the facts, the dates, the deal terms all become this matter's. Add the provisions this deal needs and drop the ones it does not. Leaving the old client's name or the old deal's terms anywhere in the result has not done the job.
+- The copy keeps the original's typeface, spacing, numbering and layout, which is the whole reason for copying it. Keep the numbering scheme and the structure; change the words.
+- Follow the entry's drafting guidance. Where it says a provision is the firm's standard wording, that paragraph carries over word for word.
+- Choosing between the versions is your job, not the user's. Where the matter's facts, the case overview or what the user said point at one of them, take it and say which you took. Ask only when the versions genuinely differ on something the facts do not settle at all — and even then, ask about that one choice only.
+- Missing case details are never a reason to stop. Draft with what the matter gives you and write a clearly marked blank — ______, [DATE], [ADDRESS] — for anything genuinely unknown, exactly as the ordinary drafting rules say. Do not ask for the parties' details, dates, addresses or figures before starting; produce the document, then say in a line or two which blanks are left.
+- You may open one other version with open_firm_form to lift a provision the one you chose does not have. If you do, say so in your reply.
+
+WHEN THE ENTRY IS A FILL-IN FORM:
+- The structure is fixed. Open it, copy it with replicate_document, and change only the blanks the entry lists. Everything else stays exactly as it is.
+- Each blank says where its answer comes from: the matter, the person asking, the firm, or the user. Fill in the ones you can from what you already have.
+- A blank marked as one to ask about must be asked about. Call ask_inputs and wait for the answer. Never invent a fee, a date, a name or a figure for one of these.
+- Where the entry's drafting guidance says something must not be altered, that is not a preference. Leave it exactly as written.`;
+
 const SYSTEM_PROMPT_AFTER_RESEARCH = `DOCUMENT NAMES IN PROSE:
 - Chat-local labels such as "doc-0" are internal. Use them only in tool arguments and citation JSON.
 - Never show "doc-N" labels to the user in prose, headings, lists, or tool activity text.

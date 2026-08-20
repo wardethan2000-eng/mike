@@ -11,6 +11,14 @@ import {
 } from "./courtlistenerTools";
 import { executeMcpToolCall, type McpToolEvent } from "../../mcpConnectors";
 import { createServerSupabase } from "../../supabase";
+import { recordAudit } from "../../audit";
+import {
+  formMetadataForModel,
+  listApprovedFormsOfType,
+  loadApprovedForm,
+  readableFirmId,
+  searchApprovedForms,
+} from "../../formBank";
 import { searchMatter, formatForAssistant } from "../../matterSearch";
 import {
   type DocStore,
@@ -695,6 +703,132 @@ export async function runToolCalls(
         tool_call_id: tc.id,
         content: `${instructions}${referenceNotice}`,
       });
+    } else if (
+      tc.function.name === "open_firm_form" ||
+      tc.function.name === "find_firm_form"
+    ) {
+      // The firm's own model documents. Comparing the versions of one kind of
+      // document costs nothing — only opening one loads a file.
+      const respond = (payload: Record<string, unknown>) => {
+        toolResults.push({
+          role: "tool",
+          tool_call_id: tc.id,
+          content: JSON.stringify(payload),
+        });
+      };
+      const firmId = await readableFirmId(db, userId);
+      if (!firmId) {
+        respond({
+          ok: false,
+          error: "The firm's form bank is only for people at the firm.",
+        });
+      } else if (tc.function.name === "find_firm_form") {
+        const query = typeof args.query === "string" ? args.query : "";
+        const matches = await searchApprovedForms(db, firmId, query);
+        respond({
+          ok: true,
+          forms: matches.map(formMetadataForModel),
+          ...(matches.length
+            ? {}
+            : {
+                note: "The firm banks nothing matching that. Draft as you otherwise would.",
+              }),
+        });
+      } else {
+        const formId =
+          typeof args.form_id === "string" ? args.form_id.trim() : "";
+        const documentType =
+          typeof args.document_type === "string"
+            ? args.document_type.trim()
+            : "";
+
+        if (!formId && !documentType) {
+          respond({
+            ok: false,
+            error:
+              "Give either a form_id to open one entry, or a document_type to compare every version of that kind.",
+          });
+        } else if (!formId) {
+          const variants = await listApprovedFormsOfType(
+            db,
+            firmId,
+            documentType,
+          );
+          respond(
+            variants.length
+              ? {
+                  ok: true,
+                  document_type: variants[0].document_type,
+                  forms: variants.map(formMetadataForModel),
+                  next_step:
+                    "Pick the version that matches this matter's facts and open it with open_firm_form and its form_id. If two fit equally and the difference matters, ask which situation applies.",
+                }
+              : {
+                  ok: false,
+                  error: `The firm banks nothing of the kind '${documentType}'.`,
+                },
+          );
+        } else {
+          const form = await loadApprovedForm(db, firmId, formId);
+          const active = form
+            ? await loadActiveVersion(form.document_id, db)
+            : null;
+          if (!form) {
+            respond({
+              ok: false,
+              error: "That entry is not in the firm's form bank.",
+            });
+          } else if (!docIndex || !active?.storage_path) {
+            respond({
+              ok: false,
+              error: "That entry's document could not be opened.",
+              ...formMetadataForModel(form),
+            });
+          } else {
+            const existingLabels = new Set(Object.keys(docIndex));
+            let index = 0;
+            while (existingLabels.has(`doc-${index}`)) index++;
+            const docLabel = `doc-${index}`;
+            const filename =
+              active.filename?.trim() || form.title || "Firm document";
+            docIndex[docLabel] = {
+              document_id: form.document_id,
+              filename,
+              version_id: active.id,
+              version_number: active.version_number ?? null,
+            };
+            docStore.set(docLabel, {
+              storage_path: active.storage_path,
+              file_type: active.file_type ?? "",
+              filename,
+              source_kind: "library_template",
+            });
+            respond({
+              ok: true,
+              doc_id: docLabel,
+              filename,
+              ...formMetadataForModel(form),
+              next_step:
+                "This is one of the firm's own documents and must not be changed. Copy it with replicate_document under a descriptive new_filename, then work on the copy.",
+            });
+            // Worth recording: over time this says which of the firm's
+            // documents actually get used.
+            await recordAudit(db, {
+              userId,
+              action: "form_used",
+              title: form.title,
+              surface: projectId ? "project" : "assistant",
+              projectId: projectId ?? null,
+              documentId: form.document_id,
+              detail: {
+                form_id: form.id,
+                document_type: form.document_type,
+                usage_mode: form.usage_mode,
+              },
+            });
+          }
+        }
+      }
     } else if (tc.function.name === "read_table_cells" && tabularStore) {
       const colIndices = args.col_indices as number[] | undefined;
       const rowIndices = args.row_indices as number[] | undefined;

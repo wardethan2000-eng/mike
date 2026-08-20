@@ -21,6 +21,7 @@ import {
     type FirmWorkflow,
 } from "@/app/lib/mikeApi";
 import { SettingsSection } from "../../settings/SettingsSection";
+import { FormBankSection } from "./FormBankSection";
 import { AdminErrorBanner } from "../AdminErrorBanner";
 import { errorMessage, formatDate } from "../adminHelpers";
 
@@ -405,6 +406,8 @@ export default function AdminContentPage() {
                     )}
                 </SettingsSection>
             </section>
+
+            <FormBankSection onError={setError} />
 
             <ConfirmPopup
                 open={!!pendingRemoval}

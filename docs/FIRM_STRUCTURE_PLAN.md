@@ -723,6 +723,64 @@ reads it) — same algorithm, same env secret.
 
 ## 6b. Phase 5 — Form bank (precedents + fillable forms)
 
+> **STATUS: BUILT AND DEPLOYED 2026-08-20.** What shipped, and where it differs
+> from the plan below:
+>
+> - **Migration** `20260820_07_form_bank.sql`, applied live: the `firm_forms`
+>   table, one row of notes per banked document. Rehearsed twice on the scratch
+>   database first; the database was backed up before it was applied.
+> - **Nothing here holds a document.** The bytes stay on the firm's library
+>   shelves where Phase 3 put them. Taking an entry out of the bank removes the
+>   notes and leaves the document alone — checked live.
+> - **Who may run the bank is the same question as who may change the firm
+>   library**: an administrator, or anyone given the job. That meant a separate
+>   router, `/admin/forms`, mounted *before* `/admin` in `app.ts` — the `/admin`
+>   router puts an administrators-only gate on everything under it, which would
+>   otherwise turn away the very people who look after the library.
+> - **The list of banked documents rides `whoIsAskingSection`**, which Phase 2
+>   already wired into all three chat paths, so nothing new had to be threaded.
+>   It is quiet: a firm that banks nothing adds nothing to the prompt, and the
+>   drafting rules for the two modes are only sent when there is something to
+>   apply them to.
+> - **Two tools, not one plus a fallback.** `open_firm_form` does both jobs —
+>   given a kind of document it returns the notes on every approved version
+>   without opening any (the comparison step), and given one entry's id it
+>   makes that document available in the chat as a Library Template, so the
+>   existing "copy it before you change it" rules apply unchanged.
+>   `find_firm_form` is the over-the-cap search. Both are offered to every chat
+>   alongside the workflow tools.
+> - **One prompt rule had to be added that the plan did not anticipate.** The
+>   first live run had Mike compare the two operating agreements correctly and
+>   then stop to ask, in a matter whose facts plainly settled the choice. The
+>   rules now say that choosing is Mike's job where the facts point at one
+>   version, that asking is for a choice the facts genuinely do not settle, and
+>   that missing case details are never a reason to stop — draft with marked
+>   blanks, exactly as the ordinary drafting rules already said.
+> - **Screens**: Administration → Content gained a Form bank section, grouped by
+>   kind of document ("Operating agreement — 2 versions" opening to its
+>   versions), with a Precedent/Fill-in form control, a Draft/Approved control,
+>   and the list of blanks for a fill-in form. Adding one offers to read the
+>   document and suggest its notes; nothing is saved until a person presses Save.
+> - **Verified**: backend 916 passing / 24 skipped, frontend 377. Four live
+>   scripts on VM 133, all green, with durable copies in `/home/ubuntu/`:
+>   `/tmp/smoke5.sh` (49 checks against the running server),
+>   `/tmp/form-bank-check.sh` and `/tmp/form-bank-check2.sh` (real chats with a
+>   real model, then the produced .docx opened and held against the precedent).
+>   The other six scripts were re-run afterwards and are still green.
+> - **Acceptance items 1 and 3 were judged from the Word file, not the
+>   transcript**, as the plan insists. Two operating agreements went into the
+>   bank; a different member, in a matter whose facts said two individual
+>   members, asked for one and attached nothing. The produced .docx carried the
+>   precedent's typeface, text size and numbering definitions; carried the
+>   matter's own parties throughout; had no trace of either precedent's parties;
+>   and reproduced the provision flagged in `drafting_guidance` word for word.
+> - **Not built from the plan below**: the Library page does not badge banked
+>   templates with "Precedent"/"Form". The chat flow is the product and members
+>   never need to touch the bank; the badge is cosmetic and can be added later.
+> - **Still open**: nobody has clicked through the Form bank screen in a
+>   browser — it is covered by unit tests and its API by the live scripts, but
+>   it wants the same look-at-it pass the other Administration screens want.
+
 Goal: the firm banks its model documents once, and drafting starts from them
 automatically — without the user hunting for or attaching anything. Two
 distinct kinds live in one bank, distinguished by `usage_mode`:
