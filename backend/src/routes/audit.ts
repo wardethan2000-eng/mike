@@ -17,6 +17,8 @@ const EXPORT_LIMIT = 2000;
 // page keeps the offset well inside Postgres' integer range.
 const MAX_PAGE = 100_000;
 const DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
+/** A full ISO instant, as the browser's toISOString() produces. */
+const INSTANT_RE = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d{1,3})?Z$/;
 
 export async function accessibleProjectIds(
   db: ReturnType<typeof createServerSupabase>,
@@ -81,13 +83,17 @@ export function parseQuery(
   const to = str(raw.to);
   const requestedSortBy = str(raw.sort_by);
   const requestedSortDirection = str(raw.sort_dir);
-  // Date filters come from <input type="date"> and are compared as calendar
-  // days. Reject anything that isn't a bare YYYY-MM-DD — a value like
-  // "2026-07-30T12:00:00Z" would become "...ZT23:59:59.999Z" (F8) and 500.
-  if (from && !DATE_RE.test(from))
-    return { ok: false, error: "Invalid 'from' date; expected YYYY-MM-DD" };
-  if (to && !DATE_RE.test(to))
-    return { ok: false, error: "Invalid 'to' date; expected YYYY-MM-DD" };
+  // A date filter is either a bare calendar day (YYYY-MM-DD), read as a UTC
+  // day, or a precise instant, used as given — which is how the list can mean
+  // "up to the end of today where the reader is" rather than the end of the
+  // UTC day. Anything else is refused: a half-formed value would be pasted
+  // into a comparison string and blow up as a 500.
+  const isDayOrInstant = (value: string) =>
+    DATE_RE.test(value) || INSTANT_RE.test(value);
+  if (from && !isDayOrInstant(from))
+    return { ok: false, error: "Invalid 'from' date; expected YYYY-MM-DD or an ISO timestamp" };
+  if (to && !isDayOrInstant(to))
+    return { ok: false, error: "Invalid 'to' date; expected YYYY-MM-DD or an ISO timestamp" };
   if (
     requestedSortBy &&
     !AUDIT_SORT_FIELDS.includes(requestedSortBy as AuditSortField)
@@ -140,8 +146,15 @@ export async function queryEvents(
   if (q.status) query = query.eq("status", q.status);
   if (q.surface) query = query.eq("surface", q.surface);
   if (q.q) query = query.ilike("title", `%${escapeLikePattern(q.q)}%`);
+  // A caller may send a plain day (2026-08-19) or a precise instant. A plain
+  // day is read as a UTC day, which is what it has always meant here; an
+  // instant is used as given, so a caller can say "the end of today where I
+  // am" and mean it.
   if (q.from) query = query.gte("created_at", q.from);
-  if (q.to) query = query.lte("created_at", `${q.to}T23:59:59.999Z`);
+  if (q.to) {
+    const isInstant = q.to.includes("T");
+    query = query.lte("created_at", isInstant ? q.to : `${q.to}T23:59:59.999Z`);
+  }
   const result = await query
     .order(q.sortBy, {
       ascending: q.sortDirection === "asc",

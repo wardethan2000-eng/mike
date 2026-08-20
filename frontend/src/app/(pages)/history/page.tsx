@@ -53,6 +53,14 @@ const ACTION_LABELS: Record<string, string> = {
   "export.chats": "Chat export",
   "export.account": "Account export",
   "export.tabular": "Review export",
+  "memory.added": "Case fact added",
+  "memory.edited": "Case fact edited",
+  "memory.replaced": "Case fact replaced",
+  "memory.pinned": "Case fact pinned",
+  "memory.accepted": "Suggested fact kept",
+  "memory.dismissed": "Suggested fact turned down",
+  "memory.auto_saved": "Fact saved without asking",
+  "memory.removed": "Case fact removed",
 };
 
 const STATUS_DOT_STYLES: Record<string, string> = {
@@ -114,6 +122,24 @@ function eventHref(event: AuditEvent): string | null {
 function localDateValue(date: Date): string {
   const offset = date.getTimezoneOffset() * 60_000;
   return new Date(date.getTime() - offset).toISOString().slice(0, 10);
+}
+
+/**
+ * The picker works in the reader's own days, but the server stores an instant.
+ * "Up to and including today" has to mean the end of today where the reader is
+ * sitting, not the end of today in UTC — otherwise, anywhere west of London,
+ * everything done in the evening disappears from the list until tomorrow.
+ */
+function dayStartInstant(value: string): string | undefined {
+    if (!value) return undefined;
+    const [year, month, day] = value.split("-").map(Number);
+    return new Date(year, month - 1, day, 0, 0, 0, 0).toISOString();
+}
+
+function dayEndInstant(value: string): string | undefined {
+    if (!value) return undefined;
+    const [year, month, day] = value.split("-").map(Number);
+    return new Date(year, month - 1, day, 23, 59, 59, 999).toISOString();
 }
 
 function dateFromLocalValue(value: string): Date {
@@ -192,8 +218,8 @@ export default function HistoryPage() {
             action: action || undefined,
             status: status || undefined,
             surface: surface || undefined,
-            from: from || undefined,
-            to: to || undefined,
+            from: dayStartInstant(from),
+            to: dayEndInstant(to),
             sortBy: sort?.key,
             sortDirection: sort?.direction,
             page: nextPage,
@@ -234,8 +260,8 @@ export default function HistoryPage() {
         action: action || undefined,
         status: status || undefined,
         surface: surface || undefined,
-        from: from || undefined,
-        to: to || undefined,
+        from: dayStartInstant(from),
+        to: dayEndInstant(to),
         sortBy: sort?.key,
         sortDirection: sort?.direction,
       });

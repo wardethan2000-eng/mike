@@ -63,15 +63,35 @@ describe("parseQuery", () => {
         }
     });
 
-    it("rejects from/to that are not bare YYYY-MM-DD", () => {
-        expect(parseQuery({ to: "2026-07-30T12:00:00Z" }, 50)).toEqual({
-            ok: false,
-            error: expect.stringContaining("to"),
-        });
-        expect(parseQuery({ from: "not-a-date" }, 50)).toEqual({
-            ok: false,
-            error: expect.stringContaining("from"),
-        });
+    it("takes a precise instant as well as a bare day", () => {
+        // The list has to be able to mean "up to the end of today where the
+        // reader is sitting", which is not the end of the day in UTC.
+        const result = parseQuery({ to: "2026-07-30T12:00:00Z" }, 50);
+        expect(result.ok && result.query.to).toBe("2026-07-30T12:00:00Z");
+        const withMillis = parseQuery({ to: "2026-07-30T23:59:59.999Z" }, 50);
+        expect(withMillis.ok && withMillis.query.to).toBe(
+            "2026-07-30T23:59:59.999Z",
+        );
+    });
+
+    it("rejects from/to that are neither a day nor an instant", () => {
+        // A half-formed value would be pasted into the comparison string and
+        // blow up as a 500, so it has to be refused here.
+        for (const bad of [
+            "not-a-date",
+            "2026-07-30T12:00:00",
+            "2026-07-30T",
+            "2026-7-3",
+        ]) {
+            expect(parseQuery({ from: bad }, 50)).toEqual({
+                ok: false,
+                error: expect.stringContaining("from"),
+            });
+            expect(parseQuery({ to: bad }, 50)).toEqual({
+                ok: false,
+                error: expect.stringContaining("to"),
+            });
+        }
     });
 
     it("accepts well-formed dates and trims free-text filters", () => {
