@@ -12,6 +12,7 @@ import { useAuth } from "@/app/contexts/AuthContext";
 import {
     type ApiKeyState,
     type ApiKeyProvider,
+    type BarAdmission,
     type UserProfile as ApiUserProfile,
     getUserProfile,
     isMfaRequiredError,
@@ -33,6 +34,12 @@ interface UserProfile {
     legalResearchUs: boolean;
     quickActionsVisible: boolean;
     apiKeys: ApiKeyState;
+    /** How this person signs. */
+    profTitle: string | null;
+    profPhone: string | null;
+    practiceAreas: string[];
+    barAdmissions: BarAdmission[];
+    signatureBlock: string | null;
     /** The firm this person belongs to, and what they may do in it. */
     firm: { id: string; name: string } | null;
     firmRole: "admin" | "attorney" | "paralegal" | null;
@@ -55,6 +62,14 @@ interface UserProfileContextType {
         provider: ApiKeyProvider,
         value: string | null,
     ) => Promise<boolean>;
+    /** Save how this person signs. Throws so the page can show why. */
+    updateProfessionalDetails: (details: {
+        profTitle?: string | null;
+        profPhone?: string | null;
+        practiceAreas?: string[];
+        barAdmissions?: BarAdmission[];
+        signatureBlock?: string | null;
+    }) => Promise<void>;
     reloadProfile: () => Promise<void>;
     incrementMessageCredits: () => Promise<boolean>;
 }
@@ -136,6 +151,11 @@ export function UserProfileProvider({ children }: { children: ReactNode }) {
                 legalResearchUs: true,
                 quickActionsVisible: true,
                 apiKeys: emptyApiKeys(),
+                profTitle: null,
+                profPhone: null,
+                practiceAreas: [],
+                barAdmissions: [],
+                signatureBlock: null,
                 firm: null,
                 firmRole: null,
                 canEditFirmLibrary: false,
@@ -265,6 +285,24 @@ export function UserProfileProvider({ children }: { children: ReactNode }) {
         [user],
     );
 
+    // Unlike the others this lets the error through: a rejected bar admission
+    // needs to say what was wrong with it, not just fail quietly.
+    const updateProfessionalDetails = useCallback(
+        async (details: {
+            profTitle?: string | null;
+            profPhone?: string | null;
+            practiceAreas?: string[];
+            barAdmissions?: BarAdmission[];
+            signatureBlock?: string | null;
+        }): Promise<void> => {
+            const updated = await updateUserProfile(details);
+            setProfile((prev) =>
+                prev ? { ...prev, ...toProfile(updated) } : null,
+            );
+        },
+        [],
+    );
+
     const updateApiKey = useCallback(
         async (
             provider: ApiKeyProvider,
@@ -328,6 +366,7 @@ export function UserProfileProvider({ children }: { children: ReactNode }) {
                 updateLegalResearchUs,
                 updateQuickActionsVisible,
                 updateApiKey,
+                updateProfessionalDetails,
                 reloadProfile,
                 incrementMessageCredits,
             }}

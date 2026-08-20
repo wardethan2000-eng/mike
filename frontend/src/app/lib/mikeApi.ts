@@ -449,11 +449,24 @@ export interface UserProfile {
     legalResearchUs: boolean;
     quickActionsVisible: boolean;
     apiKeyStatus: ApiKeyStatus;
+    /** How this person signs: title, bar admissions and signature block. */
+    profTitle: string | null;
+    profPhone: string | null;
+    practiceAreas: string[];
+    barAdmissions: BarAdmission[];
+    signatureBlock: string | null;
     /** The firm this person belongs to, and what they may do in it. */
     firm: { id: string; name: string } | null;
     firm_role: "admin" | "attorney" | "paralegal" | null;
     firm_status: "active" | "deactivated" | null;
     can_edit_firm_library: boolean;
+}
+
+/** Where an attorney is admitted to practise, and under what number. */
+export interface BarAdmission {
+    state: string;
+    bar_number: string;
+    status?: string;
 }
 
 export interface UserLookupResult {
@@ -748,6 +761,11 @@ export async function updateUserProfile(payload: {
     tabularModel?: string;
     legalResearchUs?: boolean;
     quickActionsVisible?: boolean;
+    profTitle?: string | null;
+    profPhone?: string | null;
+    practiceAreas?: string[];
+    barAdmissions?: BarAdmission[];
+    signatureBlock?: string | null;
 }): Promise<UserProfile> {
     return apiRequest<UserProfile>("/user/profile", {
         method: "PATCH",

@@ -25,6 +25,14 @@ create table if not exists public.user_profiles (
   mfa_on_login boolean not null default false,
   legal_research_us boolean not null default true,
   quick_actions_visible boolean not null default true,
+  -- How this person signs: their title, the states they are admitted in and
+  -- under what number, and the block that goes at the foot of a letter,
+  -- stored exactly as they want it to appear.
+  prof_title text,
+  prof_phone text,
+  practice_areas text[] not null default '{}',
+  bar_admissions jsonb not null default '[]'::jsonb,
+  signature_block text,
   created_at timestamptz not null default now(),
   updated_at timestamptz not null default now()
 );

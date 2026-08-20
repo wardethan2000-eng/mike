@@ -1,6 +1,7 @@
 import { Router } from "express";
 import { requireAuth } from "../middleware/auth";
 import { createServerSupabase } from "../lib/supabase";
+import { whoIsAskingSection } from "../lib/draftingContext";
 import { recordChatTurn } from "../lib/audit";
 import {
     buildProjectDocContext,
@@ -243,8 +244,13 @@ projectChatRouter.post("/", requireAuth, async (req, res) => {
         projectId,
         lastUser?.content ?? "",
     );
+    // Who is asking, and on whose behalf: the firm's details and the
+    // attorney's own, so a letter can be signed properly instead of being
+    // signed by nobody.
+    const askerSection = await whoIsAskingSection(db, userId, userEmail);
     let systemPromptExtra =
         PROJECT_SYSTEM_PROMPT_EXTRA +
+        askerSection +
         caseOverviewPromptSection(
             caseContext.overview,
             nonce,

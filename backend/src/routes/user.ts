@@ -6,6 +6,12 @@ import { recordAudit } from "../lib/audit";
 import { getUiPreferences, saveUiPreferences } from "../lib/uiPreferences";
 import { getFirm, getMembership } from "../lib/firm";
 import {
+    loadProfessionalDetails,
+    normalizeBarAdmissions,
+    type BarAdmission,
+} from "../lib/draftingContext";
+
+import {
     DEFAULT_TABULAR_MODEL,
     DEFAULT_TITLE_MODEL,
     CLAUDE_LOW_MODELS,
@@ -48,6 +54,11 @@ import { findProfileUserByEmail } from "../lib/userLookup";
 export const userRouter = Router();
 
 const MONTHLY_CREDIT_LIMIT = 999999;
+
+/** Room for a full block of address, phone and bar lines, not an essay. */
+const MAX_SIGNATURE_BLOCK_CHARS = 2000;
+const MAX_BAR_ADMISSIONS = 20;
+const MAX_PRACTICE_AREAS = 25;
 
 type UserProfileRow = {
     display_name: string | null;
@@ -336,6 +347,11 @@ function validateProfilePayload(body: unknown):
               tabular_model?: string;
               legal_research_us?: boolean;
               quick_actions_visible?: boolean;
+              prof_title?: string | null;
+              prof_phone?: string | null;
+              practice_areas?: string[];
+              bar_admissions?: BarAdmission[];
+              signature_block?: string | null;
               updated_at: string;
           };
       }
@@ -352,6 +368,11 @@ function validateProfilePayload(body: unknown):
         "tabularModel",
         "legalResearchUs",
         "quickActionsVisible",
+        "profTitle",
+        "profPhone",
+        "practiceAreas",
+        "barAdmissions",
+        "signatureBlock",
     ]);
     const invalidField = Object.keys(raw).find(
         (key) => !allowedFields.has(key),
@@ -370,6 +391,11 @@ function validateProfilePayload(body: unknown):
         tabular_model?: string;
         legal_research_us?: boolean;
         quick_actions_visible?: boolean;
+        prof_title?: string | null;
+        prof_phone?: string | null;
+        practice_areas?: string[];
+        bar_admissions?: BarAdmission[];
+        signature_block?: string | null;
         updated_at: string;
     } = { updated_at: new Date().toISOString() };
 
@@ -433,6 +459,91 @@ function validateProfilePayload(body: unknown):
             };
         }
         update.quick_actions_visible = raw.quickActionsVisible;
+    }
+
+    for (const [field, column, limit] of [
+        ["profTitle", "prof_title", 120],
+        ["profPhone", "prof_phone", 60],
+    ] as const) {
+        if (!(field in raw)) continue;
+        if (raw[field] !== null && typeof raw[field] !== "string") {
+            return { ok: false, detail: `${field} must be a string or null` };
+        }
+        const value = (raw[field] as string | null)?.trim() || null;
+        if (value && value.length > limit) {
+            return { ok: false, detail: `${field} is too long` };
+        }
+        update[column] = value;
+    }
+
+    if ("practiceAreas" in raw) {
+        if (
+            !Array.isArray(raw.practiceAreas) ||
+            raw.practiceAreas.some((area) => typeof area !== "string")
+        ) {
+            return {
+                ok: false,
+                detail: "practiceAreas must be a list of words",
+            };
+        }
+        update.practice_areas = (raw.practiceAreas as string[])
+            .map((area) => area.trim())
+            .filter((area) => area !== "")
+            .slice(0, MAX_PRACTICE_AREAS);
+    }
+
+    if ("barAdmissions" in raw) {
+        if (!Array.isArray(raw.barAdmissions)) {
+            return { ok: false, detail: "barAdmissions must be a list" };
+        }
+        if (raw.barAdmissions.length > MAX_BAR_ADMISSIONS) {
+            return {
+                ok: false,
+                detail: `You can list at most ${MAX_BAR_ADMISSIONS} bar admissions.`,
+            };
+        }
+        // A half-filled row is a mistake worth naming rather than silently
+        // dropping: a bar number with no state cannot be used to sign.
+        for (const entry of raw.barAdmissions) {
+            if (!entry || typeof entry !== "object" || Array.isArray(entry)) {
+                return {
+                    ok: false,
+                    detail: "Each bar admission needs a state and a number.",
+                };
+            }
+            const row = entry as Record<string, unknown>;
+            const state =
+                typeof row.state === "string" ? row.state.trim() : "";
+            const barNumber =
+                typeof row.bar_number === "string" ? row.bar_number.trim() : "";
+            if (!state || !barNumber) {
+                return {
+                    ok: false,
+                    detail: "Each bar admission needs a state and a number.",
+                };
+            }
+        }
+        update.bar_admissions = normalizeBarAdmissions(raw.barAdmissions);
+    }
+
+    if ("signatureBlock" in raw) {
+        if (
+            raw.signatureBlock !== null &&
+            typeof raw.signatureBlock !== "string"
+        ) {
+            return {
+                ok: false,
+                detail: "signatureBlock must be a string or null",
+            };
+        }
+        const block = (raw.signatureBlock as string | null) ?? null;
+        if (block && block.length > MAX_SIGNATURE_BLOCK_CHARS) {
+            return {
+                ok: false,
+                detail: `A signature block can be at most ${MAX_SIGNATURE_BLOCK_CHARS} characters.`,
+            };
+        }
+        update.signature_block = block?.trim() || null;
     }
 
     return { ok: true, update };
@@ -540,10 +651,18 @@ async function loadProfile(
     // at all. It is not what enforces them — /admin does that itself.
     const membership = await getMembership(db, userId);
     const firm = membership ? await getFirm(db) : null;
+    // How this person signs. Read separately from the profile above, whose
+    // query carries a fallback chain for older databases.
+    const professional = await loadProfessionalDetails(db, userId);
 
     return {
         data: {
             ...serializeProfile(row, options.apiKeyStatus),
+            profTitle: professional.prof_title,
+            profPhone: professional.prof_phone,
+            practiceAreas: professional.practice_areas,
+            barAdmissions: professional.bar_admissions,
+            signatureBlock: professional.signature_block,
             firm: firm ? { id: firm.id, name: firm.name } : null,
             firm_role: membership?.role ?? null,
             firm_status: membership?.status ?? null,

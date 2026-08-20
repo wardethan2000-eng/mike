@@ -2,6 +2,7 @@ import { Router } from "express";
 import { randomUUID } from "node:crypto";
 import { requireAuth } from "../middleware/auth";
 import { createServerSupabase } from "../lib/supabase";
+import { whoIsAskingSection } from "../lib/draftingContext";
 import { recordChatTurn } from "../lib/audit";
 import {
     buildDocContext,
@@ -534,10 +535,14 @@ chatRouter.post("/", requireAuth, async (req, res) => {
         });
     }
 
+    // Who is asking, and on whose behalf — the same details a matter chat
+    // gets, so drafting outside a matter still signs properly.
+    const askerSection = await whoIsAskingSection(db, userId, userEmail);
+
     let apiMessages = buildMessages(
         enrichedMessages,
         docAvailability,
-        undefined,
+        askerSection || undefined,
         undefined,
         legalResearchUs,
         nonce,

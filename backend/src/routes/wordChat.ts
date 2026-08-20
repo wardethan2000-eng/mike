@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 import { Router } from "express";
 import { requireAuth } from "../middleware/auth";
 import { createServerSupabase } from "../lib/supabase";
+import { whoIsAskingSection } from "../lib/draftingContext";
 import {
   AssistantStreamError,
   ACTIVE_WORD_DOCUMENT_FILENAME,
@@ -417,10 +418,12 @@ wordChatRouter.post("/", requireAuth, async (req, res) => {
     matterId,
     lastUser?.content ?? "",
   );
+  const askerSection = await whoIsAskingSection(db, userId, userEmail);
   const apiMessages = buildMessages(
     enrichedMessages,
     docAvailability,
     buildWordChatSystemPrompt() +
+      askerSection +
       caseOverviewPromptSection(
         caseContext.overview,
         nonce,
