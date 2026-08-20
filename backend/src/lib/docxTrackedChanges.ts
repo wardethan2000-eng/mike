@@ -961,6 +961,107 @@ export async function extractDocxBodyParagraphs(
     return lines;
 }
 
+/** True when a toggle property (w:b, w:i, w:u, ...) is present and not explicitly off. */
+function toggleOn(rPr: XNode | null, name: string): boolean {
+    if (!rPr) return false;
+    const el = findChildByName(elChildren(rPr), name);
+    if (!el) return false;
+    const val = elAttrs(el)["@_w:val"];
+    if (val == null) return true;
+    const v = String(val).toLowerCase();
+    return v !== "0" && v !== "false" && v !== "none";
+}
+
+/**
+ * Wrap a span of text in an inline marker, markdown-style: whitespace at the
+ * edges stays outside the marker, and a span the marker syntax cannot express
+ * (marker characters inside, or an empty core) is left unwrapped.
+ */
+function wrapMarked(text: string, marker: "**" | "*" | "_"): string {
+    const lead = /^\s*/.exec(text)![0];
+    if (lead.length === text.length) return text;
+    const trail = /\s*$/.exec(text)![0];
+    const core = text.slice(lead.length, text.length - trail.length);
+    if (marker === "_" ? /[_\n]/.test(core) : /\*/.test(core)) return text;
+    return lead + marker + core + marker + trail;
+}
+
+/**
+ * The body text with bold/italic/underline shown as inline markers —
+ * `**bold**`, `*italic*`, `_underline_` — one string per paragraph. This is
+ * what the model reads: without the markers it cannot know which words the
+ * source document emphasises, so it cannot keep them when rewriting.
+ *
+ * The syntax matches what the drafting tools parse back (inlineEditRuns), so
+ * a model that echoes the markers reproduces the formatting. A run carrying
+ * more than one mark gets the strongest one (bold, then underline, then
+ * italic) — the parser has no syntax for combinations.
+ */
+export async function extractDocxBodyParagraphsMarked(
+    bytes: Buffer,
+): Promise<string[]> {
+    const zip = await JSZip.loadAsync(bytes);
+    const docXmlFile = getZipEntry(zip, "word/document.xml");
+    if (!docXmlFile) return [];
+    const docXmlRaw = await docXmlFile.async("string");
+    const parser = createParser();
+    const tree = parser.parse(docXmlRaw) as XNode[];
+    const bodyChildren = findBody(tree);
+    if (!bodyChildren) return [];
+
+    const paragraphMarked = (paraChildren: XNode[]): string => {
+        const flat = flattenParagraph(paraChildren);
+        // Adjacent runs with the same marks merge into one span, so a word
+        // Word split across runs is not wrapped piecemeal.
+        const spans: { text: string; marker: "" | "**" | "*" | "_" }[] = [];
+        for (const slot of flat.runs) {
+            const text = slot.textNodes.map((tn) => tn.text).join("");
+            if (!text) continue;
+            const marker = toggleOn(slot.rPr, "w:b")
+                ? "**"
+                : toggleOn(slot.rPr, "w:u")
+                  ? "_"
+                  : toggleOn(slot.rPr, "w:i")
+                    ? "*"
+                    : "";
+            const prev = spans[spans.length - 1];
+            if (prev && prev.marker === marker) prev.text += text;
+            else spans.push({ text, marker });
+        }
+        return spans
+            .map((s) => (s.marker ? wrapMarked(s.text, s.marker) : s.text))
+            .join("");
+    };
+
+    const lines: string[] = [];
+    const collect = (nodes: XNode[]) => {
+        for (const n of nodes) {
+            const name = elName(n);
+            if (!name) continue;
+            if (name === "w:p") {
+                lines.push(paragraphMarked(elChildren(n)));
+            } else if (
+                name === "w:tbl" ||
+                name === "w:tr" ||
+                name === "w:tc" ||
+                name === "w:sdt" ||
+                name === "w:sdtContent"
+            ) {
+                collect(elChildren(n));
+            }
+        }
+    };
+    collect(bodyChildren);
+    return lines;
+}
+
+/** extractDocxBodyText, with the inline formatting markers included. */
+export async function extractDocxBodyTextMarked(
+    bytes: Buffer,
+): Promise<string> {
+    return (await extractDocxBodyParagraphsMarked(bytes)).join("\n");
+}
+
 /**
  * Walk document.xml in render order and collect the w:id for every
  * w:ins / w:del wrapper. The order here matches what docx-preview emits

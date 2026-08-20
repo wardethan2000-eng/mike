@@ -267,6 +267,34 @@ describe("runEditDocument edit mode", () => {
         expect(result.tracked).toBe(false);
     });
 
+    it("matches anchors copied from the marked read view", async () => {
+        // read_document shows **bold** markers that are not in the document's
+        // characters; an edit that echoes them must still land, and the
+        // replacement must come out without literal asterisks.
+        const db = makeDb(fixtureTables({ is_replica: true }));
+        const result = await runEditDocument({
+            documentId: "doc-1",
+            userId: "user-1",
+            edits: [
+                {
+                    find: "**Cooks Guttering**",
+                    replace: "**Central Spray Foam**",
+                    context_before: "between ",
+                    context_after: ", a Kansas",
+                },
+            ],
+            db,
+        });
+
+        expect(result.ok).toBe(true);
+        if (!result.ok) return;
+        expect(result.applied_count).toBe(1);
+        const saved = uploads.get(result.storage_path)!;
+        await expect(extractDocxBodyText(saved)).resolves.toBe(
+            "This Agreement is entered into between Central Spray Foam, a Kansas company.",
+        );
+    });
+
     it("goes back to tracked changes once the user has worked on the copy", async () => {
         const tables = fixtureTables({ is_replica: true });
         tables.document_versions.push({

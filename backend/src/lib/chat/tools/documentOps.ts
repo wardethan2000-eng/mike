@@ -10,6 +10,7 @@ import {
   applyTrackedEdits,
   extractDocxBodyParagraphs,
   extractDocxBodyText,
+  extractDocxBodyTextMarked,
   resolveTrackedChange,
   StaleDocumentError,
   type EditInput,
@@ -1568,7 +1569,36 @@ export async function runEditDocument(params: {
   const current = await loadCurrentVersionBytes(documentId, db);
   if (!current) return { ok: false, error: "Could not load document bytes." };
 
-  const applied = await applyTrackedEdits(current.bytes, edits, {
+  // read_document shows the model **bold**/_underline_/*italic* markers that
+  // are not in the document's actual characters. An anchor copied from that
+  // view would never match, so any anchor that does not appear verbatim in
+  // the document is retried with the markers stripped. Replacement text sheds
+  // the markers too — inserted words inherit the formatting around them, and
+  // literal asterisks in a contract would be wrong.
+  const needsStrip = (s: string) => !!s && stripInlineMarkers(s) !== s;
+  let normalizedEdits = edits;
+  if (
+    edits.some(
+      (e) =>
+        needsStrip(e.find) ||
+        needsStrip(e.context_before) ||
+        needsStrip(e.context_after) ||
+        needsStrip(e.replace),
+    )
+  ) {
+    const flatText = await extractDocxBodyText(current.bytes);
+    const anchor = (s: string) =>
+      !needsStrip(s) || flatText.includes(s) ? s : stripInlineMarkers(s);
+    normalizedEdits = edits.map((e) => ({
+      ...e,
+      find: anchor(e.find),
+      context_before: anchor(e.context_before),
+      context_after: anchor(e.context_after),
+      replace: needsStrip(e.replace) ? stripInlineMarkers(e.replace) : e.replace,
+    }));
+  }
+
+  const applied = await applyTrackedEdits(current.bytes, normalizedEdits, {
     author: "Mike",
   });
   const { changes, errors } = applied;
@@ -1725,6 +1755,13 @@ export async function runEditDocument(params: {
 // ---------------------------------------------------------------------------
 // Writing a whole document
 // ---------------------------------------------------------------------------
+
+/** The plain characters of a marker-carrying string, as inlineEditRuns reads it. */
+export function stripInlineMarkers(line: string): string {
+  return inlineEditRuns(line)
+    .map((run) => run.text)
+    .join("");
+}
 
 /**
  * Split a line into runs on the inline markers the assistant already uses when
@@ -2274,9 +2311,11 @@ export async function readDocumentContent(
         `[read_document] pdf extracted length=${text.length} for filename="${docInfo.filename}"`,
       );
     } else if (fileType === "docx") {
-      // Use the same flattening as the edit_document matcher so the
-      // LLM sees exactly the characters it can anchor against.
-      text = await extractDocxBodyText(Buffer.from(raw));
+      // Same flattening as the edit_document matcher, plus inline
+      // **bold** / *italic* / _underline_ markers so the model can see —
+      // and keep — the document's emphasis when it rewrites. Anchors that
+      // echo the markers are normalised back in runEditDocument.
+      text = await extractDocxBodyTextMarked(Buffer.from(raw));
       devLog(
         `[read_document] docx extractDocxBodyText length=${text.length} for filename="${docInfo.filename}"`,
       );

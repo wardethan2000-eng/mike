@@ -560,7 +560,7 @@ export const TOOLS = [
           paragraphs: {
             type: "array",
             description:
-              "The complete new document, one entry per paragraph, in order — including headings, clause text, exhibit text and signature lines. Anything left out is deleted from the document. A plain string is a paragraph that keeps the look of the one it replaces, which is what you want for a rewritten clause. Use the object form only where that is not right: for a paragraph you are ADDING whose neighbours look different, or to add a table. Inside a line, write **text** for bold, _text_ for underline and *text* for italic, and a tab character to move to the next tab stop.",
+              "The complete new document, one entry per paragraph, in order — including headings, clause text, exhibit text and signature lines. Anything left out is deleted from the document. A plain string is a paragraph that keeps the look of the one it replaces, which is what you want for a rewritten clause. Use the object form only where that is not right: for a paragraph you are ADDING whose neighbours look different, or to add a table. Inside a line, write **text** for bold, _text_ for underline and *text* for italic, and a tab character to move to the next tab stop. The document text you read shows the same markers — keep them at the corresponding words when you rewrite a paragraph, or its emphasis is lost.",
             items: {
               anyOf: [
                 { type: "string" },
@@ -664,7 +664,7 @@ export const TOOLS = [
                 find: {
                   type: "string",
                   description:
-                    "Exact substring to replace. When revising existing wording, keep it as short as possible — ideally just the words/chars being changed. Use the paragraph's full text to replace or remove the whole paragraph, or an empty string to insert new text at the anchor.",
+                    "Exact substring to replace. When revising existing wording, keep it as short as possible — ideally just the words/chars being changed. Use the paragraph's full text to replace or remove the whole paragraph, or an empty string to insert new text at the anchor. The **bold**/_underline_/*italic* markers shown by read_document are not part of the document's characters; anchors work with or without them.",
                 },
                 replace: {
                   type: "string",
