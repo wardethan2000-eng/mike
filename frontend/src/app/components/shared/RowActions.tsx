@@ -11,6 +11,7 @@ import { createPortal } from "react-dom";
 import {
     Download,
     Eye,
+    FileText,
     EyeOff,
     FolderMinus,
     Hash,
@@ -47,6 +48,7 @@ interface Props {
     deleting?: boolean;
     deleteDisabled?: boolean;
     onEditDetails?: () => void;
+    onEditText?: () => void;
     onRename?: () => void;
     onUpdateCmNumber?: () => void;
     newSubfolderLabel?: string;
@@ -78,6 +80,7 @@ export const RowActionMenuItems = forwardRef<
     deleting,
     deleteDisabled = false,
     onEditDetails,
+    onEditText,
     onRename,
     onUpdateCmNumber,
     newSubfolderLabel = "New subfolder",
@@ -112,6 +115,15 @@ export const RowActionMenuItems = forwardRef<
                 >
                     <Pencil className="h-3.5 w-3.5" />
                     {renameLabel}
+                </LiquidDropdownButton>
+            )}
+            {onEditText && (
+                <LiquidDropdownButton
+                    onClick={() => { onClose(); onEditText(); }}
+                    className={ROW_ACTION_ITEM_CLASS}
+                >
+                    <FileText className="h-3.5 w-3.5" />
+                    Edit text
                 </LiquidDropdownButton>
             )}
             {onEditDetails && (

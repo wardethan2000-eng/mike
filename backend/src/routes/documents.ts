@@ -33,7 +33,7 @@ import {
   contentSha256,
   loadActiveVersion,
 } from "../lib/documentVersions";
-import { ensureDocAccess } from "../lib/access";
+import { ensureDocAccess, ensureDocReadAccess } from "../lib/access";
 import { singleFileUpload } from "../lib/upload";
 import {
   ALLOWED_DOCUMENT_TYPES,
@@ -140,7 +140,7 @@ documentsRouter.get("/:documentId/display", requireAuth, async (req, res) => {
     .single();
   if (!doc)
     return void res.status(404).json({ detail: "Document not found" });
-  const access = await ensureDocAccess(doc, userId, userEmail, db);
+  const access = await ensureDocReadAccess(doc, userId, userEmail, db);
   if (!access.ok)
     return void res.status(404).json({ detail: "Document not found" });
 
@@ -205,8 +205,8 @@ documentsRouter.post("/download-zip", requireAuth, async (req, res) => {
   const accessChecks = await Promise.all(
     (rawDocs ?? []).map(async (d) => ({
       doc: d,
-      access: await ensureDocAccess(
-        d as { user_id: string; project_id: string | null },
+      access: await ensureDocReadAccess(
+        d as { id: string; user_id: string; project_id: string | null },
         userId,
         userEmail,
         db,
@@ -262,7 +262,7 @@ documentsRouter.get("/:documentId/url", requireAuth, async (req, res) => {
     .single();
   if (error || !doc)
     return void res.status(404).json({ detail: "Document not found" });
-  const access = await ensureDocAccess(doc, userId, userEmail, db);
+  const access = await ensureDocReadAccess(doc, userId, userEmail, db);
   if (!access.ok)
     return void res.status(404).json({ detail: "Document not found" });
 
@@ -313,7 +313,7 @@ documentsRouter.get("/:documentId/docx", requireAuth, async (req, res) => {
     .single();
   if (error || !doc)
     return void res.status(404).json({ detail: "Document not found" });
-  const access = await ensureDocAccess(doc, userId, userEmail, db);
+  const access = await ensureDocReadAccess(doc, userId, userEmail, db);
   if (!access.ok)
     return void res.status(404).json({ detail: "Document not found" });
 
@@ -374,7 +374,7 @@ documentsRouter.get("/:documentId/versions", requireAuth, async (req, res) => {
     .single();
   if (!doc)
     return void res.status(404).json({ detail: "Document not found" });
-  const access = await ensureDocAccess(doc, userId, userEmail, db);
+  const access = await ensureDocReadAccess(doc, userId, userEmail, db);
   if (!access.ok)
     return void res.status(404).json({ detail: "Document not found" });
 
@@ -2008,6 +2008,9 @@ export async function handleDocumentUpload(
   options: {
     libraryKind?: "file" | "template";
     libraryFolderId?: string | null;
+    /** Set when the upload belongs to the firm's library rather than one
+     *  person's own. */
+    firmId?: string | null;
   } = {},
 ) {
   const file = req.file;
@@ -2033,6 +2036,7 @@ export async function handleDocumentUpload(
       status: "processing",
       library_kind: options.libraryKind ?? "file",
       library_folder_id: options.libraryFolderId ?? null,
+      firm_id: options.firmId ?? null,
     })
     .select("*")
     .single();

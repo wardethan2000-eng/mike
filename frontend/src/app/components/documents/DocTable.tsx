@@ -57,6 +57,7 @@ import {
     type ProjectContextMenu,
 } from "@/app/components/projects/ProjectPageParts";
 import { DocumentSidePanel } from "@/app/components/shared/DocumentSidePanel";
+import { TextNoteModal } from "@/app/components/modals/TextNoteModal";
 import { TableLoadMoreRow } from "@/app/components/shared/TableLoadMoreRow";
 import { LibrarySkeuoIcon } from "@/app/components/shared/AppSidebarSkeuoIcons";
 import {
@@ -445,6 +446,32 @@ export function DocTable({
             a.click();
         } catch (e) {
             console.error("downloadDocVersion failed", e);
+        }
+    }
+
+    // Plain-text documents (notes typed into the matter, or uploaded
+    // .txt/.md files) can be edited in place; saving writes a new version.
+    const [editTextDoc, setEditTextDoc] = useState<Document | null>(null);
+    const [editTextValue, setEditTextValue] = useState<string | null>(null);
+    const editTextDocIdRef = useRef<string | null>(null);
+
+    async function handleEditText(doc: Document) {
+        editTextDocIdRef.current = doc.id;
+        setEditTextDoc(doc);
+        setEditTextValue(null);
+        try {
+            const resolved = await getDocumentUrl(doc.id);
+            const response = await fetch(resolved.url);
+            if (!response.ok) throw new Error(await response.text());
+            const text = await response.text();
+            if (editTextDocIdRef.current === doc.id) setEditTextValue(text);
+        } catch (e) {
+            console.error("Could not open text for editing:", e);
+            if (editTextDocIdRef.current === doc.id) {
+                setEditTextDoc(null);
+                editTextDocIdRef.current = null;
+                setDocumentRenameWarning("Could not open this file for editing.");
+            }
         }
     }
 
@@ -1825,6 +1852,11 @@ export function DocTable({
                                                                 ? () => void toggleVersions(doc.id)
                                                                 : undefined
                                                         }
+                                                        onEditText={
+                                                            isEditableTextType(doc.file_type)
+                                                                ? () => void handleEditText(doc)
+                                                                : undefined
+                                                        }
                                                         onUploadNewVersion={() => void handleUploadNewVersion(doc)}
                                                         onRemoveFromFolder={
                                                             doc.folder_id
@@ -3137,6 +3169,26 @@ export function DocTable({
 
             {renderAddDocumentsModal?.(addDocsOpen, () => setAddDocsOpen(false), handleDocsSelected)}
 
+            <TextNoteModal
+                open={editTextDoc != null}
+                onClose={() => {
+                    setEditTextDoc(null);
+                    editTextDocIdRef.current = null;
+                }}
+                mode="edit"
+                initialTitle={editTextDoc?.filename ?? ""}
+                initialText={editTextValue}
+                onSave={async (_title, text) => {
+                    if (!editTextDoc) return;
+                    const filename = editTextDoc.filename || "Note.txt";
+                    const file = new File([text], filename, {
+                        type: "text/plain",
+                    });
+                    await uploadDocumentVersion(editTextDoc.id, file, filename);
+                    await refreshDocumentVersionState(editTextDoc.id);
+                }}
+            />
+
             <DocumentSidePanel
                 doc={sidePanelDoc}
                 highlight={viewingHighlight}
@@ -3190,4 +3242,9 @@ function extensionChangeWarning(filename: string) {
     return extension
         ? `File extensions cannot be changed here. Keep ${extension} at the end of the name.`
         : "File extensions cannot be changed here.";
+}
+
+function isEditableTextType(fileType: string | null | undefined) {
+    const normalized = (fileType ?? "").toLowerCase();
+    return normalized === "txt" || normalized === "md";
 }

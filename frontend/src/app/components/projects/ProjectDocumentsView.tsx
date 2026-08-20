@@ -10,7 +10,7 @@ import {
     useState,
 } from "react";
 import { useRouter } from "next/navigation";
-import { ChevronDown, ChevronLeft, Plus } from "lucide-react";
+import { ChevronDown, ChevronLeft, FileText, Plus } from "lucide-react";
 import {
     createProjectFolder,
     deleteProjectFolder,
@@ -23,6 +23,10 @@ import {
 } from "@/app/lib/mikeApi";
 import type { Document } from "@/app/components/shared/types";
 import { AddDocumentsModal } from "@/app/components/modals/AddDocumentsModal";
+import {
+    TextNoteModal,
+    textNoteFilename,
+} from "@/app/components/modals/TextNoteModal";
 import {
     DocTable,
     type DocTableFolderBreadcrumb,
@@ -67,6 +71,7 @@ export function ProjectDocumentsView({ projectId, folderId = null }: Props) {
     const [selectionActions, setSelectionActions] =
         useState<DocTableSelectionActions | null>(null);
     const [actionsOpen, setActionsOpen] = useState(false);
+    const [addTextOpen, setAddTextOpen] = useState(false);
     const [directoryPagination, setDirectoryPagination] = useState<{
         projectId: string;
         limits: Record<string, number>;
@@ -307,6 +312,13 @@ export function ProjectDocumentsView({ projectId, folderId = null }: Props) {
                 <Plus className="h-3.5 w-3.5" />
                 <span className="hidden sm:inline">Folder</span>
             </TabPillButton>
+            <TabPillButton
+                onClick={() => setAddTextOpen(true)}
+                disabled={projectLoading}
+            >
+                <FileText className="h-3.5 w-3.5" />
+                <span className="hidden sm:inline">Text</span>
+            </TabPillButton>
         </div>
     );
 
@@ -321,6 +333,18 @@ export function ProjectDocumentsView({ projectId, folderId = null }: Props) {
     return (
         <>
             <ProjectSectionToolbar actions={toolbarActions} />
+            <TextNoteModal
+                open={addTextOpen}
+                onClose={() => setAddTextOpen(false)}
+                mode="add"
+                onSave={async (title, text) => {
+                    const file = new File([text], textNoteFilename(title), {
+                        type: "text/plain",
+                    });
+                    await uploadProjectDocument(projectId, file);
+                    await refreshCollection();
+                }}
+            />
             <MatterSearchPanel
                 projectId={projectId}
                 onOpenSource={(source) => {
