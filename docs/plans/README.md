@@ -40,6 +40,7 @@ Secrets never go in the repository. The live server's keys live in
 | 6 | [Transcripts and chronologies](06-transcripts-and-chronologies.md) | Medium | Litigation work Mike cannot do at all today |
 | 7 | [Workflows for our practice](07-practice-workflows.md) | Small each | Uses machinery that already exists |
 | 8 | [Deadline calculation](08-deadline-calculation.md) | Medium | Narrow, checkable, and useful every week |
+| 9 | [Discovery and productions](09-discovery-and-productions.md) | Large | The whole chain, ending in documents that can go out the door |
 
 Sizes are rough: **small** is a sitting or two, **medium** is several,
 **large** is a project measured in weeks with checkpoints along the way.
