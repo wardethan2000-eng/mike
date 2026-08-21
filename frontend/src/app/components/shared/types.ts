@@ -347,6 +347,19 @@ export type AssistantEvent =
           cluster_id: number;
           document?: PanelDocument;
       }
+    | {
+          /**
+           * The steps the assistant wrote down for this job. The stream
+           * carries one of these every time the list changes; the saved
+           * message keeps only the latest, so history shows one checklist.
+           */
+          type: "task_list";
+          steps: {
+              step: string;
+              status: "pending" | "doing" | "done" | "dropped";
+              reason?: string;
+          }[];
+      }
     | { type: "content"; text: string; isStreaming?: boolean };
 
 export type CaseCitationQuote = {

@@ -202,6 +202,12 @@ services:
       - R2_BUCKET_NAME=mike
       # Local Ollama running on the host. Override OLLAMA_MODEL to change the tag.
       - OLLAMA_BASE_URL=${OLLAMA_BASE_URL:-http://host.docker.internal:11434/v1}
+      # The job list the assistant keeps for a multi-part request. On unless
+      # this is set to 0, which is how a run without it is compared.
+      - CHAT_TASK_LIST=${CHAT_TASK_LIST:-1}
+      # Tool rounds one answer may spend. Left to the code's own default
+      # unless set, and lowered on purpose when testing what a paused turn does.
+      - CHAT_MAX_TOOL_ROUNDS=${CHAT_MAX_TOOL_ROUNDS:-120}
     extra_hosts:
       - "host.docker.internal:host-gateway"
     depends_on:

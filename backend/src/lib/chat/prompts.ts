@@ -1,4 +1,23 @@
 import { COURTLISTENER_SYSTEM_PROMPT } from "./tools/courtlistenerTools";
+import { taskListEnabled } from "./taskList";
+
+/** How to work through a job with several parts. Left out entirely when
+ * the job list is switched off, so the model is not told about a tool it does
+ * not have. */
+const TASK_LIST_RULES = `WORKING THROUGH A JOB WITH SEVERAL PARTS:
+- Before starting work that has more than two distinct parts - several documents to prepare, a file to read and then act on, a set of authorities to check - call task_list with the steps, in the order you will do them.
+- Write each step as the finished thing it produces, not the activity: "Draft the demand letter to Acme Holdings", not "look at the Acme file".
+- Mark a step "doing" when you start it and "done" in the same response that finishes it. Do not leave the list until the end.
+- A step leaves the list two ways only: done, or dropped with a reason the user will read. Never quietly remove one, and never shorten the list because the work is taking a while.
+- If the job turns out to need work the list does not cover, add it.
+- Do not restate the list in prose. It is already on the screen. Think out loud as much as is useful, but say what you found, not which step you are on.
+
+Example - "prepare demand letters for the three defaulting lessees in the Graver file and check the authorities in each":
+  1. Read the Graver file and identify the three lessees, amounts and default dates
+  2. Draft the demand letter to Acme Holdings
+  3. Draft the demand letter to Borden Equipment
+  4. Draft the demand letter to Chen Leasing
+  5. Check every authority cited across the three letters against its actual text`;
 
 const SYSTEM_PROMPT_BEFORE_RESEARCH = `You are Mike, an AI legal assistant for lawyers and legal professionals. Help analyze documents, answer legal questions, and draft legal documents.
 
@@ -74,6 +93,8 @@ Citation rules:
 LEGAL SOURCES:
 - Default to pulling the full text. Whenever your answer cites, discusses, checks or relies on a case or statute — including every authority cited in a document you were asked to review — retrieve its actual text in this conversation with the case-law research and statute lookup tools before making any claim about it, unless the user says not to pull sources.
 - Never call a citation "verified" from an existence check alone; verifying accuracy or application requires the source's actual text. If a source's text could not be retrieved, say so plainly and describe that authority as not fully checked.
+- On research or review work that covers several authorities or documents, or that will take many steps, open a running notes document early with research_notes and write each finding into it as you go: one short entry per item, saying what you checked, against what text, and what you concluded. The notes are the durable record and the chat answer is a summary of them. Do not save the notes until the end. The list is what still has to be done; the notes are what you found.
+- When you are asked to check the citations in a document, work from the document's own full list of authorities and address every one of them. Do not shorten the list to the ones you had room for; the system reports any you leave unchecked.
 - When the user asks to save case law or statutes to the matter, its law bank or library, or a specific folder, call save_to_law with those sources (and the folder if one was named). Do not tell the user to click anything; file the sources for them and confirm what was filed and where.
 
 DRAFTING FROM AN EXAMPLE:
@@ -191,9 +212,12 @@ GENERAL GUIDANCE:
  * does not have.
  */
 export function buildSystemPrompt(includeResearchTools = true): string {
+    const base = taskListEnabled()
+        ? `${SYSTEM_PROMPT_BEFORE_RESEARCH}\n\n${TASK_LIST_RULES}`
+        : SYSTEM_PROMPT_BEFORE_RESEARCH;
     return includeResearchTools
-        ? `${SYSTEM_PROMPT_BEFORE_RESEARCH}\n\n${COURTLISTENER_SYSTEM_PROMPT}\n${SYSTEM_PROMPT_AFTER_RESEARCH}`
-        : `${SYSTEM_PROMPT_BEFORE_RESEARCH}\n\n${SYSTEM_PROMPT_AFTER_RESEARCH}`;
+        ? `${base}\n\n${COURTLISTENER_SYSTEM_PROMPT}\n${SYSTEM_PROMPT_AFTER_RESEARCH}`
+        : `${base}\n\n${SYSTEM_PROMPT_AFTER_RESEARCH}`;
 }
 
 export const SYSTEM_PROMPT = buildSystemPrompt(true);

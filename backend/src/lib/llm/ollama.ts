@@ -113,7 +113,12 @@ export async function streamOllama(
         wrappingUp = true;
         messages.push({
           role: "user",
-          content: wrapUpInstruction(stop, budget.repeatedToolName),
+          content: wrapUpInstruction(
+                stop,
+                budget.repeatedToolName,
+                params.researchNotes?.document?.filename ?? null,
+                params.taskList?.steps ?? null,
+              ),
         });
       } else {
         budget.startRound();
@@ -198,7 +203,17 @@ export async function streamOllama(
       return { id: p.id || p.name, name: p.name, input };
     });
 
-    if (!toolCalls.length || !runTools) break;
+    if (!toolCalls.length || !runTools) {
+      // The model is trying to finish. If it wrote a list and left steps
+      // outstanding, it is sent back to finish them instead.
+      const continueWith = params.onBeforeFinish?.();
+      if (continueWith) {
+        messages.push({ role: "assistant", content: assistantText });
+        messages.push({ role: "user", content: continueWith });
+        continue;
+      }
+      break;
+    }
     budget.noteToolCalls(toolCalls);
 
     // Echo the assistant turn (with tool_calls) then feed tool results back.

@@ -91,6 +91,30 @@ export const PROJECT_EXTRA_TOOLS = [
       },
     },
   },
+  {
+    type: "function",
+    function: {
+      name: "research_notes",
+      description:
+        "Write a finding into this chat's running notes document, kept in the matter as 'Research Notes - <topic>'. The first call creates it; every later call adds an entry. Use it during research or review that covers several authorities or documents: write each item down as you finish it, saying what you checked, against what text, and what you concluded. The notes are the durable record - they stay in the matter if this answer is paused, stopped or picked up in a new chat - so do not save them all for the end.",
+      parameters: {
+        type: "object",
+        properties: {
+          append: {
+            type: "string",
+            description:
+              "The entry to add, in plain text. One item's worth: what was checked, against what source, and the conclusion. Do not resend earlier entries.",
+          },
+          topic: {
+            type: "string",
+            description:
+              "What the notes are about, used to name the document on the first call only. Keep it short, e.g. 'Graver memo citation check'.",
+          },
+        },
+        required: ["append"],
+      },
+    },
+  },
 ];
 
 export const TABULAR_TOOLS = [
@@ -200,6 +224,47 @@ export const FORM_BANK_TOOLS = [
 ];
 
 export const TOOLS = [
+  {
+    type: "function",
+    function: {
+      name: "task_list",
+      description:
+        "Write down the steps of a job that has several parts, and keep them up to date as you work. Send the WHOLE list every time, with each step's current status - the list you send replaces the one on screen. Call it before you start the work, then again in the response that finishes each step. A step only leaves the list by being marked done, or dropped with a reason the user will read; a step you leave out without doing either is put back automatically. Send an empty steps array to clear a list that no longer applies.",
+      parameters: {
+        type: "object",
+        properties: {
+          steps: {
+            type: "array",
+            description:
+              "Every step of the job, in the order you will do them, each written as the finished thing it produces rather than the activity. At least 2 and at most 20.",
+            items: {
+              type: "object",
+              properties: {
+                step: {
+                  type: "string",
+                  description:
+                    "What this step produces, e.g. \"Draft the demand letter to Acme Holdings\".",
+                },
+                status: {
+                  type: "string",
+                  enum: ["pending", "doing", "done", "dropped"],
+                  description:
+                    "\"doing\" for the one step you are on right now, \"done\" once it is finished, \"dropped\" only with a reason.",
+                },
+                reason: {
+                  type: "string",
+                  description:
+                    "Why this step is being dropped. Required when status is \"dropped\"; the user reads it.",
+                },
+              },
+              required: ["step", "status"],
+            },
+          },
+        },
+        required: ["steps"],
+      },
+    },
+  },
   {
     type: "function",
     function: {

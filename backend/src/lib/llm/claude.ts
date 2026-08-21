@@ -164,7 +164,12 @@ export async function streamClaude(
           wrappingUp = true;
           appendNudge(
             messages,
-            wrapUpInstruction(stop, budget.repeatedToolName),
+            wrapUpInstruction(
+              stop,
+              budget.repeatedToolName,
+              params.researchNotes?.document?.filename ?? null,
+              params.taskList?.steps ?? null,
+            ),
           );
         } else {
           budget.startRound();
@@ -287,6 +292,14 @@ export async function streamClaude(
       }
 
       if (stopReason !== "tool_use" || !toolCalls.length || !runTools) {
+        // The model is trying to finish. If it wrote a list and left steps
+        // outstanding, it is sent back to finish them instead.
+        const continueWith = params.onBeforeFinish?.();
+        if (continueWith) {
+          messages.push({ role: "assistant", content: assistantBlocks });
+          appendNudge(messages, continueWith);
+          continue;
+        }
         break;
       }
       budget.noteToolCalls(toolCalls);

@@ -7,6 +7,7 @@
 // falls back to a fresh run) and it is far too big to want in the database.
 
 import { randomUUID } from "node:crypto";
+import { taskListForContinuation, type TaskStep } from "./taskList";
 import { completeText, type LlmMessage, type ResumeState, type UserApiKeys } from "../llm";
 
 const TTL_MS = 30 * 60 * 1000;
@@ -121,6 +122,10 @@ const CONDENSE_SYSTEM = [
 export async function condenseForContinuation(args: {
     state: ResumeState;
     apiKeys?: UserApiKeys;
+    /** This chat's running notes document, when it kept one. */
+    researchNotesFilename?: string | null;
+    /** The job list this chat is working to, carried through unchanged. */
+    taskListSteps?: TaskStep[] | null;
 }): Promise<LlmMessage[]> {
     const notes = flattenTranscriptText(args.state.transcript);
     let summary = "";
@@ -133,17 +138,36 @@ export async function condenseForContinuation(args: {
             apiKeys: args.apiKeys,
         });
     }
+    if (!summary.trim() && notes.trim()) {
+        // A model that returned nothing (an outage, or a thinking model that
+        // spent the budget on reasoning) must not silently discard the
+        // research notes — carry a raw slice forward instead.
+        summary = notes.slice(0, 48000);
+    }
     const condensed: LlmMessage[] = [...args.state.baseMessages];
+    // The list goes through unchanged, above the notes and never through the
+    // summariser. It is intent rather than findings, and putting intent
+    // through a summariser is precisely how steps get dropped.
+    const carriedList = args.taskListSteps
+        ? taskListForContinuation(args.taskListSteps)
+        : null;
+    if (carriedList) {
+        condensed.push({ role: "assistant", content: carriedList });
+    }
     if (summary.trim()) {
         condensed.push({
             role: "assistant",
             content: `[Condensed research notes from the earlier part of this answer]\n\n${summary}`,
         });
     }
-    condensed.push({
-        role: "user",
-        content:
-            "Carry on from those notes. You have a fresh budget of research steps. Do not repeat work the notes already cover — finish what is outstanding and then give your complete answer.",
-    });
+    const carryOn = [
+        "Carry on from those notes. You have a fresh budget of research steps. Do not repeat work the notes already cover — finish what is outstanding and then give your complete answer.",
+    ];
+    if (args.researchNotesFilename) {
+        carryOn.push(
+            `The full entry-by-entry record is in "${args.researchNotesFilename}" in this matter, and the summary above is shorter than it. Read that document before deciding what is still outstanding, and keep writing into it as you go.`,
+        );
+    }
+    condensed.push({ role: "user", content: carryOn.join(" ") });
     return condensed;
 }

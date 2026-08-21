@@ -1,3 +1,4 @@
+import { loadChatTaskList } from "../lib/chat/taskListStore";
 import { Router } from "express";
 import { requireAuth } from "../middleware/auth";
 import { createServerSupabase } from "../lib/supabase";
@@ -320,6 +321,7 @@ projectChatRouter.post("/", requireAuth, async (req, res) => {
             const condensed = await condenseForContinuation({
                 state: resumeState,
                 apiKeys,
+                taskListSteps: await loadChatTaskList(db, chatId),
                 researchNotesFilename: await researchNotesFilenameForChat({
                     db,
                     projectId,

@@ -1,3 +1,4 @@
+import { loadChatTaskList } from "../lib/chat/taskListStore";
 import { Router } from "express";
 import { randomUUID } from "node:crypto";
 import { requireAuth } from "../middleware/auth";
@@ -570,6 +571,7 @@ chatRouter.post("/", requireAuth, async (req, res) => {
             const condensed = await condenseForContinuation({
                 state: resumeState,
                 apiKeys,
+                taskListSteps: await loadChatTaskList(db, chatId),
             });
             apiMessages = [apiMessages[0], ...condensed];
             resumeState = null;

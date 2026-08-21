@@ -276,7 +276,12 @@ export async function streamOpenAI(
             ...input,
             {
               role: "user",
-              content: wrapUpInstruction(stop, budget.repeatedToolName),
+              content: wrapUpInstruction(
+                stop,
+                budget.repeatedToolName,
+                params.researchNotes?.document?.filename ?? null,
+                params.taskList?.steps ?? null,
+              ),
             } as ResponseInputItem,
           ];
         } else {
@@ -399,6 +404,16 @@ export async function streamOpenAI(
       }
 
       if (!toolCalls.length || !runTools) {
+        // The model is trying to finish. If it wrote a list and left steps
+        // outstanding, it is sent back to finish them instead. The response id
+        // carries the transcript, so the continuation is the only new input.
+        const continueWith = params.onBeforeFinish?.();
+        if (continueWith) {
+          input = [
+            { role: "user", content: continueWith } as ResponseInputItem,
+          ];
+          continue;
+        }
         break;
       }
       budget.noteToolCalls(toolCalls);

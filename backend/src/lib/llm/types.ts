@@ -1,3 +1,4 @@
+import type { TaskStep } from "../chat/taskList";
 import type {
     RunBudgetLimits,
     RunStats,
@@ -87,6 +88,25 @@ export type StreamChatParams = {
     budget?: Partial<RunBudgetLimits>;
     /** Set to pick up a turn that paused when its budget ran out. */
     resumeState?: ResumeState | null;
+    /**
+     * The running notes document this turn is keeping, if any. Read at
+     * wrap-up time, so it is a live reference rather than a value: the
+     * document may not exist yet when the run starts.
+     */
+    researchNotes?: { document: { filename: string } | null };
+    /**
+     * The job list this turn is working to. A live reference, like
+     * `researchNotes`: the model writes the list part-way through the run, so
+     * the value read at wrap-up time is not the one the run started with.
+     */
+    taskList?: { steps: TaskStep[] };
+    /**
+     * Called when the model stops calling tools and tries to finish. Return a
+     * message to send it back with, or null to let it finish. One callback
+     * rather than a copy of the rules in each provider loop: a checklist the
+     * model can ignore is decoration, and this is what stops it ignoring it.
+     */
+    onBeforeFinish?: () => string | null;
 };
 
 export type StreamChatResult = {

@@ -216,7 +216,12 @@ export async function streamGemini(
           wrappingUp = true;
           appendNudge(
             contents,
-            wrapUpInstruction(stop, budget.repeatedToolName),
+            wrapUpInstruction(
+              stop,
+              budget.repeatedToolName,
+              params.researchNotes?.document?.filename ?? null,
+              params.taskList?.steps ?? null,
+            ),
           );
         } else {
           budget.startRound();
@@ -341,6 +346,19 @@ export async function streamGemini(
       }
 
       if (!toolCalls.length || !runTools) {
+        // The model is trying to finish. If it wrote a list and left steps
+        // outstanding, it is sent back to finish them instead.
+        const continueWith = params.onBeforeFinish?.();
+        if (continueWith) {
+          if (textParts.length) {
+            contents.push({
+              role: "model",
+              parts: [{ text: textParts.join("") }],
+            });
+          }
+          appendNudge(contents, continueWith);
+          continue;
+        }
         break;
       }
       budget.noteToolCalls(toolCalls);

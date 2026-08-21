@@ -94,6 +94,19 @@ import {
   normalizeLegId,
   type LegislationTurnState,
 } from "./legislationTurnState";
+import {
+  recordDocumentAuthorities,
+  type AuthorityChecklistState,
+} from "../authorityChecklist";
+import {
+  appendResearchNotes,
+  type ResearchNotesTurnState,
+} from "../researchNotes";
+import {
+  applyTaskListCall,
+  type TaskListTurnState,
+  type TaskStep,
+} from "../taskList";
 import { saveLegalSourceToProject } from "../../legalSources";
 
 function sourceMaterialNotice(
@@ -276,6 +289,9 @@ export async function runToolCalls(
   nonce?: string,
   legislationState?: LegislationTurnState,
   chatId?: string | null,
+  checklistState?: AuthorityChecklistState,
+  researchNotesState?: ResearchNotesTurnState,
+  taskListState?: TaskListTurnState,
 ): Promise<{
   toolResults: unknown[];
   docsRead: { filename: string; document_id?: string }[];
@@ -293,6 +309,8 @@ export async function runToolCalls(
   courtlistenerEvents: CourtlistenerToolEvent[];
   caseCitationEvents: CaseCitationEvent[];
   mcpEvents: McpToolEvent[];
+  /** Set when a task_list call in this batch changed the list. */
+  taskListSteps?: TaskStep[];
 }> {
   const toolResults: unknown[] = [];
   const docsRead: { filename: string; document_id?: string }[] = [];
@@ -310,6 +328,7 @@ export async function runToolCalls(
   const courtlistenerEvents: CourtlistenerToolEvent[] = [];
   const caseCitationEvents: CaseCitationEvent[] = [];
   const mcpEvents: McpToolEvent[] = [];
+  let taskListChanged = false;
   const courtState: CourtlistenerTurnState = courtlistenerState ?? {
     casesByClusterId: new Map(),
   };
@@ -495,6 +514,7 @@ export async function runToolCalls(
         turnReadState.set(readIdentity.key, readIdentity);
       }
       if (filename) docsRead.push({ filename, document_id: documentId });
+      recordDocumentAuthorities(checklistState, filename ?? docId, content);
       // Wrap document content in the spotlight fence: the document body
       // is entirely user-controlled and may contain injected instructions.
       const fencedContent = nonce ? spotlight(content, nonce) : content;
@@ -682,6 +702,102 @@ export async function runToolCalls(
         tool_call_id: tc.id,
         content: JSON.stringify({ results }),
       });
+    } else if (tc.function.name === "task_list") {
+      // The job list. The whole list arrives every call and replaces what was
+      // there — except that a step which is neither done nor dropped cannot be
+      // removed, which is what stops a long job from quietly shrinking.
+      if (!taskListState) {
+        toolResults.push({
+          role: "tool",
+          tool_call_id: tc.id,
+          content: JSON.stringify({
+            error: "A task list is not available in this conversation.",
+          }),
+        });
+        continue;
+      }
+      const result = applyTaskListCall(taskListState, args.steps);
+      if (!("error" in result)) taskListChanged = true;
+      toolResults.push({
+        role: "tool",
+        tool_call_id: tc.id,
+        content: JSON.stringify(result),
+      });
+    } else if (tc.function.name === "research_notes") {
+      // The running notes document. One per chat, created on the first call
+      // and added to after that, so a long job leaves a record behind even if
+      // it is paused or stopped.
+      const entry = typeof args.append === "string" ? args.append : "";
+      const topic =
+        typeof args.topic === "string" && args.topic.trim()
+          ? args.topic.trim()
+          : null;
+      if (!projectId || !chatId) {
+        toolResults.push({
+          role: "tool",
+          tool_call_id: tc.id,
+          content: JSON.stringify({
+            error:
+              "Research notes can only be kept in a chat inside a matter.",
+          }),
+        });
+        continue;
+      }
+      const written = await appendResearchNotes({
+        db,
+        userId,
+        projectId,
+        chatId,
+        entry,
+        topic,
+      });
+      if ("error" in written) {
+        toolResults.push({
+          role: "tool",
+          tool_call_id: tc.id,
+          content: JSON.stringify({ error: written.error }),
+        });
+        continue;
+      }
+      if (researchNotesState) {
+        researchNotesState.document = {
+          documentId: written.documentId,
+          filename: written.filename,
+        };
+        researchNotesState.entries += 1;
+      }
+      if (written.status === "created") {
+        docsCreated.push({
+          filename: written.filename,
+          download_url: written.downloadUrl,
+          document_id: written.documentId,
+          version_id: written.versionId,
+          version_number: written.versionNumber,
+        });
+      } else {
+        docsEdited.push({
+          filename: written.filename,
+          document_id: written.documentId,
+          version_id: written.versionId,
+          version_number: written.versionNumber,
+          download_url: written.downloadUrl,
+          annotations: [],
+        });
+      }
+      toolResults.push({
+        role: "tool",
+        tool_call_id: tc.id,
+        content: JSON.stringify({
+          status: written.status,
+          document: written.filename,
+          entries_written: researchNotesState?.entries ?? 1,
+          ...(written.truncated
+            ? {
+                note: "The notes had grown very long, so the earliest entries were dropped.",
+              }
+            : {}),
+        }),
+      });
     } else if (tc.function.name === "fetch_documents") {
       const rawDocIds = (args.doc_ids as string[]) ?? [];
       const docIds = rawDocIds.map(
@@ -732,6 +848,7 @@ export async function runToolCalls(
           const documentId = docIndex?.[docId]?.document_id;
           docsRead.push({ filename, document_id: documentId });
         }
+        recordDocumentAuthorities(checklistState, filename, content);
       }
       toolResults.push({
         role: "tool",
@@ -1058,6 +1175,7 @@ export async function runToolCalls(
       try {
         const result = await getCourtlistenerCases({
           clusterIds,
+          includeFullText: true,
           db,
           apiToken: apiKeys?.courtlistener,
         });
@@ -2433,5 +2551,6 @@ export async function runToolCalls(
     courtlistenerEvents,
     caseCitationEvents,
     mcpEvents,
+    ...(taskListChanged ? { taskListSteps: taskListState!.steps } : {}),
   };
 }

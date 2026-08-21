@@ -608,6 +608,24 @@ export function useAssistantChat({
               continue;
             }
 
+            if (data.type === "task_list") {
+              // The list updates many times in a long job. It is one block on
+              // screen, so the newest version replaces the one already there
+              // rather than adding another — the same rule the backend applies
+              // to what it saves.
+              const steps = (
+                Array.isArray(data.steps) ? data.steps : []
+              ) as Extract<AssistantEvent, { type: "task_list" }>["steps"];
+              // Dropped from wherever it was and added at the end, so the
+              // list stays one block and its position marks the last time the
+              // assistant touched it.
+              eventsRef.current = eventsRef.current.filter(
+                (e) => e.type !== "task_list",
+              );
+              pushEvent({ type: "task_list", steps });
+              continue;
+            }
+
             if (data.type === "workflow_applied") {
               pushEvent({
                 type: "workflow_applied",

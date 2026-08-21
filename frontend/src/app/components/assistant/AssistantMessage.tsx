@@ -10,6 +10,8 @@ import type {
 } from "../shared/types";
 import { EditCard } from "./EditCard";
 import { PreResponseWrapper } from "./PreResponseWrapper";
+import { TaskChecklist, useElapsedLabel } from "./TaskChecklist";
+import { WorkingArea } from "./WorkingArea";
 import { ResponseStatus, type StatusState } from "./message/ResponseStatus";
 import { eventErrorMessage, toolCallLabel } from "./message/eventUtils";
 import { preprocessCitations, internalCaseHref } from "./message/citationUtils";
@@ -162,6 +164,10 @@ export function AssistantMessage({
         onEditResolved?.(args);
     };
 
+    // How long this turn has been running. Only known for an answer watched
+    // as it streamed; a page reloaded later leaves the duration out.
+    const elapsedLabel = useElapsedLabel(isStreaming);
+
     const eventErrorMessages = (events ?? [])
         .map(eventErrorMessage)
         .filter((message): message is string => !!message);
@@ -186,7 +192,12 @@ export function AssistantMessage({
         event.type !== "error" &&
         event.type !== "ask_inputs_response" &&
         event.type !== "case_citation" &&
-        event.type !== "case_opinions";
+        event.type !== "case_opinions" &&
+        // The job list is one block above the working area, not an activity row.
+        event.type !== "task_list" &&
+        // Neither is the pause card: it carries the "Keep going" button, and a
+        // button folded into a collapsed log cannot be pressed.
+        event.type !== "paused";
 
     // Find the last content event so its raw text can be smoothed before
     // citation preprocessing — slicing already-preprocessed text would risk
@@ -321,6 +332,27 @@ export function AssistantMessage({
               event: Extract<AssistantEvent, { type: "content" }>;
               index: number;
           };
+
+    // One task_list event is persisted per message, so this is the list as
+    // it stands. While streaming, later updates replace it in place.
+    const taskListEvent = events
+        ? ([...events]
+              .reverse()
+              .find((e) => e.type === "task_list") as
+              | Extract<AssistantEvent, { type: "task_list" }>
+              | undefined)
+        : undefined;
+    const taskListSteps =
+        taskListEvent && taskListEvent.steps.length > 0
+            ? taskListEvent.steps
+            : null;
+    const pausedEvent = events
+        ? ([...events]
+              .reverse()
+              .find((e) => e.type === "paused") as
+              | Extract<AssistantEvent, { type: "paused" }>
+              | undefined)
+        : undefined;
 
     const groups: EventGroup[] = [];
     if (events) {
@@ -833,7 +865,32 @@ export function AssistantMessage({
             <div className="w-full font-inter relative mt-2">
                 {events && events.length > 0 ? (
                     <div className="flex flex-col gap-4">
-                        {groups.map((g, gIdx) => {
+                        {taskListSteps && (
+                            <TaskChecklist
+                                steps={taskListSteps}
+                                isStreaming={isStreaming}
+                            />
+                        )}
+                        {(() => {
+                            // The answer is the trailing run of content with
+                            // no tool activity after it. Everything before that
+                            // is working, and goes in the box. Measured against
+                            // the raw events, not the rendered groups: some
+                            // tool calls (the job list itself) draw no activity
+                            // row, and a paragraph followed by one of those is
+                            // still the assistant working, not its answer.
+                            let lastNonContent = -1;
+                            (events ?? []).forEach((e, i) => {
+                                if (e.type !== "content") lastNonContent = i;
+                            });
+                            let answerStart = groups.length;
+                            for (let i = groups.length - 1; i >= 0; i -= 1) {
+                                const g = groups[i];
+                                if (g.kind === "content" && g.index > lastNonContent) {
+                                    answerStart = i;
+                                } else break;
+                            }
+                            const renderGroup = (g: EventGroup, gIdx: number) => {
                             if (g.kind === "content") {
                                 const isLastContent =
                                     g.index === lastContentIdx;
@@ -887,7 +944,50 @@ export function AssistantMessage({
                                     )}
                                 </PreResponseWrapper>
                             );
-                        })}
+                            };
+                            const workingGroups = groups.slice(0, answerStart);
+                            // A picker waiting for an answer must never be folded into a
+                            // five-line box, so a turn holding one renders the old way.
+                            const holdsAskInput = workingGroups.some(
+                                (g) => g.kind === "pre" && hasPendingAskInput(g),
+                            );
+                            // The box exists to keep working material out of
+                            // the answer's way, so a finished turn that
+                            // produced no answer has nothing to keep out of
+                            // the way and shows its work as it always did.
+                            // While the turn runs the box is what stops the
+                            // page growing, so it applies from the first step.
+                            const hasAnswer = answerStart < groups.length;
+                            if (
+                                workingGroups.length === 0 ||
+                                holdsAskInput ||
+                                (!isStreaming && !hasAnswer)
+                            ) {
+                                return groups.map((g, gIdx) => renderGroup(g, gIdx));
+                            }
+                            const workingSteps = workingGroups.reduce(
+                                (total, g) => total + (g.kind === "pre" ? g.events.length : 1),
+                                0,
+                            );
+                            return (
+                                <>
+                                    <WorkingArea
+                                        isStreaming={isStreaming}
+                                        stepCount={workingSteps}
+                                        elapsedLabel={elapsedLabel}
+                                    >
+                                        <div className="flex flex-col gap-4">
+                                            {workingGroups.map((g, gIdx) =>
+                                                renderGroup(g, gIdx),
+                                            )}
+                                        </div>
+                                    </WorkingArea>
+                                    {groups
+                                        .slice(answerStart)
+                                        .map((g, i) => renderGroup(g, answerStart + i))}
+                                </>
+                            );
+                        })()}
                         {/* Bulk accept/reject + per-edit cards — below the
                             response content, only after streaming stops,
                             rendered above the download card. */}
@@ -1196,6 +1296,18 @@ export function AssistantMessage({
                             </div>
                         );
                     })()}
+
+                {pausedEvent && (
+                    <div className="mt-3 mb-2">
+                        <PausedBlock
+                            event={pausedEvent}
+                            showConnector={false}
+                            onContinue={onContinue}
+                            isContinuing={isContinuing}
+                            disabled={isStreaming}
+                        />
+                    </div>
+                )}
 
                 {showCitationBlock && (
                     <CitationsBlock

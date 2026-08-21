@@ -7,6 +7,8 @@
 // stop conditions — and the wrap-up behaviour when one trips — are identical
 // no matter which model the user picked.
 
+import { wrapUpOutstandingLine, type TaskStep } from "../chat/taskList";
+
 export type RunStopReason =
     | "complete"
     | "iterations"
@@ -138,6 +140,10 @@ function estimateChars(transcript: unknown): number {
 export function wrapUpInstruction(
     reason: Exclude<RunStopReason, "complete">,
     repeatedToolName?: string | null,
+    researchNotesFilename?: string | null,
+    /** The turn's job list, if it kept one. Replaces a wrap-up list written
+     * from memory with the steps that are actually outstanding. */
+    taskListSteps?: TaskStep[] | null,
 ): string {
     const why =
         reason === "iterations"
@@ -147,12 +153,22 @@ export function wrapUpInstruction(
               : reason === "context"
                 ? "This turn has collected as much material as fits in one go."
                 : `You have called ${repeatedToolName ?? "the same tool"} repeatedly with the same arguments and are not making progress.`;
-    return [
+    const lines = [
         `[System] ${why}`,
         "Do not call any more tools. Answer now, using what you have already found.",
         "Be explicit about which points you verified and which you did not.",
         "End with a short list of what still needs checking, so the work can be picked up again.",
-    ].join(" ");
+    ];
+    const outstandingLine = taskListSteps
+        ? wrapUpOutstandingLine(taskListSteps)
+        : null;
+    if (outstandingLine) lines.push(outstandingLine);
+    if (researchNotesFilename) {
+        lines.push(
+            `Your entry-by-entry record is in "${researchNotesFilename}" in this matter; say so, and keep your answer to a summary of it rather than repeating every entry.`,
+        );
+    }
+    return lines.join(" ");
 }
 
 /** What we tell the model when the user presses "Keep going". */
@@ -163,11 +179,17 @@ export const RESUME_INSTRUCTION =
 export function stopReasonLabel(
     reason: Exclude<RunStopReason, "complete">,
     stats: RunStats,
+    /** "3 of 7 steps done", when the turn kept a list. */
+    taskListSummary?: string | null,
 ): string {
-    if (reason === "iterations")
-        return `Paused after ${stats.iterations} research steps.`;
-    if (reason === "time")
-        return `Paused after ${Math.round(stats.elapsedMs / 60000)} minutes of research.`;
-    if (reason === "context") return "Paused — this answer has gathered as much material as fits at once.";
-    return "Paused — the same search kept repeating without making progress.";
+    const base =
+        reason === "iterations"
+            ? `Paused after ${stats.iterations} research steps.`
+            : reason === "time"
+              ? `Paused after ${Math.round(stats.elapsedMs / 60000)} minutes of research.`
+              : reason === "context"
+                ? "Paused — this answer has gathered as much material as fits at once."
+                : "Paused — the same search kept repeating without making progress.";
+    if (!taskListSummary) return base;
+    return `${base.replace(/\.$/, "")} — ${taskListSummary}.`;
 }

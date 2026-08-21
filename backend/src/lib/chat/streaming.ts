@@ -60,6 +60,29 @@ import {
   type TurnReadState,
 } from "./tools/documentOps";
 import { verifyCitations } from "./verifyCitations";
+import {
+  asksForCitationCheck,
+  buildChecklistNote,
+  coveredAuthorityKeys,
+  extractAuthorities,
+  isCovered,
+  latestRequestText,
+  newAuthorityChecklistState,
+} from "./authorityChecklist";
+import { newResearchNotesTurnState } from "./researchNotes";
+import {
+  carriedListSection,
+  isFinished,
+  lateStartNudge,
+  newTaskListTurnState,
+  outstandingNote,
+  stalenessReminder,
+  taskListContinuation,
+  taskListEnabled,
+  taskListSummary,
+  type TaskStep,
+} from "./taskList";
+import { clearChatTaskList, loadChatTaskList, saveChatTaskList } from "./taskListStore";
 
 export type AssistantEvent =
   | { type: "reasoning"; text: string }
@@ -122,6 +145,15 @@ export type AssistantEvent =
       cluster_id: number;
       document: SourceDocument;
     }
+  | {
+      /**
+       * The job list, as it stands. The stream carries every update so the
+       * block on screen keeps up; only one of these is ever persisted per
+       * message — see `recordTaskList` below.
+       */
+      type: "task_list";
+      steps: TaskStep[];
+    }
   | { type: "content"; text: string }
   | {
       /**
@@ -136,6 +168,25 @@ export type AssistantEvent =
       iterations: number;
     }
   | { type: "error"; message: string };
+
+/** No answer carries more small print than this. */
+const MAX_TRAILING_NOTES = 3;
+
+/**
+ * The small print under an answer, as one italic block. An answer can carry
+ * three of these — the authorities it never retrieved, the checklist of the
+ * document's own authorities, and what is left on the job list — and three
+ * separate paragraphs of it read as clutter. Returns "" when there is nothing
+ * to say.
+ */
+export function buildTrailingNotesBlock(notes: string[]): string {
+  const lines = notes
+    .map((note) => note.trim())
+    .filter((note) => note.length > 0)
+    .slice(0, MAX_TRAILING_NOTES);
+  if (lines.length === 0) return "";
+  return "\n\n" + lines.map((note) => `*${note}*`).join("  \n");
+}
 
 export class AssistantStreamError extends Error {
   fullText: string;
@@ -249,9 +300,12 @@ export async function runLLMStream(params: {
   } = params;
   const researchTools = includeResearchTools ? COURTLISTENER_TOOLS : [];
   const mcpTools = await buildUserMcpTools(userId, db);
-  const conversationTools = includeAskInputs
-    ? TOOLS
-    : TOOLS.filter((tool) => tool.function.name !== "ask_inputs");
+  const listEnabled = taskListEnabled();
+  const conversationTools = TOOLS.filter(
+    (tool) =>
+      (includeAskInputs || tool.function.name !== "ask_inputs") &&
+      (listEnabled || tool.function.name !== "task_list"),
+  );
   const baseTools = [
     ...conversationTools,
     ...researchTools,
@@ -265,7 +319,7 @@ export async function runLLMStream(params: {
   // Extract system prompt; pass remaining turns to the adapter as
   // plain user/assistant messages.
   const rawMsgs = apiMessages as { role: string; content: string | null }[];
-  const systemPrompt =
+  const baseSystemPrompt =
     rawMsgs[0]?.role === "system" ? (rawMsgs[0].content ?? "") : "";
   const chatMessages: LlmMessage[] = rawMsgs
     .filter((m) => m.role !== "system")
@@ -289,6 +343,29 @@ export async function runLLMStream(params: {
     casesByClusterId: new Map(),
   };
   const legislationTurnState = newLegislationTurnState();
+  // Authorities cited by the documents read this turn, so the answer can be
+  // held against the document's own list rather than the model's memory of it.
+  const checklistTurnState = newAuthorityChecklistState();
+  // The running notes document, if this turn keeps one. Held here so the
+  // wrap-up can point the reader at it when the budget runs out mid-job.
+  const researchNotesTurnState = newResearchNotesTurnState();
+  // The job list this turn is working to, picked up from the chat so a
+  // follow-up message and "Keep going" both continue the same list.
+  const taskListTurnState = newTaskListTurnState(
+    await loadChatTaskList(db, chatId),
+  );
+  // A list left open by an earlier message in this chat is put in front of the
+  // model, which decides whether it still applies. The decision is visible in
+  // the list itself.
+  const carried = carriedListSection(taskListTurnState.steps);
+  const systemPrompt = carried
+    ? `${baseSystemPrompt}\n\n${carried}`
+    : baseSystemPrompt;
+  const checklistRequested = asksForCitationCheck(
+    latestRequestText(
+      chatMessages.filter((m) => m.role === "user").map((m) => m.content),
+    ),
+  );
   // Citations filed by the answer itself with cite_sources. These are checked
   // as they arrive, so they are preferred over anything parsed out of the text.
   let filedCitations: ParsedCitation[] = [];
@@ -301,6 +378,43 @@ export async function runLLMStream(params: {
   let citationsOpenSeen = false;
   let streamingCitationsBuffer = "";
   let streamedCitationCount = 0;
+
+  // Only one task_list event may end up in the persisted events. A long job
+  // updates the list a dozen times; appending each one would render a dozen
+  // checklists in reloaded history and bloat every chat_messages row. The
+  // stream still carries every update, so the block animates live.
+  const recordTaskList = (steps: TaskStep[]) => {
+    const event: AssistantEvent = { type: "task_list", steps };
+    const existing = events.findIndex((e) => e.type === "task_list");
+    if (existing >= 0) events.splice(existing, 1);
+    // Appended at its newest position rather than left where it first
+    // appeared. The block is drawn above the working area either way, and the
+    // position is what tells the reader which commentary came before the last
+    // update to the list and is therefore working rather than the answer.
+    events.push(event);
+    write(`data: ${JSON.stringify(event)}\n\n`);
+  };
+
+  // The completion gate. The model has stopped calling tools and is trying to
+  // finish; while steps are outstanding it is sent back instead. Its guards
+  // live in taskList.ts so the rules exist once.
+  const onBeforeFinish = (): string | null => {
+    if (!listEnabled) return null;
+    const message = taskListContinuation({
+      steps: taskListTurnState.steps,
+      continuations: taskListTurnState.continuations,
+      aborted: signal?.aborted,
+    });
+    if (!message) return null;
+    taskListTurnState.continuations += 1;
+    devLog("[chat/stream] task list sent the turn back", {
+      continuation: taskListTurnState.continuations,
+      outstanding: taskListTurnState.steps.filter(
+        (step) => step.status === "pending" || step.status === "doing",
+      ).length,
+    });
+    return message;
+  };
 
   const emitCitationStreamSnapshot = (
     status: "started" | "partial",
@@ -415,6 +529,9 @@ export async function runLLMStream(params: {
       model: selectedModel,
       systemPrompt,
       messages: chatMessages,
+      researchNotes: researchNotesTurnState,
+      taskList: taskListTurnState,
+      onBeforeFinish,
       tools: activeTools as OpenAIToolSchema[],
       resumeState,
       apiKeys,
@@ -455,6 +572,8 @@ export async function runLLMStream(params: {
       },
       runTools: async (calls) => {
         throwIfAborted(signal);
+        taskListTurnState.rounds += 1;
+        taskListTurnState.roundsSinceTouched += 1;
         // Emit any text the model produced before this tool turn so the
         // UI sees it before the tool results stream in.
         flushText();
@@ -527,7 +646,14 @@ export async function runLLMStream(params: {
         // The answer is complete and its citations are in order, so there is
         // nothing left for this turn to do.
         if (citationsAccepted && calls.every((c) => c.name === "cite_sources")) {
-          throw new AssistantStreamCitationsFiled();
+          // Filing citations is the other way a turn ends, so the gate runs
+          // here too — otherwise a half-finished job escapes by citing.
+          const continueWith = onBeforeFinish();
+          if (!continueWith) throw new AssistantStreamCitationsFiled();
+          return toolCalls.map((c) => ({
+            tool_use_id: c.id,
+            content: `${citeResults.get(c.id) ?? "{}"}\n\n${continueWith}`,
+          }));
         }
 
         const dispatchCalls = toolCalls.filter(
@@ -545,6 +671,7 @@ export async function runLLMStream(params: {
           courtlistenerEvents,
           caseCitationEvents,
           mcpEvents,
+          taskListSteps,
         } = await runToolCalls(
           dispatchCalls,
           docStore,
@@ -562,8 +689,18 @@ export async function runLLMStream(params: {
           nonce,
           legislationTurnState,
           chatId,
+          checklistTurnState,
+          researchNotesTurnState,
+          taskListTurnState,
         );
         throwIfAborted(signal);
+        if (taskListSteps) {
+          recordTaskList(taskListSteps);
+          // Stored as it changes rather than only at the end, so a backend
+          // restart or a stopped turn leaves the list behind. Not awaited:
+          // the model is not kept waiting on a chat row.
+          void saveChatTaskList(db, chatId, taskListSteps);
+        }
         for (const r of docsRead) {
           events.push({
             type: "doc_read",
@@ -651,14 +788,26 @@ export async function runLLMStream(params: {
         for (const [callId, content] of citeResults) {
           resultByCallId.set(callId, content);
         }
-        return toolCalls.map((c) => ({
-          tool_use_id: c.id,
-          content:
+        // A turn that is running long with no list at all is told to write
+        // one; a list left untouched while steps are outstanding gets a short
+        // reminder naming them. Both ride back on the last tool result, so
+        // they reach every provider without four copies of the code.
+        const nudge =
+          lateStartNudge(taskListTurnState) ??
+          stalenessReminder(taskListTurnState);
+        const lastCallId = toolCalls[toolCalls.length - 1]?.id;
+        return toolCalls.map((c) => {
+          const base =
             resultByCallId.get(c.id) ??
             JSON.stringify({
               error: `Tool '${c.function.name}' is not available.`,
-            }),
-        }));
+            });
+          return {
+            tool_use_id: c.id,
+            content:
+              nudge && c.id === lastCallId ? `${base}\n\n${nudge}` : base,
+          };
+        });
       },
     });
   } catch (err) {
@@ -694,7 +843,13 @@ export async function runLLMStream(params: {
     const pausedEvent: AssistantEvent = {
       type: "paused",
       reason: runResult.stopReason,
-      message: stopReasonLabel(runResult.stopReason, runResult.stats),
+      message: stopReasonLabel(
+        runResult.stopReason,
+        runResult.stats,
+        taskListTurnState.steps.length
+          ? taskListSummary(taskListTurnState.steps)
+          : null,
+      ),
       resume_token: resumeToken,
       iterations: runResult.stats.iterations,
     };
@@ -851,49 +1006,75 @@ export async function runLLMStream(params: {
   // retrieved this turn. A cite written from memory or copied out of a
   // document is exactly where a wrong or hallucinated authority hides, so
   // the answer says plainly that its wording was never checked.
+  // Every note that follows the answer is collected here and emitted as one
+  // italic block. An answer can carry three of them, and three separate
+  // paragraphs of small print read as clutter.
+  const trailingNotes: string[] = [];
   if (!buildCitations) {
     try {
-      const normCite = (s: string) => s.replace(/[\s.]/g, "").toUpperCase();
-      const baseStatute = (s: string) => s.replace(/\(.*$/, "");
-      const covered = new Set<string>();
-      for (const rec of courtlistenerTurnState.casesByClusterId.values()) {
-        for (const c of rec.citations) covered.add(normCite(c));
-      }
-      for (const key of legislationTurnState.byId.keys()) {
-        covered.add(baseStatute(normCite(key)));
-      }
-      const reporterRe =
-        /\b\d{1,4}\s+(?:U\.S\.|F\.(?:2d|3d|4th)|F\.\s?Supp\.(?:\s?[23]d)?|Kan\.\s?App\.\s?2d|Kan\.|P\.(?:2d|3d))\s+\d{1,5}\b/g;
-      const statuteRe =
-        /\bK\.S\.A\.\s?(?:\u00a7+\s?)?\d+[a-z]?-[\d]+[a-z0-9]*(?:\([^)\s]{1,8}\))*/g;
-      const missing = new Map<string, string>();
-      for (const match of proseBeforeBlock.matchAll(reporterRe)) {
-        const key = normCite(match[0]);
-        if (!covered.has(key) && !missing.has(key)) {
-          missing.set(key, match[0].replace(/\s+/g, " "));
-        }
-      }
-      for (const match of proseBeforeBlock.matchAll(statuteRe)) {
-        const key = baseStatute(normCite(match[0]));
-        if (!covered.has(key) && !missing.has(key)) {
-          missing.set(key, match[0].replace(/\s+/g, " "));
-        }
-      }
-      if (missing.size > 0) {
-        const shown = [...missing.values()].slice(0, 8);
+      const covered = coveredAuthorityKeys({
+        caseCitations: [...courtlistenerTurnState.casesByClusterId.values()]
+          .flatMap((rec) => rec.citations),
+        legislationIds: legislationTurnState.byId.keys(),
+      });
+      const missing = extractAuthorities(proseBeforeBlock).filter(
+        (authority) => !isCovered(authority, covered),
+      );
+      if (missing.length > 0) {
+        const shown = missing.slice(0, 8).map((a) => a.display);
         const suffix =
-          missing.size > shown.length
-            ? ` and ${missing.size - shown.length} more`
+          missing.length > shown.length
+            ? ` and ${missing.length - shown.length} more`
             : "";
-        const note = `\n\n*Not retrieved in this conversation, so the wording has not been checked: ${shown.join("; ")}${suffix}.*`;
-        events.push({ type: "content", text: note });
-        write(
-          `data: ${JSON.stringify({ type: "content_delta", text: note })}\n\n`,
+        trailingNotes.push(
+          `Not retrieved in this conversation, so the wording has not been checked: ${shown.join("; ")}${suffix}.`,
         );
+      }
+      // Citation checklist: the authorities the reviewed document itself
+      // cites, and which of them this turn never pulled up. The list comes
+      // from the document, not from the model, so an answer that quietly
+      // stopped halfway through says so.
+      if (checklistRequested) {
+        const checklistNote = buildChecklistNote({
+          state: checklistTurnState,
+          covered,
+          alreadyReported: new Set(missing.flatMap((a) => a.keys)),
+        });
+        // buildChecklistNote returns its own italic wrapper, which the
+        // consolidated block now supplies.
+        if (checklistNote) {
+          trailingNotes.push(checklistNote.trim().replace(/^\*|\*$/g, ""));
+        }
       }
     } catch (err) {
       devLog("[chat/stream] authority coverage check failed", err);
     }
+  }
+
+  // What the list says is still outstanding. "Marked" is the honest word: the
+  // model ticks its own steps off.
+  const stillToDo = outstandingNote(taskListTurnState.steps);
+  if (stillToDo) trailingNotes.push(stillToDo);
+  const block = buildTrailingNotesBlock(trailingNotes);
+  if (block) {
+    events.push({ type: "content", text: block });
+    write(
+      `data: ${JSON.stringify({ type: "content_delta", text: block })}\n\n`,
+    );
+  }
+
+  // The list outlives the turn: a follow-up message picks it up. One that has
+  // nothing left outstanding has done its job and is cleared.
+  try {
+    if (taskListTurnState.steps.length === 0) {
+      if (taskListTurnState.dirty) await clearChatTaskList(db, chatId);
+    } else if (isFinished(taskListTurnState.steps)) {
+      await clearChatTaskList(db, chatId);
+    } else if (taskListTurnState.dirty) {
+      await saveChatTaskList(db, chatId, taskListTurnState.steps);
+    }
+  } catch (err) {
+    devLog("[chat/stream] could not store the task list", err);
   }
 
   devLog("[chat/stream] final citations", {
