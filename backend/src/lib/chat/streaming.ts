@@ -30,7 +30,12 @@ import {
   devLog,
   resolveDocLabel,
 } from "./types";
-import { FORM_BANK_TOOLS, TOOLS, WORKFLOW_TOOLS } from "./tools/toolSchemas";
+import {
+  FORM_BANK_TOOLS,
+  LETTERHEAD_TOOLS,
+  TOOLS,
+  WORKFLOW_TOOLS,
+} from "./tools/toolSchemas";
 import {
   parseCitationsWithDiagnostics,
   parsePartialCitationObjects,
@@ -311,6 +316,7 @@ export async function runLLMStream(params: {
     ...researchTools,
     ...WORKFLOW_TOOLS,
     ...FORM_BANK_TOOLS,
+    ...LETTERHEAD_TOOLS,
   ];
   const activeTools = extraTools?.length
     ? [...baseTools, ...mcpTools, ...extraTools]
@@ -407,7 +413,7 @@ export async function runLLMStream(params: {
     });
     if (!message) return null;
     taskListTurnState.continuations += 1;
-    devLog("[chat/stream] task list sent the turn back", {
+    console.log("[chat/stream] task list sent the turn back", {
       continuation: taskListTurnState.continuations,
       outstanding: taskListTurnState.steps.filter(
         (step) => step.status === "pending" || step.status === "doing",
