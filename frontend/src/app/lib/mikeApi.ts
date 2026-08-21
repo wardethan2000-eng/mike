@@ -1979,6 +1979,43 @@ export async function getDocumentText(documentId: string): Promise<string> {
     return response.text();
 }
 
+/**
+ * The document's own bytes, fetched from the backend with the caller's
+ * credentials and handed to the browser as a file to save. Never link
+ * straight at the file store: it answers on an address only the server can
+ * reach, and over plain http, so the browser calls the site insecure and the
+ * download fails.
+ */
+export async function downloadDocumentFile(
+    documentId: string,
+    versionId?: string | null,
+    fallbackFilename?: string,
+): Promise<void> {
+    const qs = versionId ? `?version_id=${encodeURIComponent(versionId)}` : "";
+    const { blob, filename } = await apiBlobRequest(
+        `/single-documents/${documentId}/file${qs}`,
+    );
+    saveBlob(blob, filename || fallbackFilename || "document");
+}
+
+/** Hand a blob to the browser as a download, then let go of it. */
+export function saveBlob(blob: Blob, filename: string): void {
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement("a");
+    link.href = url;
+    link.download = filename;
+    document.body.appendChild(link);
+    link.click();
+    link.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 1000);
+}
+
+/**
+ * ⚠️ Returns a link straight into the file store, which answers on an address
+ * only the server can reach and over plain http. A browser handed one of these
+ * calls the site insecure and then downloads nothing. Nothing in the app uses
+ * it — use downloadDocumentFile instead.
+ */
 export async function getDocumentUrl(
     documentId: string,
     versionId?: string | null,
@@ -2851,6 +2888,22 @@ export async function replaceWorkflowReferenceFile(
     });
     if (!response.ok) throw await toApiError(response, path);
     return response.json() as Promise<WorkflowReferenceDocument>;
+}
+
+/**
+ * A file attached to a workflow, fetched from the backend and handed to the
+ * browser to save. See downloadDocumentFile for why this never links straight
+ * at the file store.
+ */
+export async function downloadWorkflowReferenceFile(
+    workflowId: string,
+    referenceId: string,
+    fallbackFilename?: string,
+): Promise<void> {
+    const { blob, filename } = await apiBlobRequest(
+        `/workflows/${workflowId}/reference-files/${referenceId}/file`,
+    );
+    saveBlob(blob, filename || fallbackFilename || "file");
 }
 
 export async function getWorkflowReferenceUrl(

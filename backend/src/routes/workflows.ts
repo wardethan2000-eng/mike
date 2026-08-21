@@ -31,6 +31,8 @@ import {
 import { contentSha256 } from "../lib/documentVersions";
 import {
   deleteFile,
+  downloadFile,
+  buildContentDisposition,
   getSignedUrl,
   uploadFile,
   workflowReferenceKey,
@@ -1171,6 +1173,49 @@ workflowsRouter.get(
     if (!url)
       return void res.status(503).json({ detail: "Storage not configured" });
     res.json({ url, filename: reference.filename });
+  }),
+);
+
+// GET /workflows/:workflowId/reference-files/:referenceId/file
+// The file itself. The store answers on an address only the server can reach,
+// so a link to it leaves the browser calling the site insecure and fetching
+// nothing.
+workflowsRouter.get(
+  "/:workflowId/reference-files/:referenceId/file",
+  requireAuth,
+  asyncRoute(async (req, res) => {
+    const userId = res.locals.userId as string;
+    const userEmail = res.locals.userEmail as string | undefined;
+    const db = createServerSupabase();
+    const access = await resolveWorkflowAccess(
+      req.params.workflowId,
+      userId,
+      userEmail,
+      db,
+    );
+    if (!access)
+      return void res.status(404).json({ detail: "Workflow not found" });
+    if (rejectReferenceFilesForTabularWorkflow(access, res)) return;
+    const { data: reference } = await db
+      .from("workflow_reference_documents")
+      .select("id, filename, file_type, storage_path")
+      .eq("id", req.params.referenceId)
+      .eq("workflow_id", req.params.workflowId)
+      .maybeSingle();
+    if (!reference)
+      return void res.status(404).json({ detail: "Reference file not found" });
+    const raw = await downloadFile(reference.storage_path);
+    if (!raw)
+      return void res.status(404).json({ detail: "File not available" });
+    res.setHeader(
+      "Content-Type",
+      contentTypeForDocumentType(reference.file_type),
+    );
+    res.setHeader(
+      "Content-Disposition",
+      buildContentDisposition("attachment", reference.filename),
+    );
+    res.send(Buffer.from(raw));
   }),
 );
 

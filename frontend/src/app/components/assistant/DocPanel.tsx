@@ -560,7 +560,7 @@ function DownloadButton({
                 ? `?version_id=${encodeURIComponent(versionId)}`
                 : "";
             const resp = await fetch(
-                `${apiBase}/single-documents/${documentId}/docx${qs}`,
+                `${apiBase}/single-documents/${documentId}/file${qs}`,
                 {
                     headers: token ? { Authorization: `Bearer ${token}` } : {},
                 },

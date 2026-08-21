@@ -17,7 +17,7 @@ import { Loader2, AlertCircle, ChevronDown, ChevronRight } from "lucide-react";
 import {
     deleteDocument,
     getDocumentText,
-    getDocumentUrl,
+    downloadDocumentFile,
     downloadDocumentsZip,
     listDocumentVersions,
     uploadDocumentVersion,
@@ -441,14 +441,7 @@ export function DocTable({
 
     async function downloadDocVersion(docId: string, versionId: string, filename: string) {
         try {
-            const resolved = await getDocumentUrl(docId, versionId);
-            const a = document.createElement("a");
-            a.href = resolved.url;
-            // Prefer the backend's resolved filename (which honours the
-            // version filename). Fall back to the passed filename
-            // if for some reason it's missing.
-            a.download = resolved.filename || filename;
-            a.click();
+            await downloadDocumentFile(docId, versionId, filename);
         } catch (e) {
             console.error("downloadDocVersion failed", e);
         }
@@ -2218,11 +2211,7 @@ export function DocTable({
         // eslint-disable-next-line react-hooks/exhaustive-deps
     }, [openSource?.key]);
     const downloadDoc = useCallback(async (docId: string) => {
-        const { url, filename } = await getDocumentUrl(docId);
-        const a = document.createElement("a");
-        a.href = url;
-        a.download = filename;
-        a.click();
+        await downloadDocumentFile(docId);
     }, []);
 
     const handleDownloadSelectedDocs = useCallback(async () => {

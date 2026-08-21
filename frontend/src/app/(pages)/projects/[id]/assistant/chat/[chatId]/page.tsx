@@ -16,6 +16,7 @@ import { useRouter } from "next/navigation";
 import {
     Columns3,
     ClipboardList,
+    Download,
     FileText,
     FolderClosed,
     Loader2,
@@ -37,6 +38,7 @@ import {
     deleteProjectFolder,
     moveDocumentToFolder,
     moveSubfolderToFolder,
+    downloadDocumentFile,
 } from "@/app/lib/mikeApi";
 import { useAssistantChat } from "@/app/hooks/useAssistantChat";
 import { useChatHistoryContext } from "@/app/contexts/ChatHistoryContext";
@@ -51,6 +53,7 @@ import { ConfirmPopup } from "@/app/components/popups/ConfirmPopup";
 import { OwnerOnlyPopup } from "@/app/components/popups/OwnerOnlyPopup";
 import { DocxView } from "@/app/components/shared/views/DocxView";
 import { DocPanel } from "@/app/components/assistant/DocPanel";
+import { RichDocxEditor } from "@/app/components/assistant/RichDocxEditor";
 import { MikeIcon } from "@/app/components/chat/mike-icon";
 import { useAuth } from "@/app/contexts/AuthContext";
 import { useUserProfile } from "@/app/contexts/UserProfileContext";
@@ -97,6 +100,77 @@ import {
 interface Props {
     params: Promise<{ id: string; chatId: string }>;
 }
+
+/**
+ * The strip above a file in the reading panel. It exists for one reason: a
+ * document you are looking at should be a document you can keep, and until now
+ * a file opened in a chat could only be read.
+ */
+function DocumentTabActions({
+    documentId,
+    versionId,
+    filename,
+}: {
+    documentId: string;
+    versionId: string | null;
+    filename: string;
+}) {
+    const [busy, setBusy] = useState(false);
+    const [failed, setFailed] = useState(false);
+
+    return (
+        <div className="flex shrink-0 items-center justify-between gap-2 border-b border-gray-200/70 px-3 py-1.5">
+            <span className="min-w-0 truncate text-xs text-gray-600" title={filename}>
+                {failed ? "Could not download this file." : filename}
+            </span>
+            <button
+                type="button"
+                disabled={busy}
+                onClick={async () => {
+                    setBusy(true);
+                    setFailed(false);
+                    try {
+                        await downloadDocumentFile(
+                            documentId,
+                            versionId,
+                            filename,
+                        );
+                    } catch {
+                        setFailed(true);
+                    } finally {
+                        setBusy(false);
+                    }
+                }}
+                className="flex h-6 shrink-0 items-center gap-1 rounded-full border border-gray-200 bg-white px-2 text-[11px] font-medium text-gray-600 transition-colors hover:bg-gray-50 hover:text-gray-800 disabled:opacity-60"
+                title={`Download ${filename}`}
+            >
+                <Download className="h-3 w-3" />
+                Download
+            </button>
+        </div>
+    );
+}
+
+/** The read-only Word view, with the same download strip above it. */
+function DocxViewWithActions({
+    activeTab,
+    children,
+}: {
+    activeTab: { documentId: string; versionId?: string | null; filename: string };
+    children: ReactNode;
+}) {
+    return (
+        <div className="flex min-h-0 flex-1 flex-col">
+            <DocumentTabActions
+                documentId={activeTab.documentId}
+                versionId={activeTab.versionId ?? null}
+                filename={activeTab.filename}
+            />
+            <div className="min-h-0 flex-1">{children}</div>
+        </div>
+    );
+}
+
 
 type DocTab = {
     documentId: string;
@@ -1374,7 +1448,40 @@ export default function ProjectAssistantChatPage({ params }: Props) {
                                     chatInputRef.current?.addQuote(quote)
                                 }
                             />
+                        ) : isDocxFilename(activeTab.filename) &&
+                          !(activeQuotes && activeQuotes.length) &&
+                          !(
+                              editScrollTarget &&
+                              editScrollTarget.documentId ===
+                                  activeTab.documentId
+                          ) ? (
+                            <div className="flex min-h-0 flex-1 flex-col">
+                                <DocumentTabActions
+                                    documentId={activeTab.documentId}
+                                    versionId={activeTab.versionId ?? null}
+                                    filename={activeTab.filename}
+                                />
+                                <div className="min-h-0 flex-1">
+                                    <RichDocxEditor
+                                        key={`${activeTab.documentId}:${activeTab.refetchKey ?? 0}`}
+                                        documentId={activeTab.documentId}
+                                        versionId={activeTab.versionId}
+                                        onQuote={(text) =>
+                                            chatInputRef.current?.addQuote({
+                                                text,
+                                                documentId:
+                                                    activeTab.documentId,
+                                                documentTitle:
+                                                    activeTab.filename,
+                                            })
+                                        }
+                                    />
+                                </div>
+                            </div>
                         ) : isDocxFilename(activeTab.filename) ? (
+                            <DocxViewWithActions
+                                activeTab={activeTab}
+                            >
                             <DocxView
                                 key={activeTab.documentId}
                                 documentId={activeTab.documentId}
@@ -1411,21 +1518,42 @@ export default function ProjectAssistantChatPage({ params }: Props) {
                                     })
                                 }
                             />
+                            </DocxViewWithActions>
                         ) : isSpreadsheetFilename(activeTab.filename) ? (
-                            <SpreadsheetView
-                                key={activeTab.documentId}
-                                documentId={activeTab.documentId}
-                                versionId={activeTab.versionId}
-                                rounded={false}
-                            />
+                            <div className="flex min-h-0 flex-1 flex-col">
+                                <DocumentTabActions
+                                    documentId={activeTab.documentId}
+                                    versionId={activeTab.versionId ?? null}
+                                    filename={activeTab.filename}
+                                />
+                                <div className="min-h-0 flex-1">
+                                    <SpreadsheetView
+                                        key={activeTab.documentId}
+                                        documentId={activeTab.documentId}
+                                        versionId={activeTab.versionId}
+                                        rounded={false}
+                                    />
+                                </div>
+                            </div>
                         ) : (
-                            <PdfView
-                                key={activeTab.documentId}
-                                doc={{ document_id: activeTab.documentId }}
-                                quotes={activeQuotes ?? undefined}
-                                openAtPage={activeTab.openAtPage}
-                                rounded={false}
-                            />
+                            <div className="flex min-h-0 flex-1 flex-col">
+                                <DocumentTabActions
+                                    documentId={activeTab.documentId}
+                                    versionId={activeTab.versionId ?? null}
+                                    filename={activeTab.filename}
+                                />
+                                <div className="min-h-0 flex-1">
+                                    <PdfView
+                                        key={activeTab.documentId}
+                                        doc={{
+                                            document_id: activeTab.documentId,
+                                        }}
+                                        quotes={activeQuotes ?? undefined}
+                                        openAtPage={activeTab.openAtPage}
+                                        rounded={false}
+                                    />
+                                </div>
+                            </div>
                         )
                     ) : (
                         <div className="flex items-center justify-center h-full px-8 bg-gray-100">

@@ -10,7 +10,7 @@ import {
 import type { WorkflowReferenceDocument } from "../shared/types";
 import {
   deleteWorkflowReferenceFile,
-  getWorkflowReferenceUrl,
+  downloadWorkflowReferenceFile,
   listWorkflowReferenceFiles,
   replaceWorkflowReferenceFile,
   uploadWorkflowReferenceFile,
@@ -175,11 +175,11 @@ export const WorkflowReferenceFiles = forwardRef<
   async function download(file: WorkflowReferenceDocument) {
     setBusyId(file.id);
     try {
-      const resolved = await getWorkflowReferenceUrl(workflowId, file.id);
-      const anchor = document.createElement("a");
-      anchor.href = resolved.url;
-      anchor.download = resolved.filename || file.filename;
-      anchor.click();
+      await downloadWorkflowReferenceFile(
+        workflowId,
+        file.id,
+        file.filename,
+      );
     } catch (caught) {
       setError(caught instanceof Error ? caught.message : "Download failed.");
     } finally {

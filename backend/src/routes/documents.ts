@@ -284,6 +284,10 @@ documentsRouter.get("/:documentId/text", requireAuth, async (req, res) => {
 // GET /single-documents/:documentId/url
 // Optional ?version_id= selects a specific tracked-changes version.
 // Otherwise falls back to documents.current_version_id, else the original upload.
+// GET /single-documents/:documentId/url
+// ⚠️ Hands back a link into the file store. That store answers on an address
+// only the server can reach, so this is no use to a browser — see
+// /:documentId/file, which is what the app actually downloads through.
 documentsRouter.get("/:documentId/url", requireAuth, async (req, res) => {
   const userId = res.locals.userId as string;
   const userEmail = res.locals.userEmail as string | undefined;
@@ -335,6 +339,54 @@ documentsRouter.get("/:documentId/url", requireAuth, async (req, res) => {
 // specific tracked-changes version. Unlike /url, this bypasses R2 (avoids
 // the browser CORS problem on signed URLs) so the frontend docx-preview
 // viewer can load tracked-change documents directly.
+// GET /single-documents/:documentId/file
+// The document itself, handed over by the backend rather than by a link
+// into the file store. The store answers on an address only the server can
+// reach, and over plain http, so a link to it made the browser warn that the
+// site was not secure and then fail to fetch anything.
+documentsRouter.get("/:documentId/file", requireAuth, async (req, res) => {
+  const userId = res.locals.userId as string;
+  const userEmail = res.locals.userEmail as string | undefined;
+  const { documentId } = req.params;
+  const versionIdParam =
+    typeof req.query.version_id === "string" ? req.query.version_id : null;
+  const db = createServerSupabase();
+
+  const { data: doc, error } = await db
+    .from("documents")
+    .select("id, user_id, project_id")
+    .eq("id", documentId)
+    .single();
+  if (error || !doc)
+    return void res.status(404).json({ detail: "Document not found" });
+  const access = await ensureDocReadAccess(doc, userId, userEmail, db);
+  if (!access.ok)
+    return void res.status(404).json({ detail: "Document not found" });
+
+  const active = await loadActiveVersion(documentId, db, versionIdParam);
+  if (!active)
+    return void res.status(404).json({ detail: "No file available" });
+
+  const raw = await downloadFile(active.storage_path);
+  if (!raw)
+    return void res.status(404).json({ detail: "Document bytes not available" });
+
+  const filename = downloadFilenameForVersion(
+    active.filename,
+    active.version_number,
+    active.source === "assistant_edit",
+  );
+  const suffix = filename.includes(".")
+    ? filename.split(".").pop()?.toLowerCase()
+    : "";
+  res.setHeader("Content-Type", contentTypeForDocumentType(suffix));
+  res.setHeader(
+    "Content-Disposition",
+    buildContentDisposition("attachment", filename),
+  );
+  res.send(Buffer.from(raw));
+});
+
 documentsRouter.get("/:documentId/docx", requireAuth, async (req, res) => {
   const userId = res.locals.userId as string;
   const userEmail = res.locals.userEmail as string | undefined;
