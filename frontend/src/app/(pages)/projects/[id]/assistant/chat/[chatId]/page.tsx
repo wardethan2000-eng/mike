@@ -166,7 +166,7 @@ function DocxViewWithActions({
                 versionId={activeTab.versionId ?? null}
                 filename={activeTab.filename}
             />
-            <div className="min-h-0 flex-1">{children}</div>
+            <div className="flex min-h-0 flex-1 flex-col">{children}</div>
         </div>
     );
 }
@@ -1461,7 +1461,7 @@ export default function ProjectAssistantChatPage({ params }: Props) {
                                     versionId={activeTab.versionId ?? null}
                                     filename={activeTab.filename}
                                 />
-                                <div className="min-h-0 flex-1">
+                                <div className="flex min-h-0 flex-1 flex-col">
                                     <RichDocxEditor
                                         key={`${activeTab.documentId}:${activeTab.refetchKey ?? 0}`}
                                         documentId={activeTab.documentId}
@@ -1526,7 +1526,7 @@ export default function ProjectAssistantChatPage({ params }: Props) {
                                     versionId={activeTab.versionId ?? null}
                                     filename={activeTab.filename}
                                 />
-                                <div className="min-h-0 flex-1">
+                                <div className="flex min-h-0 flex-1 flex-col">
                                     <SpreadsheetView
                                         key={activeTab.documentId}
                                         documentId={activeTab.documentId}
@@ -1542,7 +1542,7 @@ export default function ProjectAssistantChatPage({ params }: Props) {
                                     versionId={activeTab.versionId ?? null}
                                     filename={activeTab.filename}
                                 />
-                                <div className="min-h-0 flex-1">
+                                <div className="flex min-h-0 flex-1 flex-col">
                                     <PdfView
                                         key={activeTab.documentId}
                                         doc={{

@@ -100,6 +100,48 @@ export function RichDocxEditor({
     const savingRef = useRef(false);
     const pendingRef = useRef(false);
     const savedVersionRef = useRef<string | null>(null);
+    // The width the pages were last sized for, so a resize that changes
+    // nothing does not send us round the loop again.
+    const fittedWidthRef = useRef(0);
+
+    /**
+     * Shrink each page so it fits the width of the panel. `zoom` rather than a
+     * transform, because zoom shrinks the layout box too, so the scrollable
+     * height comes out right and the document can be scrolled.
+     *
+     * Measuring has to happen at zoom 1: a page already shrunk reports its
+     * shrunken width, and fitting that again would shrink it every time.
+     */
+    const fitPagesToWidth = useCallback((force = false) => {
+        const scrollEl = scrollRef.current;
+        const containerEl = containerRef.current;
+        if (!scrollEl || !containerEl) return;
+        const available = scrollEl.clientWidth - 40;
+        // A panel with no width yet tells us nothing. Sizing to it is what
+        // made the document come out tiny.
+        if (available <= 0) return;
+        if (!force && Math.abs(available - fittedWidthRef.current) < 2) return;
+        fittedWidthRef.current = available;
+        containerEl
+            .querySelectorAll<HTMLElement>("section.docx")
+            .forEach((page) => {
+                page.style.zoom = "1";
+                const width = page.offsetWidth;
+                if (width) {
+                    page.style.zoom = String(Math.min(1, available / width));
+                }
+            });
+    }, []);
+
+    // Re-fit whenever the panel changes size — these panels can be dragged
+    // wider and narrower, and the document has to follow.
+    useEffect(() => {
+        const scrollEl = scrollRef.current;
+        if (!scrollEl || typeof ResizeObserver === "undefined") return;
+        const observer = new ResizeObserver(() => fitPagesToWidth());
+        observer.observe(scrollEl);
+        return () => observer.disconnect();
+    }, [fitPagesToWidth]);
 
     const [loading, setLoading] = useState(true);
     const [error, setError] = useState<string | null>(null);
@@ -471,18 +513,10 @@ export function RichDocxEditor({
                 });
                 if (cancelled) return;
 
-                // Fit each page to the panel width.
-                const wrapper =
-                    containerEl.querySelector<HTMLElement>(".docx-wrapper");
-                if (wrapper) {
-                    const avail = scrollEl.clientWidth - 40;
-                    wrapper
-                        .querySelectorAll<HTMLElement>("section.docx")
-                        .forEach((s) => {
-                            const w = s.offsetWidth;
-                            if (w) s.style.zoom = String(Math.min(1, avail / w));
-                        });
-                }
+                // Fit the pages to the panel. The panel may still be
+                // laying out, in which case its width is not knowable yet and
+                // the resize watcher above does it a moment later.
+                fitPagesToWidth(true);
 
                 // Make the body editable (header/footer stay locked).
                 try {
@@ -551,7 +585,7 @@ export function RichDocxEditor({
             cancelled = true;
             if (saveTimer.current) clearTimeout(saveTimer.current);
         };
-    }, [documentId, bodyParagraphEls, reloadKey]);
+    }, [documentId, bodyParagraphEls, reloadKey, fitPagesToWidth]);
 
     const ToolbarButton = ({
         onClick,
